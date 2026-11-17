@@ -57,6 +57,12 @@ def _namespace_prefix(mode: str) -> list[str]:
     return ["unshare", "--user", "--map-root-user", "--mount", "--propagation", "private", "--"]
 
 
+def _drop_prefix() -> list[str]:
+    """Re-enter as the caller's own uid/gid in a nested user namespace, so the
+    command does not run as root over the overlay (needs util-linux >= 2.38)."""
+    return ["unshare", "--user", "--map-user", str(os.getuid()), "--map-group", str(os.getgid()), "--"]
+
+
 def _mount_options(lowers: Iterable[Path], upper: Path, workdir: Path, userxattr: bool) -> str:
     options = f"lowerdir={':'.join(str(p) for p in lowers)},upperdir={upper},workdir={workdir}"
     if userxattr:
@@ -85,12 +91,13 @@ def probe_overlay(directory: Path) -> dict[str, Any] | None:
     if forced == "0":
         _probe_cache[dev] = None
         return None
-    candidates: list[tuple[str, bool]] = []
+    # (namespace mode, userxattr option, re-enter as the caller's uid), best first.
+    candidates: list[tuple[str, bool, bool]] = []
     if os.geteuid() == 0:
-        candidates.append(("root", False))
-    candidates += [("userns", True), ("userns", False)]
+        candidates.append(("root", False, False))
+    candidates += [("userns", True, True), ("userns", False, True), ("userns", True, False), ("userns", False, False)]
     result: dict[str, Any] | None = None
-    for mode, userxattr in candidates:
+    for mode, userxattr, drop in candidates:
         probe = directory / f".tri-overlay-probe-{uuid.uuid4().hex}"
         try:
             lower, upper, work, merged = (probe / name for name in ("lower", "upper", "work", "merged"))
@@ -102,6 +109,7 @@ def probe_overlay(directory: Path) -> dict[str, Any] | None:
             deletions.write_text("gone\n")
             if any(_unsafe_for_options(p) for p in (lower, upper, work)):
                 break
+            check = f"test \"$(id -u)\" = {os.getuid()} && " if drop else ""
             argv = _namespace_prefix(mode) + [
                 "sh",
                 "-c",
@@ -110,13 +118,14 @@ def probe_overlay(directory: Path) -> dict[str, Any] | None:
                 _mount_options([lower], upper, work, userxattr),
                 str(merged),
                 str(deletions),
+                *(_drop_prefix() if drop else []),
                 "sh",
                 "-c",
-                "echo new > new && cat keep >/dev/null",
+                check + "echo new > new && cat keep >/dev/null",
             ]
             proc = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False)
             if proc.returncode == 0 and (upper / "new").is_file() and _is_whiteout(upper / "gone") and not (lower / "new").exists():
-                result = {"mode": mode, "userxattr": userxattr}
+                result = {"mode": mode, "userxattr": userxattr, "drop_root": drop}
         except (OSError, subprocess.TimeoutExpired):
             result = None
         finally:
@@ -163,6 +172,7 @@ class OverlayMaterialization(Materialization):
     deletions_file: Path = field(default_factory=Path)
     mode: str = "userns"
     userxattr: bool = True
+    drop_root: bool = False
     prepopulated: dict[str, list[int]] = field(default_factory=dict)
 
     @property
@@ -183,12 +193,13 @@ class OverlayMaterialization(Materialization):
             _mount_options([Path(p) for p in self.lowers], self.upper, self.workdir, self.userxattr),
             str(self.path),
             str(self.deletions_file),
+            *(_drop_prefix() if self.drop_root else []),
             *argv,
         ]
 
     def describe(self) -> dict[str, Any]:
         data = super().describe()
-        data["overlay"] = {"mode": self.mode, "userxattr": self.userxattr, "layers": len(self.lowers)}
+        data["overlay"] = {"mode": self.mode, "userxattr": self.userxattr, "drop_root": self.drop_root, "layers": len(self.lowers)}
         return data
 
     def save_baseline(self, file: Path) -> None:
@@ -210,6 +221,7 @@ class OverlayMaterialization(Materialization):
                 "deletions_file": str(self.deletions_file),
                 "mode": self.mode,
                 "userxattr": self.userxattr,
+                "drop_root": self.drop_root,
                 "prepopulated": self.prepopulated,
             },
         }
@@ -242,6 +254,7 @@ def overlay_from_payload(path: Path, payload: dict[str, Any]) -> OverlayMaterial
         deletions_file=Path(info["deletions_file"]),
         mode=info.get("mode", "userns"),
         userxattr=bool(info.get("userxattr", True)),
+        drop_root=bool(info.get("drop_root", False)),
         prepopulated={k: list(v) for k, v in info.get("prepopulated", {}).items()},
     )
 
@@ -441,5 +454,6 @@ def prepare_overlay_run(
         deletions_file=deletions_file,
         mode=info["mode"],
         userxattr=bool(info["userxattr"]),
+        drop_root=bool(info.get("drop_root", False)),
         prepopulated=prepopulated,
     )

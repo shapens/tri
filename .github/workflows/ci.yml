@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Unit and CLI tests
+        run: python -m unittest discover -s tests -v
+      - name: Doctor reports the materialization backend
+        run: |
+          python -m tri doctor | python -c "import json,sys; d=json.load(sys.stdin)['data']['materialization']; print(json.dumps(d['store_volume'], indent=2))"
+
+  windows:
+    # The Windows port (store lock, ReFS clone, symlink fallbacks) has not been
+    # verified yet; keep the job informational until it is green.
+    name: test (windows-latest, informational)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Unit and CLI tests
+        shell: bash
+        run: python -m unittest discover -s tests -v
+
+  linux-overlay:
+    name: linux overlay backend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 restricts them via AppArmor)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Probe overlay support
+        run: python -c "from pathlib import Path; import tempfile; from tri.overlay import probe_overlay; print(probe_overlay(Path(tempfile.mkdtemp())))"
+      - name: Bounded-disk tests on the overlay backend
+        env:
+          TRI_MATERIALIZE_BACKEND: overlay
+        run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
+
+  linux-reflink:
+    name: linux reflink clones (${{ matrix.fs }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [xfs, btrfs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Mount a ${{ matrix.fs }} loopback volume for temp directories
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xfsprogs btrfs-progs
+          truncate -s 4G "$RUNNER_TEMP/vol.img"
+          if [ "${{ matrix.fs }}" = xfs ]; then mkfs.xfs -q -m reflink=1 "$RUNNER_TEMP/vol.img"; else mkfs.btrfs -q "$RUNNER_TEMP/vol.img"; fi
+          sudo mkdir -p /mnt/vol
+          sudo mount -o loop "$RUNNER_TEMP/vol.img" /mnt/vol
+          sudo chown "$USER" /mnt/vol
+          echo "TMPDIR=/mnt/vol" >> "$GITHUB_ENV"
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Probe clone support
+        run: python -c "from pathlib import Path; from tri.materialize import probe_clone; m = probe_clone(Path('/mnt/vol')); print(m); assert m == 'ficlone', m"
+      - name: Bounded-disk tests on reflink clones
+        run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
