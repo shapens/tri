@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri.ignore import IgnoreRules
 from tri.locking import FileLock
-from tri.trees import decode_node, flatten as flatten_tree, is_hierarchical, write_tree
+from tri.trees import build_tree_nodes, decode_node, flatten as flatten_tree, is_hierarchical
 from tri.overlay import OverlayMaterialization, overlay_from_payload, prepare_overlay_run, probe_overlay
 from tri.materialize import (
     Attachment,
@@ -67,7 +67,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "import", "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]", "schema": "tri.import", "description": "Import a Git repo or directory into Tri snapshots."},
     {"name": "projects-list", "usage": "tri projects list", "schema": "tri.project.list", "description": "List projects in the local Tri store."},
     {"name": "projects-inspect", "usage": "tri projects inspect <project>", "schema": "tri.project.inspect", "description": "Inspect project metadata and child object counts."},
-    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
+    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>] [--unsafe-no-grace]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
     {"name": "env-define", "usage": "tri env define <project> <name> --install <cmd> --output <path> [--output <path>] [--key-file <glob>] [--key-command <cmd>] [--mode auto|copy|link|private]", "schema": "tri.env.recipe", "description": "Declare a dependency environment built once per key (key files + key commands + platform) and shared read-only by runs and mounts."},
     {"name": "env-list", "usage": "tri env list <project>", "schema": "tri.env.list", "description": "List environment recipes."},
     {"name": "env-inspect", "usage": "tri env inspect <project> <name>", "schema": "tri.env.inspect", "description": "Inspect an environment recipe and its cached builds."},
@@ -285,7 +285,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.env.list": {"required": ["project", "recipes"]},
     "tri.env.inspect": {"required": ["recipe", "builds"]},
     "tri.lease.list": {"required": ["workspace", "leases"]},
-    "tri.lease.reap": {"required": ["reaped", "salvaged", "needs_attention", "errors", "checked", "busy"]},
+    "tri.lease.reap": {"required": ["reaped", "salvaged", "needs_attention", "errors", "checked", "busy", "swept"]},
     "tri.salvage.list": {"required": ["workspace", "salvages"]},
     "tri.salvage.adopt": {"required": ["salvage", "workspace", "operation", "snapshot", "paths"]},
     "tri.disk_lease.inspect": {"required": ["id", "kind", "path", "workspace", "status", "backend", "created_at", "released_at"]},
@@ -1145,8 +1145,33 @@ class Store:
 
     def put_tree(self, entries: dict[str, dict[str, Any]]) -> dict[str, str]:
         """Store ``entries`` as directory-level nodes; unchanged directories are shared."""
-        tree_id, digest = write_tree(entries, self._store_tree_row)
+        tree_id, digest, nodes = build_tree_nodes(entries)
+        self._store_tree_rows(nodes)
         return {"id": tree_id, "hash": digest}
+
+    def _store_tree_rows(self, nodes: list[tuple[str, str, str]]) -> None:
+        """Write tree nodes in bulk: one lookup, inserts for new nodes, one touch
+        (which also protects them from a concurrent GC) for existing ones."""
+        unique = {tree_id: (digest, stored) for tree_id, digest, stored in nodes}
+        ids = list(unique)
+        existing: dict[str, Any] = {}
+        for offset in range(0, len(ids), 900):
+            chunk = ids[offset : offset + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(f"SELECT id, purged_at FROM trees WHERE id IN ({placeholders})", chunk):
+                existing[row["id"]] = row["purged_at"]
+        now = utcnow()
+        missing = [(tree_id, unique[tree_id][0], unique[tree_id][1], now, now) for tree_id in ids if tree_id not in existing]
+        if missing:
+            self.conn.executemany("INSERT OR IGNORE INTO trees (id, hash, entries_json, created_at, last_referenced_at) VALUES (?, ?, ?, ?, ?)", missing)
+        for tree_id, purged_at in existing.items():
+            if purged_at:
+                self._store_tree_row(tree_id, unique[tree_id][0], unique[tree_id][1])
+        live = [tree_id for tree_id, purged_at in existing.items() if not purged_at]
+        for offset in range(0, len(live), 900):
+            chunk = live[offset : offset + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(f"UPDATE trees SET last_referenced_at = ? WHERE id IN ({placeholders})", (now, *chunk))
 
     def _store_tree_row(self, tree_id: str, digest: str, stored_entries: str) -> None:
         now = utcnow()
@@ -6820,7 +6845,7 @@ def reap_leases(
     explicit = force_lease is not None or workspace_id is not None
     if not reaper_lock.acquire(exclusive=True, blocking=explicit):
         reaper_lock.close()
-        return {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": True}
+        return {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": True, "swept": []}
     try:
         return _reap_leases_locked(store, actor=actor, limit=limit, force_lease=force_lease, workspace_id=workspace_id, reason=reason, force=force)
     finally:
@@ -6837,7 +6862,7 @@ def _reap_leases_locked(
     reason: str | None,
     force: bool = True,
 ) -> dict[str, Any]:
-    report: dict[str, Any] = {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": False}
+    report: dict[str, Any] = {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": False, "swept": []}
 
     def record(result: dict[str, Any] | None) -> None:
         if result is None:
@@ -6896,8 +6921,53 @@ def _reap_leases_locked(
             continue
         budget -= 1
         attempt(lambda mount=mount, why=why: reap_mount_lease(store, mount, actor=actor, reason=why), mount["id"])
+    if workspace_id is None and force_lease is None:
+        report["swept"] = sweep_orphan_dirs(store)
     store_meta_set(store, "last_reap_at", utcnow())
     return report
+
+
+ORPHAN_DIR_MIN_AGE_SECONDS = 600
+STAGING_DIR_MIN_AGE_SECONDS = 3600
+
+
+def sweep_orphan_dirs(store: Store) -> list[str]:
+    """Remove run directories no active lease owns (crashes before the lease row
+    was written, leaks from older versions) and stale env staging directories."""
+    swept: list[str] = []
+    now = time.time()
+    owned = {Path(row["path"]).parent.name for row in store.rows("SELECT path FROM disk_leases WHERE status IN ('active', 'reaping')")}
+    if store.runs.exists():
+        for child in store.runs.iterdir():
+            if child.name in owned:
+                continue
+            try:
+                if now - child.lstat().st_mtime < ORPHAN_DIR_MIN_AGE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            holder = child / ".holder.lock"
+            if holder.exists():
+                probe = FileLock(holder)
+                try:
+                    if not probe.acquire(exclusive=True, blocking=False):
+                        continue
+                finally:
+                    probe.close()
+            remove_tree(child)
+            swept.append(str(child))
+    envs = store.home / "envs"
+    if envs.exists():
+        for child in envs.iterdir():
+            if child.name.startswith(".") and child.name.endswith(".tmp"):
+                try:
+                    if now - child.lstat().st_mtime < STAGING_DIR_MIN_AGE_SECONDS:
+                        continue
+                except OSError:
+                    continue
+                remove_tree(child)
+                swept.append(str(child))
+    return swept
 
 
 def maybe_auto_reap(store: Store) -> None:
@@ -6911,8 +6981,14 @@ def maybe_auto_reap(store: Store) -> None:
         except ValueError:
             pass
     store_meta_set(store, "last_reap_at", utcnow())
-    reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
-    evict_caches(store)
+    try:
+        reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
+        evict_caches(store)
+    except Exception as exc:  # maintenance never fails the user's command; surface it in doctor
+        store_meta_set(store, "last_reap_error", f"{utcnow()} {type(exc).__name__}: {exc}")
+        return
+    with store.conn:
+        store.conn.execute("DELETE FROM store_meta WHERE key = 'last_reap_error'")
 
 
 def start_reaper_thread(interval: float = SERVE_REAP_INTERVAL_SECONDS) -> threading.Event:
@@ -6948,6 +7024,7 @@ def lease_status_summary(store: Store) -> dict[str, Any]:
         "needs_attention": attention,
         "grandfathered": grandfathered,
         "last_reap_at": store_meta_get(store, "last_reap_at"),
+        "last_reap_error": store_meta_get(store, "last_reap_error"),
     }
 
 
@@ -7242,6 +7319,24 @@ def _record_env_build(store: Store, key: str, recipe: sqlite3.Row, **fields: Any
             store.conn.execute(f"UPDATE env_builds SET {columns} WHERE key = ?", (*fields.values(), key))
 
 
+def claim_env_for_use(store: Store, key: str) -> bool:
+    """Mark a ready env as just used; fails if eviction claimed it first."""
+    with store.conn:
+        return store.conn.execute("UPDATE env_builds SET last_used_at = ? WHERE key = ? AND status = 'ready'", (utcnow(), key)).rowcount == 1
+
+
+def claim_env_for_eviction(store: Store, row: sqlite3.Row) -> bool:
+    """Claim an env for eviction only if nobody used it since ``row`` was read."""
+    with store.conn:
+        return (
+            store.conn.execute(
+                "UPDATE env_builds SET status = 'evicting' WHERE key = ? AND status = 'ready' AND last_used_at = ?",
+                (row["key"], row["last_used_at"]),
+            ).rowcount
+            == 1
+        )
+
+
 def ensure_env(store: Store, recipe: sqlite3.Row, entries: dict[str, dict[str, Any]], *, actor: str, workspace: sqlite3.Row | None) -> tuple[sqlite3.Row, str]:
     """Return a ready shared environment for ``entries``, building it once per key."""
     key, inputs = env_key(recipe, entries)
@@ -7255,16 +7350,14 @@ def ensure_env(store: Store, recipe: sqlite3.Row, entries: dict[str, dict[str, A
         return None
 
     row = ready_row()
-    if row is not None:
-        with store.conn:
-            store.conn.execute("UPDATE env_builds SET last_used_at = ? WHERE key = ?", (utcnow(), key))
-        return row, "reused"
+    if row is not None and claim_env_for_use(store, key):
+        return store.row("SELECT * FROM env_builds WHERE key = ?", (key,)), "reused"
     key_lock = FileLock(envs_root / f".{key}.lock")
     key_lock.acquire(exclusive=True)
     try:
         row = ready_row()
-        if row is not None:
-            return row, "reused"
+        if row is not None and claim_env_for_use(store, key):
+            return store.row("SELECT * FROM env_builds WHERE key = ?", (key,)), "reused"
         _record_env_build(store, key, recipe, status="building", error_json=None)
         build = RunLease(store, kind="env_build", key=f"envbuild_{key}_{uuid.uuid4().hex[:8]}", workspace_id=workspace["id"] if workspace is not None else None, before_snapshot=None)
         try:
@@ -7450,6 +7543,7 @@ def cmd_env_remove(store: Store, args: argparse.Namespace, command: list[str], s
 
 GC_RETENTION_DAYS = 14
 GC_GRACE_SECONDS = 3600
+GC_MIN_GRACE_SECONDS = 60
 ROOT_SNAPSHOT_SOURCES = ("imported", "merge")
 
 
@@ -7592,11 +7686,14 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
             freed = 0
             purged_blobs = 0
             purged_trees = 0
+            purged_hashes: list[str] = []
+            purged_tree_ids: list[str] = []
             for row in computed["blob_rows"]:
                 current = store.conn.execute("SELECT purged_at, created_at, last_referenced_at FROM blobs WHERE id = ?", (row["id"],)).fetchone()
                 if current is None or current["purged_at"] or (current["last_referenced_at"] or current["created_at"]) >= mark_start:
                     continue
                 purged_blobs += 1
+                purged_hashes.append(row["hash"])
                 store.conn.execute("UPDATE blobs SET purged_at = ? WHERE id = ?", (now, row["id"]))
                 path = blob_object_path(store, row)
                 try:
@@ -7610,6 +7707,7 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
                 if current is None or current["purged_at"] or (current["last_referenced_at"] or current["created_at"]) >= mark_start:
                     continue
                 purged_trees += 1
+                purged_tree_ids.append(row["id"])
                 store.conn.execute("UPDATE trees SET purged_at = ?, entries_json = '' WHERE id = ?", (now, row["id"]))
             store._tree_cache.clear()
             store.create_event(
@@ -7621,6 +7719,19 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
         except BaseException:
             store.conn.rollback()
             raise
+        # Purged bytes must not linger in derived caches (matters when GC is used
+        # to scrub leaked content).
+        for digest in purged_hashes:
+            for suffix in ("", ".x"):
+                try:
+                    (store.checkout / digest[:2] / (digest + suffix)).unlink()
+                except FileNotFoundError:
+                    pass
+        for tree_id in purged_tree_ids:
+            for name in (tree_id, f"{tree_id}.links"):
+                base = store.home / "bases" / name
+                if base.exists():
+                    remove_tree(base)
         return {"blobs": purged_blobs, "trees": purged_trees, "freed_bytes": freed}
     finally:
         gc_lock.close()
@@ -7675,6 +7786,8 @@ def evict_caches(store: Store) -> dict[str, Any]:
         if total <= env_budget:
             break
         if row["key"] in protected or row["last_used_at"] > grace:
+            continue
+        if not claim_env_for_eviction(store, row):
             continue
         remove_tree(Path(row["path"]))
         with store.conn:
@@ -7732,6 +7845,12 @@ def cmd_gc(store: Store, args: argparse.Namespace, command: list[str], start: fl
     grace = GC_GRACE_SECONDS if args.grace_seconds is None else args.grace_seconds
     if retention < 0 or grace < 0:
         raise TriError("invalid_command", "Retention and grace must be non-negative.")
+    if grace < GC_MIN_GRACE_SECONDS and not args.unsafe_no_grace:
+        raise TriError(
+            "invalid_command",
+            f"A grace period under {GC_MIN_GRACE_SECONDS} s can purge content a command has written but not yet committed; pass --unsafe-no-grace only when nothing else is using the store.",
+            grace_seconds=grace,
+        )
     data: dict[str, Any] = {"applied": bool(args.apply), "reaped": None, "evicted": None, "purged": None}
     if args.reap or args.apply:
         data["reaped"] = reap_leases(store, actor=args.actor)
@@ -14487,6 +14606,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true")
     p.add_argument("--retention-days", type=float)
     p.add_argument("--grace-seconds", type=float)
+    p.add_argument("--unsafe-no-grace", action="store_true")
     p.set_defaults(func=cmd_gc)
 
     p = sub.add_parser("env")
