@@ -359,7 +359,7 @@ class Attachment:
 
     rel: str
     source: Path
-    mode: str  # "clone" | "link" | "copy" | "auto" (clone, else link) | "clone-only" (clone, else skip)
+    mode: str  # "clone" | "link" | "copy" | "auto" (clone, else copy) | "clone-only" (clone, else skip)
 
 
 @dataclass
@@ -675,7 +675,9 @@ class Materializer:
         source = Path(attachment.source)
         mode = attachment.mode
         if mode == "auto":
-            mode = "clone" if method is not None else "link"
+            # Tools write into dependency/build dirs (cargo target/, node_modules/.cache),
+            # so a run needs a private, writable copy when the volume cannot clone.
+            mode = "clone" if method is not None else "copy"
         elif mode == "clone-only":
             if method is None:
                 notes.append({"code": "attachment_not_cloned", "path": attachment.rel, "message": "Volume cannot clone; shared directory not attached (use --env-link to symlink it)."})

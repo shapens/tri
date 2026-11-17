@@ -228,6 +228,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
             "stale_materialization",
             "lease_already_reaped",
             "mount_path_in_use",
+            "materialization_degraded",
             "content_purged",
             "gc_in_progress",
             "salvage_already_adopted",
@@ -13750,8 +13751,8 @@ def directory_count(path: Path) -> int:
 
 def materialization_status(store: Store) -> dict[str, Any]:
     store.checkout.mkdir(parents=True, exist_ok=True)
-    method = probe_clone(store.checkout)
     override = os.environ.get("TRI_MATERIALIZE_BACKEND") or None
+    method = None if (override or "").lower() == "copy" else probe_clone(store.checkout)
     return {
         "store_volume": {
             "backend": "clone" if method else "copy",
@@ -14138,6 +14139,17 @@ def cmd_changeset_compare(store: Store, args: argparse.Namespace, command: list[
 
 class TriHTTPServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind resolves socket.getfqdn(host), a reverse DNS
+        # lookup that can stall for ~30 s on hosts with slow resolvers (seen on
+        # macOS CI). The name is only cosmetic, so use the host as given.
+        import socketserver
+
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
