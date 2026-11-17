@@ -1,0 +1,62 @@
+{
+  "schema": "tri.benchmark.fanout.v1",
+  "created_at": "2026-11-17T06:07:39Z",
+  "platform": "Darwin 25.3.0 arm64",
+  "parameters": {
+    "attempts": 2,
+    "parallel": 1,
+    "source_files": 2000,
+    "file_size": 1024,
+    "dep_files": 5000,
+    "dep_file_size": 2048,
+    "volume": "auto",
+    "repo": "/Users/bryantle/Documents/bryantleft/bruhs-ai",
+    "install": "cargo test -p bruhs-models --no-run --offline -q",
+    "check": "cargo test -p bruhs-models --offline -q",
+    "key_file": [
+      "Cargo.lock",
+      "rust-toolchain.toml"
+    ],
+    "env_output": [
+      "target"
+    ],
+    "edit_file": "bruhs-models/src/lib.rs"
+  },
+  "results": [
+    {
+      "target": "tri",
+      "status": "ok",
+      "measure": "volume-used",
+      "wall_s": 129.835,
+      "end_allocated_bytes": 1095360512,
+      "peak_allocated_bytes": 1941676032,
+      "per_attempt_bytes": 547680256,
+      "backends": [
+        "clone"
+      ],
+      "checks_passed": 2,
+      "attempt_seconds": [
+        32.736,
+        43.976
+      ],
+      "env_build_seconds": 48.034
+    },
+    {
+      "target": "git",
+      "status": "ok",
+      "measure": "volume-used",
+      "wall_s": 189.829,
+      "end_allocated_bytes": 2970882048,
+      "peak_allocated_bytes": 2974474240,
+      "per_attempt_bytes": 1485441024,
+      "backends": [
+        "worktree"
+      ],
+      "checks_passed": 2,
+      "attempt_seconds": [
+        59.726,
+        127.027
+      ]
+    }
+  ]
+}

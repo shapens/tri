@@ -1286,6 +1286,33 @@ class CleanupGapTests(TriHarness):
         self.assertIn("boom", doctor["last_reap_error"])
 
 
+class ClearCachesTests(TriHarness):
+    files = {"README.md": "hello\n", "deps.lock": "v1\n"}
+
+    def test_clear_caches_removes_unused_caches_but_keeps_live_ones(self) -> None:
+        home = Path(os.environ["TRI_HOME"])
+        self.tri("env", "define", "app", "deps", "--key-file", "deps.lock", "--install", "sh -c 'mkdir -p deps && echo x > deps/x'", "--output", "deps", "--mode", "link")
+        self.run_cmd(self.workspace(), "true")
+        self.tri("files", "write", self.workspace(), "deps.lock", "--text", "v2\n")
+        live_ws = self.workspace()
+        self.tri("files", "write", live_ws, "deps.lock", "--text", "v3\n")
+        mount = self.root / "m"
+        self.tri("workspace", "mount", live_ws, str(mount))
+        builds = {b["key"]: b for b in self.tri("env", "inspect", "app", "deps")["data"]["builds"]}
+        self.assertEqual(len(builds), 2)
+        result = self.tri("gc", "--clear-caches")["data"]
+        evicted = {e["key"] for e in result["evicted"]["envs"]}
+        self.assertEqual(len(evicted), 1, "the env linked into the live mount stays")
+        self.assertTrue((mount / "deps" / "x").exists())
+        self.assertEqual(self.tri("doctor")["data"]["materialization"]["caches"]["checkout_cache_bytes"], 0)
+        import shutil
+
+        self.tri("leases", "reap", self.tri("leases", "list", "--workspace", live_ws)["data"]["leases"][0]["id"], "--force")
+        self.tri("gc", "--clear-caches")
+        shutil.rmtree(home)  # a cleared store deletes with plain tools (no read-only leftovers)
+        self.assertFalse(home.exists())
+
+
 class CoarseTimestampTests(unittest.TestCase):
     def test_update_baseline_skips_racily_clean_entries(self) -> None:
         from tri.materialize import Materialization
