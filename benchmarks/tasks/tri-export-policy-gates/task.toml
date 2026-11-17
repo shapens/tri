@@ -1,0 +1,24 @@
+version = "1.0"
+
+[metadata]
+task_id = "tri-export-policy-gates"
+display_title = "Require checks and review before export"
+display_description = "Verify Tri blocks export until a changeset has passing check evidence and an approved review."
+category = "policy_workflow"
+language = "python"
+repository_url = "local:tri"
+base_commit_hash = "local"
+
+[verifier]
+timeout_sec = 180.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+docker_image = "local/tri-benchmark:python3.11"
+allow_internet = false
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 2048
+storage_mb = 4096

@@ -1,0 +1,8 @@
+{
+  "description": "Fast smoke scenario for local benchmark verification.",
+  "attempts": 1,
+  "mutations_per_attempt": 1,
+  "file_size": 256,
+  "files": 10,
+  "targets": ["tri", "git"]
+}

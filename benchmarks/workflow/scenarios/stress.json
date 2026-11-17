@@ -1,0 +1,10 @@
+{
+  "description": "Scaled adversarial workflow: more fixture data, more parallel attempts, multiple mutations per attempt, batched Git baseline, and Tri task verifier outcomes.",
+  "attempts": 5,
+  "mutations_per_attempt": 8,
+  "file_size": 2048,
+  "files": 500,
+  "repeats": 3,
+  "targets": ["tri", "tri-cli", "tri-http", "git", "git-batch", "gitbutler", "entire"],
+  "verify_tasks": true
+}

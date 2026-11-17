@@ -1,0 +1,9 @@
+{
+  "description": "Full trust run: Tri transports plus external source-control baselines, repeated for median wall-clock results.",
+  "attempts": 3,
+  "mutations_per_attempt": 1,
+  "file_size": 1024,
+  "files": 100,
+  "repeats": 5,
+  "targets": ["tri", "tri-cli", "tri-http", "git", "svn", "gitbutler", "entire"]
+}
