@@ -67,7 +67,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "import", "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]", "schema": "tri.import", "description": "Import a Git repo or directory into Tri snapshots."},
     {"name": "projects-list", "usage": "tri projects list", "schema": "tri.project.list", "description": "List projects in the local Tri store."},
     {"name": "projects-inspect", "usage": "tri projects inspect <project>", "schema": "tri.project.inspect", "description": "Inspect project metadata and child object counts."},
-    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>] [--unsafe-no-grace]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
+    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>] [--unsafe-no-grace] [--clear-caches]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
     {"name": "env-define", "usage": "tri env define <project> <name> --install <cmd> --output <path> [--output <path>] [--key-file <glob>] [--key-command <cmd>] [--mode auto|copy|link|private]", "schema": "tri.env.recipe", "description": "Declare a dependency environment built once per key (key files + key commands + platform) and shared read-only by runs and mounts."},
     {"name": "env-list", "usage": "tri env list <project>", "schema": "tri.env.list", "description": "List environment recipes."},
     {"name": "env-inspect", "usage": "tri env inspect <project> <name>", "schema": "tri.env.inspect", "description": "Inspect an environment recipe and its cached builds."},
@@ -7772,13 +7772,13 @@ def live_workspace_hashes(store: Store) -> set[str]:
     return hashes
 
 
-def evict_caches(store: Store) -> dict[str, Any]:
+def evict_caches(store: Store, *, clear: bool = False) -> dict[str, Any]:
     """Keep derived caches (checkout cache, base dirs, env builds) within budgets,
-    never removing what a live lease depends on."""
+    never removing what a live lease depends on. ``clear`` drops everything else."""
     report: dict[str, Any] = {"envs": [], "bases_removed": [], "checkout_cache_bytes_freed": 0}
     # Environment builds: LRU beyond the byte budget.
-    env_budget = env_int("TRI_ENV_CACHE_MAX_BYTES", 10 * 1024**3)
-    grace = iso_before(env_int("TRI_ENV_EVICT_GRACE_SECONDS", 600))
+    env_budget = -1 if clear else env_int("TRI_ENV_CACHE_MAX_BYTES", 10 * 1024**3)
+    grace = utcnow() if clear else iso_before(env_int("TRI_ENV_EVICT_GRACE_SECONDS", 600))
     protected = active_lease_env_keys(store)
     ready = store.rows("SELECT * FROM env_builds WHERE status = 'ready' ORDER BY last_used_at, created_at")
     total = sum(row["size_bytes"] or 0 for row in ready)
@@ -7797,7 +7797,7 @@ def evict_caches(store: Store) -> dict[str, Any]:
     # Base directories: keep the most recently used N.
     bases_root = store.home / "bases"
     if bases_root.exists():
-        keep = env_int("TRI_BASE_CACHE_MAX_COUNT", 8)
+        keep = 0 if clear else env_int("TRI_BASE_CACHE_MAX_COUNT", 8)
         in_use = active_overlay_lowers(store)
         stale_tmp = iso_before(3600)
         candidates = []
@@ -7816,7 +7816,7 @@ def evict_caches(store: Store) -> dict[str, Any]:
             report["bases_removed"].append(child.name)
     # Checkout cache: drop blobs no live workspace needs, then everything if still over.
     cache = store.materializer.cache
-    budget = env_int("TRI_CHECKOUT_CACHE_MAX_BYTES", 2 * 1024**3)
+    budget = -1 if clear else env_int("TRI_CHECKOUT_CACHE_MAX_BYTES", 2 * 1024**3)
     size = cache.size_bytes()
     if size > budget and cache.root.exists():
         live = live_workspace_hashes(store)
@@ -7855,6 +7855,8 @@ def cmd_gc(store: Store, args: argparse.Namespace, command: list[str], start: fl
     if args.reap or args.apply:
         data["reaped"] = reap_leases(store, actor=args.actor)
         data["evicted"] = evict_caches(store)
+    if args.clear_caches:
+        data["evicted"] = evict_caches(store, clear=True)
     data["plan"] = gc_plan_summary(store, gc_compute(store, retention_days=retention, grace_seconds=grace))
     if args.apply:
         data["purged"] = gc_apply(store, retention_days=retention, grace_seconds=grace)
@@ -14607,6 +14609,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retention-days", type=float)
     p.add_argument("--grace-seconds", type=float)
     p.add_argument("--unsafe-no-grace", action="store_true")
+    p.add_argument("--clear-caches", action="store_true")
     p.set_defaults(func=cmd_gc)
 
     p = sub.add_parser("env")
