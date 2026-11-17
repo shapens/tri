@@ -1,0 +1,2371 @@
+{
+  "config": {
+    "attempts": 3,
+    "file_size": 256,
+    "files": 10,
+    "keep_workdir": false,
+    "targets": [
+      "tri",
+      "git",
+      "svn",
+      "gitbutler",
+      "entire"
+    ]
+  },
+  "created_at": "2026-05-29T04:31:55Z",
+  "environment": {
+    "entire": "/opt/homebrew/bin/entire",
+    "git": "/opt/homebrew/bin/git",
+    "gitbutler": "/Users/bryantle/.local/bin/but",
+    "platform": "macOS-26.3-arm64-arm-64bit",
+    "python": "3.11.8 (main, Jan  6 2025, 00:18:33) [Clang 15.0.0 (clang-1500.3.9.4)]",
+    "svn": "/opt/homebrew/bin/svn",
+    "svnadmin": "/opt/homebrew/bin/svnadmin",
+    "tri": "/Users/bryantle/.pyenv/versions/3.11.8/bin/tri"
+  },
+  "schema": "tri.benchmark.agentic.v0",
+  "targets": [
+    {
+      "details": {
+        "batch_commands": 21,
+        "changesets": [
+          "cs_998b8047a742",
+          "cs_663307a1df63",
+          "cs_66f65b69e876"
+        ],
+        "doctor_counts": {
+          "advisories": 0,
+          "artifacts": 7,
+          "blobs": 14,
+          "changesets": 3,
+          "check_runs": 3,
+          "check_sets": 0,
+          "events": 36,
+          "exports": 1,
+          "materialization_leases": 0,
+          "operations": 3,
+          "package_boundaries": 0,
+          "policy_grants": 0,
+          "projects": 1,
+          "releases": 0,
+          "review_actions": 1,
+          "reviews": 1,
+          "secret_leases": 0,
+          "secret_refs": 0,
+          "snapshots": 4,
+          "targets": 1,
+          "task_runs": 3,
+          "tasks": 3,
+          "trees": 4,
+          "workspace_conflicts": 0,
+          "workspaces": 3
+        },
+        "transport": "embedded_batch"
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 5.079
+        },
+        {
+          "kind": "action",
+          "name": "tri.batch.plan",
+          "ok": true,
+          "wall_ms": 0.433
+        },
+        {
+          "kind": "embedded",
+          "name": "tri.batch",
+          "ok": true,
+          "response_bytes": 622,
+          "schema": "tri.batch",
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "tri_events": 0,
+          "wall_ms": 387.442
+        }
+      ],
+      "target": "tri",
+      "totals": {
+        "actions": 2,
+        "commands": 0,
+        "requests": 0,
+        "stderr_bytes": 0,
+        "stdin_bytes": 0,
+        "stdout_bytes": 0,
+        "step_wall_ms": 392.954,
+        "store_bytes": 15378,
+        "wall_ms": 416.843
+      }
+    },
+    {
+      "details": {
+        "branches": [
+          "agent-0",
+          "agent-1",
+          "agent-2"
+        ]
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 2.826
+        },
+        {
+          "argv": [
+            "git",
+            "init",
+            "-b",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.init",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 141,
+          "wall_ms": 38.701
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.email",
+            "bench@example.com"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.config.email",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 18.281
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.name",
+            "Tri Bench"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.config.name",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 21.371
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "."
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.add.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 31.626
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "initial"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.commit.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 483,
+          "wall_ms": 54.176
+        },
+        {
+          "argv": [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "agent-0",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-0",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.worktree.add.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 42,
+          "stdin_bytes": 0,
+          "stdout_bytes": 31,
+          "wall_ms": 68.025
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.0",
+          "ok": true,
+          "wall_ms": 0.505
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.0",
+          "ok": true,
+          "wall_ms": 0.281
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--",
+            "src/agent_0.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-0",
+          "kind": "command",
+          "name": "git.diff.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 21.895
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_0.txt').read_text().startswith('agent 0 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-0",
+          "kind": "command",
+          "name": "check.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 68.697
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "src/agent_0.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-0",
+          "kind": "command",
+          "name": "git.add.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 26.273
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "agent 0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-0",
+          "kind": "command",
+          "name": "git.commit.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 94,
+          "wall_ms": 58.139
+        },
+        {
+          "argv": [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "agent-1",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-1",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.worktree.add.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 42,
+          "stdin_bytes": 0,
+          "stdout_bytes": 31,
+          "wall_ms": 88.958
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.1",
+          "ok": true,
+          "wall_ms": 0.602
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.1",
+          "ok": true,
+          "wall_ms": 0.146
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--",
+            "src/agent_1.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-1",
+          "kind": "command",
+          "name": "git.diff.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 23.447
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_1.txt').read_text().startswith('agent 1 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-1",
+          "kind": "command",
+          "name": "check.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 68.279
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "src/agent_1.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-1",
+          "kind": "command",
+          "name": "git.add.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 32.411
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "agent 1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-1",
+          "kind": "command",
+          "name": "git.commit.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 94,
+          "wall_ms": 61.077
+        },
+        {
+          "argv": [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "agent-2",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-2",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.worktree.add.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 42,
+          "stdin_bytes": 0,
+          "stdout_bytes": 31,
+          "wall_ms": 120.017
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.2",
+          "ok": true,
+          "wall_ms": 0.526
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.2",
+          "ok": true,
+          "wall_ms": 0.122
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--",
+            "src/agent_2.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-2",
+          "kind": "command",
+          "name": "git.diff.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 24.088
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_2.txt').read_text().startswith('agent 2 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-2",
+          "kind": "command",
+          "name": "check.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 71.558
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "src/agent_2.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-2",
+          "kind": "command",
+          "name": "git.add.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 25.791
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "agent 2"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-wt-2",
+          "kind": "command",
+          "name": "git.commit.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 94,
+          "wall_ms": 67.399
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--name-only",
+            "agent-0...agent-1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.compare.branches",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 16,
+          "wall_ms": 25.103
+        },
+        {
+          "argv": [
+            "git",
+            "format-patch",
+            "-1",
+            "--stdout",
+            "agent-0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/git/git-source",
+          "kind": "command",
+          "name": "git.format_patch",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 437,
+          "wall_ms": 22.78
+        },
+        {
+          "kind": "action",
+          "name": "git.patch.write",
+          "ok": true,
+          "wall_ms": 0.662
+        }
+      ],
+      "target": "git",
+      "totals": {
+        "actions": 8,
+        "commands": 22,
+        "requests": 0,
+        "stderr_bytes": 126,
+        "stdin_bytes": 0,
+        "stdout_bytes": 1452,
+        "step_wall_ms": 1043.762,
+        "store_bytes": 47136,
+        "wall_ms": 1048.0
+      }
+    },
+    {
+      "details": {
+        "branches": [
+          "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-0",
+          "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-1",
+          "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-2"
+        ]
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 2.256
+        },
+        {
+          "argv": [
+            "svnadmin",
+            "create",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svnadmin.create",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 74.645
+        },
+        {
+          "argv": [
+            "svn",
+            "import",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-fixture",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/trunk",
+            "-m",
+            "initial"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.import.trunk",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1526,
+          "wall_ms": 130.234
+        },
+        {
+          "argv": [
+            "svn",
+            "mkdir",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches",
+            "-m",
+            "branches"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.mkdir.branches",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 48,
+          "wall_ms": 78.716
+        },
+        {
+          "argv": [
+            "svn",
+            "copy",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/trunk",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-0",
+            "-m",
+            "agent 0 branch"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.copy.branch.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 48,
+          "wall_ms": 76.808
+        },
+        {
+          "argv": [
+            "svn",
+            "checkout",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-0",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.checkout.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1346,
+          "wall_ms": 1168.319
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.0",
+          "ok": true,
+          "wall_ms": 0.545
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.0",
+          "ok": true,
+          "wall_ms": 0.132
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_0.txt').read_text().startswith('agent 0 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-0",
+          "kind": "command",
+          "name": "check.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 61.488
+        },
+        {
+          "argv": [
+            "svn",
+            "add",
+            "src/agent_0.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-0",
+          "kind": "command",
+          "name": "svn.add.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 26,
+          "wall_ms": 53.723
+        },
+        {
+          "argv": [
+            "svn",
+            "commit",
+            "-m",
+            "agent 0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-0",
+          "kind": "command",
+          "name": "svn.commit.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 108,
+          "wall_ms": 894.622
+        },
+        {
+          "argv": [
+            "svn",
+            "copy",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/trunk",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-1",
+            "-m",
+            "agent 1 branch"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.copy.branch.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 48,
+          "wall_ms": 82.945
+        },
+        {
+          "argv": [
+            "svn",
+            "checkout",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-1",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.checkout.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1346,
+          "wall_ms": 896.319
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.1",
+          "ok": true,
+          "wall_ms": 0.585
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.1",
+          "ok": true,
+          "wall_ms": 0.145
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_1.txt').read_text().startswith('agent 1 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-1",
+          "kind": "command",
+          "name": "check.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 53.332
+        },
+        {
+          "argv": [
+            "svn",
+            "add",
+            "src/agent_1.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-1",
+          "kind": "command",
+          "name": "svn.add.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 26,
+          "wall_ms": 35.888
+        },
+        {
+          "argv": [
+            "svn",
+            "commit",
+            "-m",
+            "agent 1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-1",
+          "kind": "command",
+          "name": "svn.commit.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 108,
+          "wall_ms": 869.468
+        },
+        {
+          "argv": [
+            "svn",
+            "copy",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/trunk",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-2",
+            "-m",
+            "agent 2 branch"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.copy.branch.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 48,
+          "wall_ms": 87.601
+        },
+        {
+          "argv": [
+            "svn",
+            "checkout",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-2",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-2"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.checkout.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1346,
+          "wall_ms": 978.424
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.2",
+          "ok": true,
+          "wall_ms": 0.742
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.2",
+          "ok": true,
+          "wall_ms": 0.163
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_2.txt').read_text().startswith('agent 2 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-2",
+          "kind": "command",
+          "name": "check.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 75.875
+        },
+        {
+          "argv": [
+            "svn",
+            "add",
+            "src/agent_2.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-2",
+          "kind": "command",
+          "name": "svn.add.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 26,
+          "wall_ms": 79.041
+        },
+        {
+          "argv": [
+            "svn",
+            "commit",
+            "-m",
+            "agent 2"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-wc-2",
+          "kind": "command",
+          "name": "svn.commit.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 108,
+          "wall_ms": 751.321
+        },
+        {
+          "argv": [
+            "svn",
+            "diff",
+            "--summarize",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-0",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.compare.branches",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 290,
+          "wall_ms": 50.452
+        },
+        {
+          "argv": [
+            "svn",
+            "diff",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/trunk",
+            "file:///private/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn/svn-repo/branches/agent-0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/svn",
+          "kind": "command",
+          "name": "svn.diff.export",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 224,
+          "wall_ms": 46.381
+        },
+        {
+          "kind": "action",
+          "name": "svn.patch.write",
+          "ok": true,
+          "wall_ms": 1.524
+        }
+      ],
+      "target": "svn",
+      "totals": {
+        "actions": 8,
+        "commands": 20,
+        "requests": 0,
+        "stderr_bytes": 0,
+        "stdin_bytes": 0,
+        "stdout_bytes": 6672,
+        "step_wall_ms": 6551.694,
+        "store_bytes": 452050,
+        "wall_ms": 6554.677
+      }
+    },
+    {
+      "details": {
+        "branches": [
+          "agent-0",
+          "agent-1",
+          "agent-2"
+        ],
+        "commits": [
+          "cfda27e5d2e4a1276c04bac7f9875a229b28e49e",
+          "eaa57ef1181759c86463497ad43f1602b6705629",
+          "e6cff2c21146cc138f201788662608db17b9700e"
+        ],
+        "note": "Uses GitButler CLI branch stacks and operation log; patch export uses Git compatibility."
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 2.717
+        },
+        {
+          "argv": [
+            "git",
+            "init",
+            "-b",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "git.init",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 153,
+          "wall_ms": 57.314
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.email",
+            "bench@example.com"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "git.config.email",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 43.947
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.name",
+            "Tri Bench"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "git.config.name",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 24.709
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "."
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "git.add.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 52.201
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "initial"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "git.commit.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 483,
+          "wall_ms": 91.815
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "--version"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.version",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 12,
+          "wall_ms": 122.519
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "setup",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.setup",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 278,
+          "wall_ms": 397.347
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "status",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.status.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 758,
+          "wall_ms": 243.185
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "branch",
+            "new",
+            "agent-0",
+            "--json",
+            "--status-after"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.branch.new.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 26,
+          "wall_ms": 295.257
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.0",
+          "ok": true,
+          "wall_ms": 0.784
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.0",
+          "ok": true,
+          "wall_ms": 0.136
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "diff",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.diff.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 382,
+          "wall_ms": 113.705
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_0.txt').read_text().startswith('agent 0 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "check.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 87.626
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "commit",
+            "agent-0",
+            "-m",
+            "agent 0",
+            "--json",
+            "--status-after"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.commit.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1794,
+          "wall_ms": 517.981
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "branch",
+            "new",
+            "agent-1",
+            "--json",
+            "--status-after"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.branch.new.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 26,
+          "wall_ms": 107.411
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.1",
+          "ok": true,
+          "wall_ms": 0.673
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.1",
+          "ok": true,
+          "wall_ms": 0.133
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "diff",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.diff.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 382,
+          "wall_ms": 56.547
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_1.txt').read_text().startswith('agent 1 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "check.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 59.314
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "commit",
+            "agent-1",
+            "-m",
+            "agent 1",
+            "--json",
+            "--status-after"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.commit.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 2586,
+          "wall_ms": 366.308
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "branch",
+            "new",
+            "agent-2",
+            "--json",
+            "--status-after"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.branch.new.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 26,
+          "wall_ms": 114.67
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.2",
+          "ok": true,
+          "wall_ms": 2.681
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.2",
+          "ok": true,
+          "wall_ms": 0.3
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "diff",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.diff.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 382,
+          "wall_ms": 76.136
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_2.txt').read_text().startswith('agent 2 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "check.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 70.795
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "commit",
+            "agent-2",
+            "-m",
+            "agent 2",
+            "--json",
+            "--status-after"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.commit.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 3378,
+          "wall_ms": 316.512
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--name-only",
+            "agent-0...agent-1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.compare.branches",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 16,
+          "wall_ms": 26.315
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "branch",
+            "list",
+            "--json",
+            "--all",
+            "--no-check",
+            "--no-ahead"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.branch.list",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1093,
+          "wall_ms": 105.41
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "show",
+            "agent-0",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.show.first",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 919,
+          "wall_ms": 105.471
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "oplog",
+            "snapshot",
+            "-m",
+            "agentic benchmark",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.oplog.snapshot",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 132,
+          "wall_ms": 167.476
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.local/bin/but",
+            "oplog",
+            "list",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.oplog.list",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1990,
+          "wall_ms": 73.338
+        },
+        {
+          "argv": [
+            "git",
+            "format-patch",
+            "-1",
+            "--stdout",
+            "agent-0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/gitbutler/gitbutler-source",
+          "kind": "command",
+          "name": "gitbutler.format_patch",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 437,
+          "wall_ms": 36.722
+        },
+        {
+          "kind": "action",
+          "name": "gitbutler.patch.write",
+          "ok": true,
+          "wall_ms": 0.757
+        }
+      ],
+      "target": "gitbutler",
+      "totals": {
+        "actions": 8,
+        "commands": 26,
+        "requests": 0,
+        "stderr_bytes": 0,
+        "stdin_bytes": 0,
+        "stdout_bytes": 15253,
+        "step_wall_ms": 3738.212,
+        "store_bytes": 236117,
+        "wall_ms": 3744.198
+      }
+    },
+    {
+      "details": {
+        "branches": [
+          "agent-0",
+          "agent-1",
+          "agent-2"
+        ],
+        "checkpoint_counts_by_branch": {
+          "agent-0": 1,
+          "agent-1": 2,
+          "agent-2": 3
+        },
+        "note": "Uses Entire's Codex hook handlers to create real local checkpoints, then commits the same file changes with Git.",
+        "sessions": [
+          "bench-session-0",
+          "bench-session-1",
+          "bench-session-2"
+        ]
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 11.868
+        },
+        {
+          "argv": [
+            "git",
+            "init",
+            "-b",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.init",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 147,
+          "wall_ms": 60.579
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.email",
+            "bench@example.com"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.config.email",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 24.821
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.name",
+            "Tri Bench"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.config.name",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 24.776
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "."
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.add.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 43.113
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "initial"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.commit.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 483,
+          "wall_ms": 80.736
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "--version"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.version",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 71,
+          "wall_ms": 216.499
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "enable",
+            "--agent",
+            "codex",
+            "--yes",
+            "--skip-push-sessions",
+            "--telemetry=false",
+            "--local"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.enable.codex",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 71,
+          "stdin_bytes": 0,
+          "stdout_bytes": 223,
+          "wall_ms": 157.204
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "status",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.status.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 57,
+          "wall_ms": 81.4
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            ".codex",
+            ".entire"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.add.entire.config",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 26.265
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "entire setup"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.commit.entire.config",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 232,
+          "wall_ms": 901.994
+        },
+        {
+          "kind": "action",
+          "name": "entire.transcript.write.0",
+          "ok": true,
+          "wall_ms": 0.877
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "session-start"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.session_start.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 271,
+          "stdin_bytes": 310,
+          "stdout_bytes": 194,
+          "wall_ms": 171.587
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "user-prompt-submit"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.user_prompt.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 507,
+          "stdin_bytes": 362,
+          "stdout_bytes": 0,
+          "wall_ms": 216.524
+        },
+        {
+          "argv": [
+            "git",
+            "checkout",
+            "-b",
+            "agent-0",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.checkout.branch.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 35,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 27.115
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.0",
+          "ok": true,
+          "wall_ms": 0.521
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.0",
+          "ok": true,
+          "wall_ms": 0.127
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--",
+            "src/agent_0.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.diff.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 16.132
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_0.txt').read_text().startswith('agent 0 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "check.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 63.203
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "stop"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.stop.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 774,
+          "stdin_bytes": 337,
+          "stdout_bytes": 0,
+          "wall_ms": 529.972
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "src/agent_0.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.add.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 19.242
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "agent 0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.commit.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 94,
+          "wall_ms": 312.581
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "checkpoint",
+            "explain",
+            "--json",
+            "--limit",
+            "10"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.checkpoint.explain.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 211,
+          "wall_ms": 94.029
+        },
+        {
+          "argv": [
+            "git",
+            "checkout",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.checkout.main.0",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 26,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 26.949
+        },
+        {
+          "kind": "action",
+          "name": "entire.transcript.write.1",
+          "ok": true,
+          "wall_ms": 0.774
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "session-start"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.session_start.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 271,
+          "stdin_bytes": 310,
+          "stdout_bytes": 308,
+          "wall_ms": 143.588
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "user-prompt-submit"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.user_prompt.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 507,
+          "stdin_bytes": 362,
+          "stdout_bytes": 0,
+          "wall_ms": 211.965
+        },
+        {
+          "argv": [
+            "git",
+            "checkout",
+            "-b",
+            "agent-1",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.checkout.branch.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 35,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 24.681
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.1",
+          "ok": true,
+          "wall_ms": 0.921
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.1",
+          "ok": true,
+          "wall_ms": 0.312
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--",
+            "src/agent_1.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.diff.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 20.81
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_1.txt').read_text().startswith('agent 1 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "check.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 50.175
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "stop"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.stop.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 766,
+          "stdin_bytes": 337,
+          "stdout_bytes": 0,
+          "wall_ms": 516.982
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "src/agent_1.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.add.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 21.113
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "agent 1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.commit.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 94,
+          "wall_ms": 281.121
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "checkpoint",
+            "explain",
+            "--json",
+            "--limit",
+            "10"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.checkpoint.explain.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 419,
+          "wall_ms": 104.165
+        },
+        {
+          "argv": [
+            "git",
+            "checkout",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.checkout.main.1",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 26,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 25.055
+        },
+        {
+          "kind": "action",
+          "name": "entire.transcript.write.2",
+          "ok": true,
+          "wall_ms": 0.74
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "session-start"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.session_start.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 271,
+          "stdin_bytes": 310,
+          "stdout_bytes": 308,
+          "wall_ms": 155.386
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "user-prompt-submit"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.user_prompt.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 507,
+          "stdin_bytes": 362,
+          "stdout_bytes": 0,
+          "wall_ms": 198.789
+        },
+        {
+          "argv": [
+            "git",
+            "checkout",
+            "-b",
+            "agent-2",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.checkout.branch.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 35,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 25.96
+        },
+        {
+          "kind": "action",
+          "name": "fs.write.2",
+          "ok": true,
+          "wall_ms": 0.604
+        },
+        {
+          "kind": "action",
+          "name": "fs.read.2",
+          "ok": true,
+          "wall_ms": 0.134
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--",
+            "src/agent_2.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.diff.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 17.225
+        },
+        {
+          "argv": [
+            "/Users/bryantle/.pyenv/versions/3.11.8/bin/python3",
+            "-c",
+            "from pathlib import Path; assert Path('src/agent_2.txt').read_text().startswith('agent 2 attempt\\n')"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "check.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 50.56
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "hooks",
+            "codex",
+            "stop"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.hook.stop.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 766,
+          "stdin_bytes": 337,
+          "stdout_bytes": 0,
+          "wall_ms": 522.024
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "src/agent_2.txt"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.add.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 18.745
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "agent 2"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.commit.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 94,
+          "wall_ms": 271.788
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "checkpoint",
+            "explain",
+            "--json",
+            "--limit",
+            "10"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.checkpoint.explain.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 627,
+          "wall_ms": 106.583
+        },
+        {
+          "argv": [
+            "git",
+            "checkout",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "git.checkout.main.2",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 26,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 24.954
+        },
+        {
+          "argv": [
+            "git",
+            "diff",
+            "--name-only",
+            "agent-0...agent-1"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.compare.branches",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 16,
+          "wall_ms": 21.634
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "session",
+            "list",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.session.list",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 1527,
+          "wall_ms": 84.219
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "status",
+            "--json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.status.final",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 112,
+          "wall_ms": 80.672
+        },
+        {
+          "argv": [
+            "/opt/homebrew/bin/entire",
+            "doctor",
+            "--force"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.doctor",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 278,
+          "wall_ms": 89.426
+        },
+        {
+          "argv": [
+            "git",
+            "format-patch",
+            "-1",
+            "--stdout",
+            "agent-0"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3/entire/entire-source",
+          "kind": "command",
+          "name": "entire.format_patch",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 437,
+          "wall_ms": 18.197
+        },
+        {
+          "kind": "action",
+          "name": "entire.patch.write",
+          "ok": true,
+          "wall_ms": 1.508
+        }
+      ],
+      "target": "entire",
+      "totals": {
+        "actions": 11,
+        "commands": 45,
+        "requests": 0,
+        "stderr_bytes": 4894,
+        "stdin_bytes": 3027,
+        "stdout_bytes": 5932,
+        "step_wall_ms": 6198.924,
+        "store_bytes": 51574,
+        "wall_ms": 6204.531
+      }
+    }
+  ],
+  "workdir": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-jwpid_q3"
+}

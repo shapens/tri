@@ -1,0 +1,24 @@
+version = "1.0"
+
+[metadata]
+task_id = "tri-hidden-path-policy"
+display_title = "Redact hidden workspace paths"
+display_description = "Create a workspace with hidden path policy and verify file listing, search, and diff surfaces do not expose hidden paths."
+category = "policy_workflow"
+language = "python"
+repository_url = "local:tri"
+base_commit_hash = "local"
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+docker_image = "local/tri-benchmark:python3.11"
+allow_internet = false
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 2048
+storage_mb = 4096

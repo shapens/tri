@@ -1,0 +1,24 @@
+version = "1.0"
+
+[metadata]
+task_id = "tri-workspace-isolation"
+display_title = "Preserve isolated parallel workspaces"
+display_description = "Create two Tri workspaces from the same target, mutate the same path independently, and prove the base snapshot is unchanged."
+category = "source_control_workflow"
+language = "python"
+repository_url = "local:tri"
+base_commit_hash = "local"
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+docker_image = "local/tri-benchmark:python3.11"
+allow_internet = false
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 2048
+storage_mb = 4096

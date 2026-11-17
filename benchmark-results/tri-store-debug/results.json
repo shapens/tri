@@ -1,0 +1,197 @@
+{
+  "config": {
+    "attempts": 3,
+    "file_size": 1024,
+    "files": 100,
+    "keep_workdir": true,
+    "targets": [
+      "tri"
+    ]
+  },
+  "created_at": "2026-05-29T04:04:29Z",
+  "environment": {
+    "entire": "/opt/homebrew/bin/entire",
+    "git": "/opt/homebrew/bin/git",
+    "gitbutler": "/Users/bryantle/.local/bin/but",
+    "platform": "macOS-26.3-arm64-arm-64bit",
+    "python": "3.11.8 (main, Jan  6 2025, 00:18:33) [Clang 15.0.0 (clang-1500.3.9.4)]",
+    "svn": "/opt/homebrew/bin/svn",
+    "svnadmin": "/opt/homebrew/bin/svnadmin",
+    "tri": "/Users/bryantle/.pyenv/versions/3.11.8/bin/tri"
+  },
+  "schema": "tri.benchmark.agentic.v0",
+  "targets": [
+    {
+      "details": {
+        "batch_commands": 21,
+        "changesets": [
+          "cs_dddf3540fb4a",
+          "cs_92d5c65f4b68",
+          "cs_c59beaef4bb2"
+        ],
+        "doctor_counts": {
+          "advisories": 0,
+          "artifacts": 7,
+          "blobs": 104,
+          "changesets": 3,
+          "check_runs": 3,
+          "check_sets": 0,
+          "events": 36,
+          "exports": 1,
+          "materialization_leases": 0,
+          "operations": 3,
+          "package_boundaries": 0,
+          "policy_grants": 0,
+          "projects": 1,
+          "releases": 0,
+          "review_actions": 1,
+          "reviews": 1,
+          "secret_leases": 0,
+          "secret_refs": 0,
+          "snapshots": 4,
+          "targets": 1,
+          "task_runs": 3,
+          "tasks": 3,
+          "trees": 4,
+          "workspace_conflicts": 0,
+          "workspaces": 3
+        },
+        "transport": "cli_batch"
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 9.39
+        },
+        {
+          "argv": [
+            "git",
+            "init",
+            "-b",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri/tri-source",
+          "kind": "command",
+          "name": "git.init",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 141,
+          "wall_ms": 12.723
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.email",
+            "bench@example.com"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri/tri-source",
+          "kind": "command",
+          "name": "git.config.email",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 6.547
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.name",
+            "Tri Bench"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri/tri-source",
+          "kind": "command",
+          "name": "git.config.name",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 6.534
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "."
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri/tri-source",
+          "kind": "command",
+          "name": "git.add.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 59.224
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "initial"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri/tri-source",
+          "kind": "command",
+          "name": "git.commit.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 3905,
+          "wall_ms": 25.471
+        },
+        {
+          "kind": "action",
+          "name": "tri.batch.plan",
+          "ok": true,
+          "wall_ms": 0.367
+        },
+        {
+          "argv": [
+            "tri",
+            "--response",
+            "summary",
+            "batch",
+            "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri/tri-batch.json"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p/tri",
+          "kind": "command",
+          "name": "tri.batch",
+          "ok": true,
+          "returncode": 0,
+          "schema": "tri.batch",
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 643,
+          "tri_cost": null,
+          "tri_events": 0,
+          "wall_ms": 304.01
+        }
+      ],
+      "target": "tri",
+      "totals": {
+        "actions": 2,
+        "commands": 6,
+        "requests": 0,
+        "stderr_bytes": 0,
+        "stdin_bytes": 0,
+        "stdout_bytes": 4689,
+        "step_wall_ms": 424.266,
+        "store_bytes": 141989,
+        "wall_ms": 424.739
+      }
+    }
+  ],
+  "workdir": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-fp1_z67p"
+}

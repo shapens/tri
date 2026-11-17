@@ -1,0 +1,665 @@
+{
+  "config": {
+    "attempts": 3,
+    "file_size": 1024,
+    "files": 100,
+    "keep_workdir": false,
+    "targets": [
+      "tri"
+    ]
+  },
+  "created_at": "2026-05-29T03:38:31Z",
+  "environment": {
+    "entire": "/opt/homebrew/bin/entire",
+    "git": "/opt/homebrew/bin/git",
+    "gitbutler": "/Users/bryantle/.local/bin/but",
+    "platform": "macOS-26.3-arm64-arm-64bit",
+    "python": "3.11.8 (main, Jan  6 2025, 00:18:33) [Clang 15.0.0 (clang-1500.3.9.4)]",
+    "svn": "/opt/homebrew/bin/svn",
+    "svnadmin": "/opt/homebrew/bin/svnadmin",
+    "tri": "/Users/bryantle/.pyenv/versions/3.11.8/bin/tri"
+  },
+  "schema": "tri.benchmark.agentic.v0",
+  "targets": [
+    {
+      "details": {
+        "changesets": [
+          "cs_ae117b37cb51",
+          "cs_a371e56beb01",
+          "cs_ed7dc4e3e794"
+        ],
+        "doctor_counts": {
+          "advisories": 0,
+          "artifacts": 7,
+          "blobs": 104,
+          "changesets": 3,
+          "check_runs": 3,
+          "check_sets": 0,
+          "events": 36,
+          "exports": 1,
+          "materialization_leases": 0,
+          "operations": 3,
+          "package_boundaries": 0,
+          "policy_grants": 0,
+          "projects": 1,
+          "releases": 0,
+          "review_actions": 1,
+          "reviews": 1,
+          "secret_leases": 0,
+          "secret_refs": 0,
+          "snapshots": 4,
+          "targets": 1,
+          "task_runs": 3,
+          "tasks": 3,
+          "trees": 4,
+          "workspace_conflicts": 0,
+          "workspaces": 3
+        },
+        "transport": "local_http_api"
+      },
+      "ok": true,
+      "skipped": false,
+      "steps": [
+        {
+          "kind": "action",
+          "name": "fixture.create",
+          "ok": true,
+          "wall_ms": 50.285
+        },
+        {
+          "argv": [
+            "git",
+            "init",
+            "-b",
+            "main"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi/tri/tri-source",
+          "kind": "command",
+          "name": "git.init",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 141,
+          "wall_ms": 42.636
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.email",
+            "bench@example.com"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi/tri/tri-source",
+          "kind": "command",
+          "name": "git.config.email",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 26.898
+        },
+        {
+          "argv": [
+            "git",
+            "config",
+            "user.name",
+            "Tri Bench"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi/tri/tri-source",
+          "kind": "command",
+          "name": "git.config.name",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 28.226
+        },
+        {
+          "argv": [
+            "git",
+            "add",
+            "."
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi/tri/tri-source",
+          "kind": "command",
+          "name": "git.add.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 193.108
+        },
+        {
+          "argv": [
+            "git",
+            "commit",
+            "-m",
+            "initial"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi/tri/tri-source",
+          "kind": "command",
+          "name": "git.commit.initial",
+          "ok": true,
+          "returncode": 0,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 3905,
+          "wall_ms": 75.792
+        },
+        {
+          "argv": [
+            "tri",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "51268",
+            "--quiet"
+          ],
+          "cwd": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi/tri",
+          "kind": "command",
+          "name": "tri.serve",
+          "ok": true,
+          "returncode": null,
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "wall_ms": 5.875
+        },
+        {
+          "kind": "http",
+          "method": "GET",
+          "name": "tri.health",
+          "ok": false,
+          "returncode": 0,
+          "stderr_bytes": 45,
+          "stderr_tail": "<urlopen error [Errno 61] Connection refused>",
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "url": "http://127.0.0.1:51268/v0/health",
+          "wall_ms": 15.549
+        },
+        {
+          "kind": "http",
+          "method": "GET",
+          "name": "tri.health",
+          "ok": false,
+          "returncode": 0,
+          "stderr_bytes": 45,
+          "stderr_tail": "<urlopen error [Errno 61] Connection refused>",
+          "stdin_bytes": 0,
+          "stdout_bytes": 0,
+          "url": "http://127.0.0.1:51268/v0/health",
+          "wall_ms": 0.619
+        },
+        {
+          "kind": "http",
+          "method": "GET",
+          "name": "tri.health",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.api.health",
+          "stderr_bytes": 0,
+          "stdin_bytes": 0,
+          "stdout_bytes": 417,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 415,
+            "wall_ms": 9
+          },
+          "tri_events": 0,
+          "url": "http://127.0.0.1:51268/v0/health",
+          "wall_ms": 12.712
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.import",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.import",
+          "stderr_bytes": 0,
+          "stdin_bytes": 151,
+          "stdout_bytes": 2496,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 2493,
+            "wall_ms": 314
+          },
+          "tri_events": 1,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 318.972
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.workspace.create.0",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.workspace.create",
+          "stderr_bytes": 0,
+          "stdin_bytes": 117,
+          "stdout_bytes": 610,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 608,
+            "wall_ms": 62
+          },
+          "tri_events": 1,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 67.789
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.files.read.0",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.files.read",
+          "stderr_bytes": 0,
+          "stdin_bytes": 81,
+          "stdout_bytes": 1771,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1768,
+            "wall_ms": 46
+          },
+          "tri_events": 0,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 49.062
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.files.write.0",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.files.write",
+          "stderr_bytes": 0,
+          "stdin_bytes": 132,
+          "stdout_bytes": 522,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 520,
+            "wall_ms": 55
+          },
+          "tri_events": 3,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 62.708
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.run.0",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.check.inspect",
+          "stderr_bytes": 0,
+          "stdin_bytes": 221,
+          "stdout_bytes": 1019,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1016,
+            "wall_ms": 199
+          },
+          "tri_events": 4,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 203.644
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.changeset.create.0",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.changeset.inspect",
+          "stderr_bytes": 0,
+          "stdin_bytes": 110,
+          "stdout_bytes": 700,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 698,
+            "wall_ms": 59
+          },
+          "tri_events": 2,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 62.643
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.workspace.create.1",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.workspace.create",
+          "stderr_bytes": 0,
+          "stdin_bytes": 117,
+          "stdout_bytes": 610,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 608,
+            "wall_ms": 41
+          },
+          "tri_events": 1,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 49.225
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.files.read.1",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.files.read",
+          "stderr_bytes": 0,
+          "stdin_bytes": 81,
+          "stdout_bytes": 1771,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1768,
+            "wall_ms": 59
+          },
+          "tri_events": 0,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 61.077
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.files.write.1",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.files.write",
+          "stderr_bytes": 0,
+          "stdin_bytes": 132,
+          "stdout_bytes": 522,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 520,
+            "wall_ms": 50
+          },
+          "tri_events": 3,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 54.422
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.run.1",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.check.inspect",
+          "stderr_bytes": 0,
+          "stdin_bytes": 221,
+          "stdout_bytes": 1021,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1018,
+            "wall_ms": 272
+          },
+          "tri_events": 4,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 276.537
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.changeset.create.1",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.changeset.inspect",
+          "stderr_bytes": 0,
+          "stdin_bytes": 110,
+          "stdout_bytes": 700,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 698,
+            "wall_ms": 68
+          },
+          "tri_events": 2,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 73.428
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.workspace.create.2",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.workspace.create",
+          "stderr_bytes": 0,
+          "stdin_bytes": 117,
+          "stdout_bytes": 610,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 608,
+            "wall_ms": 58
+          },
+          "tri_events": 1,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 61.974
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.files.read.2",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.files.read",
+          "stderr_bytes": 0,
+          "stdin_bytes": 81,
+          "stdout_bytes": 1771,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1768,
+            "wall_ms": 58
+          },
+          "tri_events": 0,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 61.647
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.files.write.2",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.files.write",
+          "stderr_bytes": 0,
+          "stdin_bytes": 132,
+          "stdout_bytes": 522,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 520,
+            "wall_ms": 67
+          },
+          "tri_events": 3,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 71.264
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.run.2",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.check.inspect",
+          "stderr_bytes": 0,
+          "stdin_bytes": 221,
+          "stdout_bytes": 1019,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1016,
+            "wall_ms": 222
+          },
+          "tri_events": 4,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 227.34
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.changeset.create.2",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.changeset.inspect",
+          "stderr_bytes": 0,
+          "stdin_bytes": 110,
+          "stdout_bytes": 700,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 698,
+            "wall_ms": 50
+          },
+          "tri_events": 2,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 53.782
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.changeset.compare",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.changeset.compare",
+          "stderr_bytes": 0,
+          "stdin_bytes": 131,
+          "stdout_bytes": 1264,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1261,
+            "wall_ms": 51
+          },
+          "tri_events": 0,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 53.117
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.review.create",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.review.create",
+          "stderr_bytes": 0,
+          "stdin_bytes": 91,
+          "stdout_bytes": 591,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 589,
+            "wall_ms": 50
+          },
+          "tri_events": 1,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 54.971
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.review.approve",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.review.action",
+          "stderr_bytes": 0,
+          "stdin_bytes": 96,
+          "stdout_bytes": 633,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 631,
+            "wall_ms": 50
+          },
+          "tri_events": 1,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 55.147
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.export.git_patch",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.export.git_patch",
+          "stderr_bytes": 0,
+          "stdin_bytes": 216,
+          "stdout_bytes": 1353,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 1350,
+            "wall_ms": 52
+          },
+          "tri_events": 3,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 55.74
+        },
+        {
+          "kind": "http",
+          "method": "POST",
+          "name": "tri.doctor",
+          "ok": true,
+          "returncode": 200,
+          "schema": "tri.doctor",
+          "stderr_bytes": 0,
+          "stdin_bytes": 41,
+          "stdout_bytes": 967,
+          "tri_cost": {
+            "external_cost": "0 USD",
+            "input_bytes": 0,
+            "output_bytes": 965,
+            "wall_ms": 53
+          },
+          "tri_events": 0,
+          "url": "http://127.0.0.1:51268/v0/command",
+          "wall_ms": 55.927
+        },
+        {
+          "kind": "action",
+          "name": "tri.serve.stop",
+          "ok": true,
+          "returncode": -15,
+          "stderr_bytes": 0,
+          "stderr_tail": "",
+          "stdout_bytes": 0,
+          "wall_ms": 6.318
+        }
+      ],
+      "target": "tri",
+      "totals": {
+        "actions": 1,
+        "commands": 6,
+        "requests": 24,
+        "stderr_bytes": 90,
+        "stdin_bytes": 2709,
+        "stdout_bytes": 25635,
+        "step_wall_ms": 2482.116,
+        "store_bytes": 264357,
+        "wall_ms": 2782.711
+      }
+    }
+  ],
+  "workdir": "/var/folders/2p/hwpnst4x41g1jqgt3hrbz_680000gp/T/tri-agentic-bench-1n66knpi"
+}

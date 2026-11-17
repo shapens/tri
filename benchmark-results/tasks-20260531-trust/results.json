@@ -1,0 +1,144 @@
+{
+  "config": {
+    "keep_workdir": false,
+    "run_root": null,
+    "task_ids": [
+      "tri-conflict-resolution",
+      "tri-export-policy-gates",
+      "tri-hidden-path-policy",
+      "tri-secret-lease-redaction",
+      "tri-workspace-isolation"
+    ],
+    "tasks_root": "/Users/bryantle/Documents/shapens/tri/benchmarks/tasks"
+  },
+  "created_at": "2026-05-31T23:05:27Z",
+  "environment": {
+    "git": "/opt/homebrew/bin/git",
+    "platform": "macOS-26.3-arm64-arm-64bit",
+    "python": "3.11.8 (main, Jan  6 2025, 00:18:33) [Clang 15.0.0 (clang-1500.3.9.4)]",
+    "tri": "/Users/bryantle/.pyenv/versions/3.11.8/bin/tri"
+  },
+  "schema": "tri.benchmark.tasks.v1",
+  "tasks": [
+    {
+      "artifacts": [],
+      "metadata": {
+        "base_commit_hash": "local",
+        "category": "source_control_workflow",
+        "display_description": "Move a target and workspace on the same path, verify Tri records a conflict, then resolve it explicitly.",
+        "display_title": "Detect and resolve workspace conflicts",
+        "language": "python",
+        "repository_url": "local:tri",
+        "task_id": "tri-conflict-resolution"
+      },
+      "ok": true,
+      "paths": {
+        "task": "/Users/bryantle/Documents/shapens/tri/benchmarks/tasks/tri-conflict-resolution",
+        "workdir": null
+      },
+      "returncode": 0,
+      "reward": 1.0,
+      "stderr_tail": "",
+      "stdout_tail": "",
+      "task_id": "tri-conflict-resolution",
+      "timed_out": false,
+      "wall_ms": 1077.625
+    },
+    {
+      "artifacts": [],
+      "metadata": {
+        "base_commit_hash": "local",
+        "category": "policy_workflow",
+        "display_description": "Verify Tri blocks export until a changeset has passing check evidence and an approved review.",
+        "display_title": "Require checks and review before export",
+        "language": "python",
+        "repository_url": "local:tri",
+        "task_id": "tri-export-policy-gates"
+      },
+      "ok": true,
+      "paths": {
+        "task": "/Users/bryantle/Documents/shapens/tri/benchmarks/tasks/tri-export-policy-gates",
+        "workdir": null
+      },
+      "returncode": 0,
+      "reward": 1.0,
+      "stderr_tail": "",
+      "stdout_tail": "",
+      "task_id": "tri-export-policy-gates",
+      "timed_out": false,
+      "wall_ms": 1418.393
+    },
+    {
+      "artifacts": [],
+      "metadata": {
+        "base_commit_hash": "local",
+        "category": "policy_workflow",
+        "display_description": "Create a workspace with hidden path policy and verify file listing, search, and diff surfaces do not expose hidden paths.",
+        "display_title": "Redact hidden workspace paths",
+        "language": "python",
+        "repository_url": "local:tri",
+        "task_id": "tri-hidden-path-policy"
+      },
+      "ok": true,
+      "paths": {
+        "task": "/Users/bryantle/Documents/shapens/tri/benchmarks/tasks/tri-hidden-path-policy",
+        "workdir": null
+      },
+      "returncode": 0,
+      "reward": 1.0,
+      "stderr_tail": "",
+      "stdout_tail": "",
+      "task_id": "tri-hidden-path-policy",
+      "timed_out": false,
+      "wall_ms": 744.174
+    },
+    {
+      "artifacts": [],
+      "metadata": {
+        "base_commit_hash": "local",
+        "category": "security_workflow",
+        "display_description": "Verify Tri injects a workspace-scoped secret lease, redacts logs, audits the lease, and blocks revoked lease reuse.",
+        "display_title": "Use secret leases without log leakage",
+        "language": "python",
+        "repository_url": "local:tri",
+        "task_id": "tri-secret-lease-redaction"
+      },
+      "ok": true,
+      "paths": {
+        "task": "/Users/bryantle/Documents/shapens/tri/benchmarks/tasks/tri-secret-lease-redaction",
+        "workdir": null
+      },
+      "returncode": 0,
+      "reward": 1.0,
+      "stderr_tail": "",
+      "stdout_tail": "",
+      "task_id": "tri-secret-lease-redaction",
+      "timed_out": false,
+      "wall_ms": 3652.843
+    },
+    {
+      "artifacts": [],
+      "metadata": {
+        "base_commit_hash": "local",
+        "category": "source_control_workflow",
+        "display_description": "Create two Tri workspaces from the same target, mutate the same path independently, and prove the base snapshot is unchanged.",
+        "display_title": "Preserve isolated parallel workspaces",
+        "language": "python",
+        "repository_url": "local:tri",
+        "task_id": "tri-workspace-isolation"
+      },
+      "ok": true,
+      "paths": {
+        "task": "/Users/bryantle/Documents/shapens/tri/benchmarks/tasks/tri-workspace-isolation",
+        "workdir": null
+      },
+      "returncode": 0,
+      "reward": 1.0,
+      "stderr_tail": "",
+      "stdout_tail": "",
+      "task_id": "tri-workspace-isolation",
+      "timed_out": false,
+      "wall_ms": 1185.77
+    }
+  ]
+}

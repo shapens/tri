@@ -1,0 +1,8 @@
+{
+  "description": "Default agentic source-control workflow benchmark.",
+  "attempts": 3,
+  "mutations_per_attempt": 1,
+  "file_size": 1024,
+  "files": 100,
+  "targets": ["tri", "git", "svn", "gitbutler", "entire"]
+}
