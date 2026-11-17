@@ -409,10 +409,12 @@ class RunImportTests(TriHarness):
 
     def test_check_reports_backend(self) -> None:
         from tri.materialize import probe_clone
+        from tri.overlay import probe_overlay
 
         ws = self.workspace()
         check = self.run_cmd(ws, "true")
-        expected = "clone" if probe_clone(Path(os.environ["TRI_HOME"])) else "copy"
+        home = Path(os.environ["TRI_HOME"])
+        expected = "overlay" if probe_overlay(home / "runs") else ("clone" if probe_clone(home) else "copy")
         self.assertEqual(check["materialized_directory"]["backend"], expected)
         self.assertEqual(check["materialized_directory"]["degraded"], expected == "copy")
         os.environ["TRI_MATERIALIZE_BACKEND"] = "copy"
