@@ -29,7 +29,7 @@ class TriCliTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
-        subprocess.run(["git", "init"], cwd=self.repo, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo, check=True, stdout=subprocess.PIPE)
         subprocess.run(["git", "config", "user.email", "tri@example.com"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Tri Test"], cwd=self.repo, check=True)
         (self.repo / "src").mkdir()

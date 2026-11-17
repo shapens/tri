@@ -200,7 +200,7 @@ def make_fixture(repo: Path, *, source_files: int, file_size: int, dep_files: in
     (repo / "tools" / "check.py").write_text(CHECK_SCRIPT)
     (repo / "deps.lock").write_text(f"{dep_files} {dep_file_size} v1\n")
     (repo / ".gitignore").write_text("node_modules/\n__pycache__/\n")
-    run(["git", "init", "-q"], repo)
+    run(["git", "init", "-q", "-b", "main"], repo)
     run(["git", "config", "user.email", "bench@example.com"], repo)
     run(["git", "config", "user.name", "Bench"], repo)
     run(["git", "add", "."], repo)

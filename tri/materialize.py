@@ -245,19 +245,23 @@ def remove_tree(root: Path) -> None:
         return
 
     def onerror(func: Callable[..., Any], path: str, exc_info: Any) -> None:
-        try:
-            os.chmod(os.path.dirname(path), 0o700)
-            if not os.path.islink(path):
-                os.chmod(path, 0o700)
-            func(path)
-        except OSError:
-            pass
+        # Unlock what blocked us; the pass below retries the whole tree. Never
+        # re-invoke ``func``: for os.open it needs more than a path.
+        for target in (os.path.dirname(path), path):
+            try:
+                if not os.path.islink(target):
+                    os.chmod(target, 0o700)
+            except OSError:
+                pass
 
     try:
         os.chmod(root, 0o700)
     except OSError:
         pass
     shutil.rmtree(root, onerror=onerror)
+    if root.exists():
+        _force_writable(root)
+        shutil.rmtree(root, onerror=onerror)
     if root.exists():
         _force_writable(root)
         shutil.rmtree(root, ignore_errors=True)
