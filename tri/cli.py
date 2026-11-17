@@ -531,9 +531,23 @@ class Store:
         self._blob_cache: dict[str, bytes] = {}
         self._tree_cache: dict[str, tuple[dict[str, dict[str, Any]], set[str]]] = {}
         self.home.mkdir(parents=True, exist_ok=True)
+        # Two locks, so no lock is ever converted between shared and exclusive
+        # (flock conversion is not atomic):
+        # - the open lock is held shared by every open Store; packing takes it
+        #   exclusive, so the database is only removed when nobody has it open;
+        # - the admin lock serializes unpacking, schema setup, and packing.
+        # Opening therefore never waits on another open Store, only on a pack or
+        # unpack in progress.
         self.lock_file = FileLock(self.lock_path)
-        needs_exclusive_open = not self.db_path.exists()
-        self.lock_file.acquire(exclusive=needs_exclusive_open)
+        self.lock_file.acquire(exclusive=False)
+        self.admin_lock = FileLock(self.home / "tri.sqlite3.admin.lock")
+        self.admin_lock.acquire(exclusive=True)
+        try:
+            self._open_db(pack_on_close)
+        finally:
+            self.admin_lock.release()
+
+    def _open_db(self, pack_on_close: bool | None) -> None:
         self.pack_db_max_bytes: int | None = None
         if pack_on_close is None:
             pack_value = os.environ.get("TRI_SQLITE_PACK", "auto").lower()
@@ -564,8 +578,6 @@ class Store:
                 page_size = 512
             self.conn.execute(f"PRAGMA page_size={page_size}")
         self.init_db()
-        if needs_exclusive_open:
-            self.lock_file.acquire(exclusive=False)
 
     @property
     def materializer(self) -> Materializer:
@@ -1079,16 +1091,23 @@ class Store:
         except sqlite3.Error:
             pass
         self.conn.close()
-        if self.pack_on_close:
+        if self.pack_on_close and self.lock_file is not None:
             try:
-                assert self.lock_file is not None
-                if self.lock_file.acquire(exclusive=True, blocking=False):
-                    self.pack_db()
+                self.admin_lock.acquire(exclusive=True)
+                try:
+                    # Drop our open lock, then pack only if nobody else has the
+                    # store open; a Store that opens meanwhile keeps it unpacked.
+                    self.lock_file.release()
+                    if self.lock_file.acquire(exclusive=True, blocking=False):
+                        self.pack_db()
+                finally:
+                    self.admin_lock.release()
             except OSError:
                 pass
         if self.lock_file is not None:
             self.lock_file.close()
             self.lock_file = None
+        self.admin_lock.close()
 
     def row(self, sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
         return self.conn.execute(sql, params).fetchone()
