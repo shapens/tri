@@ -103,7 +103,7 @@ Git worktrees make every attempt a full checkout, grow their own `node_modules`/
   | Backend | Where | How |
   | --- | --- | --- |
   | `clone` | APFS (macOS), btrfs / XFS / bcachefs / ZFS (Linux `FICLONE`), ReFS / Dev Drive (Windows) | Copy-on-write clones from a raw checkout cache; on macOS a whole base tree is cloned in one call and only the workspace's delta is applied |
-  | `overlay` | Linux with user + mount namespaces (opt-in: `TRI_MATERIALIZE_BACKEND=overlay`) | The run's directory is an overlay mount that exists only inside the command's namespace; only written files land on disk |
+  | `overlay` | Linux runs where unprivileged user + mount namespaces are allowed (default there; Ubuntu 24.04 needs `kernel.apparmor_restrict_unprivileged_userns=0`) | The run's directory is an overlay mount that exists only inside the command's namespace, and the command runs as the caller; only written files land on disk |
   | `copy` | Anywhere else (ext4, NTFS, cross-volume mounts) | Plain files, reported as `degraded` by `tri doctor`, checks, and leases |
 
   Override with `TRI_MATERIALIZE_BACKEND=auto|clone|copy|overlay`. Change detection compares a stat baseline (`size`, `mtime`, inode, mode), so a run only reads files it touched. Materialized files carry the fixed mtime 2000-01-01.
@@ -292,7 +292,7 @@ tri export list app --changeset cs_...
 
 ## Remaining Gates
 
-- verify the `overlay` run backend on Linux hosts and make it the Linux default; verify `FICLONE` (btrfs/XFS) and ReFS/Dev Drive clone paths and the Windows port on real machines (all are probe-guarded and fall back to `copy`)
+- verify ReFS/Dev Drive clones on a Windows machine that has them (probe-guarded; falls back to `copy`). Overlay, XFS/btrfs reflinks, and the Windows port are verified in CI.
 
 - hosted collaboration layer
 - broader hosted Policy v0 language: visibility role mapping, embargo lifecycle, cross-object inheritance rules, and actor identity binding

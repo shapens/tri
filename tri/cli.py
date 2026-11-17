@@ -2871,9 +2871,9 @@ def materialize_for_run(
     overlay (Linux namespaces) > clone > copy."""
     preference = (os.environ.get("TRI_MATERIALIZE_BACKEND") or "auto").lower()
     notes: list[dict[str, Any]] = []
-    # Overlay runs are opt-in (TRI_MATERIALIZE_BACKEND=overlay) until they have been
-    # verified on Linux hosts; "auto" uses clone (reflink) or copy there.
-    if allow_overlay and preference == "overlay":
+    # Linux hosts that allow unprivileged user + mount namespaces get overlay runs
+    # automatically (verified in CI); others fall back to clone (reflink) or copy.
+    if allow_overlay and preference in ("auto", "overlay"):
         info = probe_overlay(store.runs)
         if info is not None:
             base_row = store.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (base_snapshot,)) if base_snapshot else None
