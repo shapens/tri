@@ -30,6 +30,20 @@ class FanoutBenchmarkTests(unittest.TestCase):
             self.assertIn(by_target["tri"]["backends"][0], ("clone", "copy", "overlay"))
             self.assertTrue((out / "summary.md").read_text().startswith("# Fan-out disk benchmark"))
 
+    def test_fanout_parallel_and_bound_targets(self) -> None:
+        from benchmarks.fanout import main
+
+        with tempfile.TemporaryDirectory(prefix="tri-fanout-test-") as tmp:
+            out = Path(tmp) / "out"
+            main(["--attempts", "3", "--parallel", "3", "--source-files", "20", "--dep-files", "30", "--volume", "none", "--targets", "tri-copy,tri-mount-link,git", "--output", str(out)])
+            results = json.loads((out / "results.json").read_text())
+            by_target = {item["target"]: item for item in results["results"]}
+            for item in by_target.values():
+                self.assertEqual(item["status"], "ok", item)
+                self.assertEqual(item["checks_passed"], 3)
+            self.assertEqual(by_target["tri-copy"]["backends"], ["copy"])
+            self.assertEqual(results["parameters"]["parallel"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

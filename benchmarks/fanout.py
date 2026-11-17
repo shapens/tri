@@ -228,57 +228,81 @@ def tri(env: dict[str, str], *argv: str) -> dict[str, Any]:
     return payload["data"]
 
 
-def bench_tri(volume: Volume, args: argparse.Namespace, *, mounts: bool) -> dict[str, Any]:
+def run_attempts(args: argparse.Namespace, sampler: "PeakSampler", attempt_fn: Callable[[int], bool]) -> int:
+    """Run attempts with up to ``args.parallel`` at once; returns checks passed."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(attempt: int) -> bool:
+        ok = attempt_fn(attempt)
+        sampler.sample()
+        return ok
+
+    with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
+        return sum(1 for ok in pool.map(one, range(args.attempts)) if ok)
+
+
+def bench_tri(volume: Volume, args: argparse.Namespace, *, mounts: bool, backend: str | None = None, env_link: bool = False) -> dict[str, Any]:
     repo = volume.root / "repo"
     make_fixture(repo, source_files=args.source_files, file_size=args.file_size, dep_files=args.dep_files, dep_file_size=args.dep_file_size)
     env = os.environ.copy()
     env["TRI_HOME"] = str(volume.root / "tri-home")
     env.pop("TRI_ACTOR", None)
     env["TRI_AUTO_REAP"] = "0"
+    if backend:
+        env["TRI_MATERIALIZE_BACKEND"] = backend
     tri(env, "import", str(repo), "--name", "app")
     tri(env, "env", "define", "app", "deps", "--key-file", "deps.lock", "--install", f"{sys.executable} tools/install.py", "--output", "node_modules")
     backends: list[str] = []
-    passed = 0
+    # Build the shared environment once up front so parallel attempts measure reuse.
+    tri(env, "run", tri(env, "workspace", "create", "app", "--from", "main")["id"], "--", sys.executable, "-c", "pass")
+
+    def attempt_fn(attempt: int) -> bool:
+        ws = tri(env, "workspace", "create", "app", "--from", "main")["id"]
+        if mounts:
+            mount = volume.root / "mounts" / f"attempt{attempt}"
+            tri(env, "workspace", "mount", ws, str(mount), *(["--env-link"] if env_link else []))
+            (mount / "src" / "attempt.txt").write_text(f"attempt {attempt}\n")
+            (mount / "src" / "mod0" / "file0.txt").write_text(f"edited by attempt {attempt}\n")
+            tri(env, "workspace", "sync", ws)
+        else:
+            tri(env, "files", "write", ws, "src/attempt.txt", "--text", f"attempt {attempt}\n")
+            tri(env, "files", "write", ws, "src/mod0/file0.txt", "--text", f"edited by attempt {attempt}\n")
+        check = tri(env, "run", ws, "--", sys.executable, "tools/check.py")
+        backends.append(check["materialized_directory"].get("backend", "unknown"))
+        return check["status"] == "passed"
+
     with PeakSampler(volume) as sampler:
-        for attempt in range(args.attempts):
-            ws = tri(env, "workspace", "create", "app", "--from", "main")["id"]
-            if mounts:
-                mount = volume.root / "mounts" / f"attempt{attempt}"
-                tri(env, "workspace", "mount", ws, str(mount))
-                (mount / "src" / "attempt.txt").write_text(f"attempt {attempt}\n")
-                (mount / "src" / "mod0" / "file0.txt").write_text(f"edited by attempt {attempt}\n")
-                tri(env, "workspace", "sync", ws)
-            else:
-                tri(env, "files", "write", ws, "src/attempt.txt", "--text", f"attempt {attempt}\n")
-                tri(env, "files", "write", ws, "src/mod0/file0.txt", "--text", f"edited by attempt {attempt}\n")
-            check = tri(env, "run", ws, "--", sys.executable, "tools/check.py")
-            backends.append(check["materialized_directory"].get("backend", "unknown"))
-            passed += 1 if check["status"] == "passed" else 0
-            sampler.sample()
+        passed = run_attempts(args, sampler, attempt_fn)
     return {"backends": sorted(set(backends)), "checks_passed": passed, "peak_allocated_bytes": sampler.peak}
 
 
 def bench_git(volume: Volume, args: argparse.Namespace) -> dict[str, Any]:
     repo = volume.root / "repo"
     make_fixture(repo, source_files=args.source_files, file_size=args.file_size, dep_files=args.dep_files, dep_file_size=args.dep_file_size)
-    passed = 0
-    with PeakSampler(volume) as sampler:
-        for attempt in range(args.attempts):
-            wt = volume.root / "worktrees" / f"attempt{attempt}"
+    git_lock = threading.Lock()  # `git worktree add` and commits contend on the shared repo's locks
+
+    def attempt_fn(attempt: int) -> bool:
+        wt = volume.root / "worktrees" / f"attempt{attempt}"
+        with git_lock:
             run(["git", "worktree", "add", "-q", "-b", f"attempt{attempt}", str(wt)], repo)
-            (wt / "src" / "attempt.txt").write_text(f"attempt {attempt}\n")
-            (wt / "src" / "mod0" / "file0.txt").write_text(f"edited by attempt {attempt}\n")
-            run([sys.executable, "tools/install.py"], wt)
-            check = subprocess.run([sys.executable, "tools/check.py"], cwd=wt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            passed += 1 if check.returncode == 0 else 0
+        (wt / "src" / "attempt.txt").write_text(f"attempt {attempt}\n")
+        (wt / "src" / "mod0" / "file0.txt").write_text(f"edited by attempt {attempt}\n")
+        run([sys.executable, "tools/install.py"], wt)
+        check = subprocess.run([sys.executable, "tools/check.py"], cwd=wt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with git_lock:
             run(["git", "commit", "-qam", f"attempt {attempt}"], wt)
-            sampler.sample()
+        return check.returncode == 0
+
+    with PeakSampler(volume) as sampler:
+        passed = run_attempts(args, sampler, attempt_fn)
     return {"backends": ["worktree"], "checks_passed": passed, "peak_allocated_bytes": sampler.peak}
 
 
 TARGETS: dict[str, Callable[[Volume, argparse.Namespace], dict[str, Any]]] = {
     "tri": lambda volume, args: bench_tri(volume, args, mounts=False),
     "tri-mount": lambda volume, args: bench_tri(volume, args, mounts=True),
+    "tri-mount-link": lambda volume, args: bench_tri(volume, args, mounts=True, env_link=True),
+    "tri-copy": lambda volume, args: bench_tri(volume, args, mounts=False, backend="copy"),
     "git": bench_git,
 }
 
@@ -321,7 +345,7 @@ def write_summary(path: Path, payload: dict[str, Any]) -> None:
         "",
         f"- Created: `{payload['created_at']}`",
         f"- Platform: `{payload['platform']}`",
-        f"- Attempts: `{params['attempts']}`; source files: `{params['source_files']}` x `{params['file_size']}` B; dependency files: `{params['dep_files']}` x `{params['dep_file_size']}` B",
+        f"- Attempts: `{params['attempts']}` (`{params.get('parallel', 1)}` at a time); source files: `{params['source_files']}` x `{params['file_size']}` B; dependency files: `{params['dep_files']}` x `{params['dep_file_size']}` B",
         "",
         "| Target | Status | Measure | Peak allocated | End allocated | Per attempt | Wall s | Checks | Backends |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
@@ -350,6 +374,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--dep-files", type=int, default=5000)
     parser.add_argument("--dep-file-size", type=int, default=2048)
     parser.add_argument("--targets", default="tri,tri-mount,git")
+    parser.add_argument("--parallel", type=int, default=1, help="attempts to run at once")
     parser.add_argument("--volume", choices=["auto", "apfs", "none"], default="auto")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
@@ -368,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
         "schema": SCHEMA,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
-        "parameters": {k: getattr(args, k) for k in ("attempts", "source_files", "file_size", "dep_files", "dep_file_size", "volume")},
+        "parameters": {k: getattr(args, k) for k in ("attempts", "parallel", "source_files", "file_size", "dep_files", "dep_file_size", "volume")},
         "results": results,
     }
     (output / "results.json").write_text(json.dumps(payload, indent=2) + "\n")
