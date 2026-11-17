@@ -103,13 +103,13 @@ Git worktrees make every attempt a full checkout, grow their own `node_modules`/
   | Backend | Where | How |
   | --- | --- | --- |
   | `clone` | APFS (macOS), btrfs / XFS / bcachefs / ZFS (Linux `FICLONE`), ReFS / Dev Drive (Windows) | Copy-on-write clones from a raw checkout cache; on macOS a whole base tree is cloned in one call and only the workspace's delta is applied |
-  | `overlay` | Linux with user + mount namespaces (opt-in: `TRI_MATERIALIZE_BACKEND=overlay`) | The run's directory is an overlay mount that exists only inside the command's namespace; only written files land on disk |
+  | `overlay` | Linux runs where unprivileged user + mount namespaces are allowed (default there; Ubuntu 24.04 needs `kernel.apparmor_restrict_unprivileged_userns=0`) | The run's directory is an overlay mount that exists only inside the command's namespace, and the command runs as the caller; only written files land on disk |
   | `copy` | Anywhere else (ext4, NTFS, cross-volume mounts) | Plain files, reported as `degraded` by `tri doctor`, checks, and leases |
 
   Override with `TRI_MATERIALIZE_BACKEND=auto|clone|copy|overlay`. Change detection compares a stat baseline (`size`, `mtime`, inode, mode), so a run only reads files it touched. Materialized files carry the fixed mtime 2000-01-01.
-- **Dependencies exist once per lockfile.** `tri env define app deps --key-file package-lock.json --install "npm ci" --output node_modules` builds `node_modules` once per key (key files + key commands + platform) under a per-key lock, freezes it read-only, and attaches it to every run and mount by clone (or a read-only symlink on `copy`; `--mode copy|link|private` overrides). Env outputs are never imported into snapshots.
+- **Dependencies exist once per lockfile.** `tri env define app deps --key-file package-lock.json --install "npm ci" --output node_modules` builds `node_modules` once per key (key files + key commands + platform) under a per-key lock, freezes it read-only, and attaches it to every run and mount by clone; on `copy` volumes a run gets a private copy (tools write into `target/` and `node_modules/.cache`) and a mount gets it only with `--env-link` (a read-only symlink). Overlay runs use a writable twin of the env as a lower layer. `--mode copy|link|private` overrides. Env outputs are never imported into snapshots.
 - **Every directory has an expiring owner.** Runs hold a lease and a holder lock; a crashed run's directory is salvaged and removed by the reaper. Mounts default to a 24-hour TTL (`--no-ttl` to opt out; `tri workspace sync` and `tri leases renew` extend it). Before anything is deleted, unsynced edits are captured as a **salvage snapshot** (`tri salvage list`, `tri salvage adopt`); only ignored dependency/build directories (`node_modules`, `.venv`, `target`, `dist`, `__pycache__`, … plus `TRI_DERIVED_DIRS`) and OS junk files are deleted without capture; a directory holding secret-like files, other ignored files, or a hand-made `.git` waits in `expired_needs_attention` until `tri leases reap <lease> --force`. One live lease owns a directory: mounting onto a path another live lease owns is refused (`mount_path_in_use`), and a directory that was deleted and recreated by someone else is never reaped. Mounts created before this change are grandfathered and never auto-reaped. The reaper runs after CLI commands (at most every 10 minutes; `TRI_AUTO_REAP=0` disables), every 5 minutes inside `tri serve`, and on demand with `tri leases reap`.
-- **Old data is reclaimable.** `tri gc` plans; `tri gc --reap` reaps leases and trims caches to budget (`TRI_CHECKOUT_CACHE_MAX_BYTES`, `TRI_BASE_CACHE_MAX_COUNT`, `TRI_ENV_CACHE_MAX_BYTES`); `tri gc --apply` also purges content no live object references once retired work passes the retention window (14 days; `--retention-days`, `--grace-seconds`). Metadata and events are kept; reading purged content returns `content_purged`.
+- **Old data is reclaimable.** `tri gc` plans; `tri gc --reap` reaps leases and trims caches to budget (`TRI_CHECKOUT_CACHE_MAX_BYTES`, `TRI_BASE_CACHE_MAX_COUNT`, `TRI_ENV_CACHE_MAX_BYTES`); `tri gc --apply` also purges content no live object references once retired work passes the retention window (14 days; `--retention-days`, `--grace-seconds`, minimum 60 s unless `--unsafe-no-grace`); `tri gc --clear-caches` drops every cache nothing live uses. Metadata and events are kept; reading purged content returns `content_purged`.
 - **History grows with the size of a change.** Snapshot trees are stored as one content-addressed node per directory, so an edit writes only the nodes on its path.
 
 **Behavior change:** runs, syncs, and salvage no longer import *new* files matched by the snapshot's `.gitignore` files or by `tri ignore add <project> <glob>` patterns (build output, caches). Tracked files are always imported, even under ignored directories.
@@ -126,6 +126,33 @@ Each attempt edits two files, needs a dependency tree, and runs a check. Space i
 | Same fixture: growth per extra attempt (10→50) | | ~43 KiB | ~1.0 MiB | ~13.3 MiB |
 
 Raw results: `benchmark-results/fanout-10`, `fanout-10-small`, `fanout-50`. Fifty Tri attempts use about 1.4× the space of a single git worktree with its dependencies; fifty worktrees use about 30×. A persistent mount costs per-file metadata for its cloned tree (~1 MiB per 3,000 files), not file contents.
+
+With 8 attempts running at once (20 attempts, same small fixture; `benchmark-results/fanout-20-parallel8`):
+
+| Target | Peak | End |
+| --- | ---: | ---: |
+| `tri` (clone) | 36.0 MiB | 29.1 MiB |
+| `tri` forced to `copy` | 59.0 MiB | 23.9 MiB |
+| `tri-mount` | 53.0 MiB | 49.4 MiB |
+| `tri-mount` with `--env-link` | 41.7 MiB | 37.3 MiB |
+| git worktrees | 275.0 MiB | 274.1 MiB |
+
+The `copy` backend peaks with the number of live runs and drops back when they finish; it never grows with attempt count.
+
+### Real project: a Rust workspace
+
+`tri-bench-fanout --repo <rust-workspace> --install "cargo test -p example-crate --no-run" --check "cargo test -p example-crate" --key-file Cargo.lock --key-file rust-toolchain.toml --env-output target --edit-file example-crate/src/lib.rs` (2 attempts each; `benchmark-results/rust-workspace-probe`):
+
+| | Tri | git worktrees |
+| --- | ---: | ---: |
+| Disk at the end | 1.0 GiB (one shared `target/` + store) | 2.8 GiB (1.4 GiB per worktree) |
+| Median time per attempt (edit + build + test) | 44 s | 127 s |
+
+What the real project showed:
+
+- **A shared `target/` works as a warm start.** Cargo validates fingerprints, so keying the environment on `Cargo.lock` + `rust-toolchain.toml` is enough; source edits only rebuild the crates they touch. The fixed 2000-01-01 mtimes did not trigger rebuilds.
+- **Crates that `include_str!`/`include_bytes!` files from outside their own directory rebuild on every run.** Cargo records those paths absolutely, and each run lives at a different path. In `example-crate` that costs about 24 s per run; dependencies are unaffected. A stable per-run path (possible with Linux mount namespaces) would remove it.
+- **Shared environments are frozen read-only**, so delete a Tri home with `tri gc --clear-caches` first (or `chmod -R u+w` it); plain `rm -rf` fails on frozen files.
 
 ## Verify
 
@@ -265,7 +292,7 @@ tri export list app --changeset cs_...
 
 ## Remaining Gates
 
-- verify the `overlay` run backend on Linux hosts and make it the Linux default; verify `FICLONE` (btrfs/XFS) and ReFS/Dev Drive clone paths and the Windows port on real machines (all are probe-guarded and fall back to `copy`)
+- verify ReFS/Dev Drive clones on a Windows machine that has them (probe-guarded; falls back to `copy`). Overlay, XFS/btrfs reflinks, and the Windows port are verified in CI.
 
 - hosted collaboration layer
 - broader hosted Policy v0 language: visibility role mapping, embargo lifecycle, cross-object inheritance rules, and actor identity binding

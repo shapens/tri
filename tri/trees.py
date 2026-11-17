@@ -42,6 +42,14 @@ def decode_node(stored: str) -> dict[str, Any]:
     return json.loads(stored[len(HIER_PREFIX) :])
 
 
+def build_tree_nodes(entries: dict[str, dict[str, Any]]) -> tuple[str, str, list[tuple[str, str, str]]]:
+    """Return ``(root_id, root_digest, nodes)`` with nodes as ``(tree_id, digest, stored)``
+    in bottom-up order, for callers that write them in bulk."""
+    nodes: list[tuple[str, str, str]] = []
+    root_id, digest = write_tree(entries, lambda tree_id, node_digest, stored: nodes.append((tree_id, node_digest, stored)))
+    return root_id, digest, nodes
+
+
 def write_tree(entries: dict[str, dict[str, Any]], store_node: Callable[[str, str, str], None]) -> tuple[str, str]:
     """Write ``entries`` as nested nodes bottom-up via ``store_node(tree_id, digest, stored)``.
 

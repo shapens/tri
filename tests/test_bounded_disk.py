@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tri.locking import FileLock
+
+POSIX = os.name != "nt"
 
 
 class FileLockTests(unittest.TestCase):
@@ -135,13 +138,16 @@ class MaterializerTests(unittest.TestCase):
 
         for path, entry in entries.items():
             target = root / path
+            if entry["mode"] == "120000" and not POSIX and not target.is_symlink():
+                continue  # Windows without symlink privilege leaves symlinks unmaterialized
             if entry["mode"] == "120000":
                 self.assertTrue(target.is_symlink(), path)
                 self.assertEqual(os.readlink(target), entry["symlink_target"])
                 continue
             self.assertEqual(target.read_bytes(), self.blobs.read(entry["blob"]), path)
             st = target.stat()
-            self.assertEqual(bool(st.st_mode & 0o100), entry["mode"] == "100755", path)
+            if POSIX:
+                self.assertEqual(bool(st.st_mode & 0o100), entry["mode"] == "100755", path)
             self.assertTrue(st.st_mode & 0o200, f"{path} must be writable")
             self.assertEqual(int(st.st_mtime), FIXED_MTIME, path)
 
@@ -184,7 +190,7 @@ class MaterializerTests(unittest.TestCase):
         (dest / "src/new.txt").write_text("new\n")
         (dest / "src/app/main.py").chmod(0o755)
         changed, deleted = mat.scan(self.entries)
-        self.assertEqual(changed, ["src/app/main.py", "src/new.txt"])
+        self.assertEqual(changed, ["src/app/main.py", "src/new.txt"] if POSIX else ["src/new.txt"])
         self.assertEqual(deleted, ["README.md"])
 
     def test_scan_unchanged_tree_reports_nothing(self) -> None:
@@ -222,6 +228,7 @@ class MaterializerTests(unittest.TestCase):
         self.assertEqual(mat.scan(self.entries), ([], []))
         self.assertEqual(env.joinpath("pkg/index.js").read_text(), "module.exports = 1\n", "attachment source must not change")
 
+    @unittest.skipUnless(POSIX, "symlinks need Developer Mode on Windows (copy fallback is tested separately)")
     def test_link_attachment_points_at_shared_source(self) -> None:
         from tri.materialize import Attachment
 
@@ -250,6 +257,18 @@ class MaterializerTests(unittest.TestCase):
         (dest / "src").chmod(0o555)
         mat.release()
         self.assertFalse(dest.exists())
+
+    def test_remove_tree_handles_unreadable_directories(self) -> None:
+        from tri.materialize import remove_tree
+
+        root = self.root / "ovl"
+        locked = root / "work" / "work"
+        locked.mkdir(parents=True)
+        (locked / "f").write_text("x")
+        locked.chmod(0o000)
+        (root / "work").chmod(0o000)
+        remove_tree(root)
+        self.assertFalse(root.exists())
 
     def test_symlink_escape_rejected(self) -> None:
         from tri.materialize import MaterializeError
@@ -314,7 +333,7 @@ class TriHarness(unittest.TestCase):
         os.environ.pop("TRI_MATERIALIZE_BACKEND", None)
         os.environ["TRI_AUTO_REAP"] = "0"
         run = lambda *a: subprocess.run(a, cwd=self.repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        run("git", "init")
+        run("git", "init", "-b", "main")
         run("git", "config", "user.email", "tri@example.com")
         run("git", "config", "user.name", "Tri Test")
         for path, text in self.files.items():
@@ -390,10 +409,12 @@ class RunImportTests(TriHarness):
 
     def test_check_reports_backend(self) -> None:
         from tri.materialize import probe_clone
+        from tri.overlay import probe_overlay
 
         ws = self.workspace()
         check = self.run_cmd(ws, "true")
-        expected = "clone" if probe_clone(Path(os.environ["TRI_HOME"])) else "copy"
+        home = Path(os.environ["TRI_HOME"])
+        expected = "overlay" if probe_overlay(home / "runs") else ("clone" if probe_clone(home) else "copy")
         self.assertEqual(check["materialized_directory"]["backend"], expected)
         self.assertEqual(check["materialized_directory"]["degraded"], expected == "copy")
         os.environ["TRI_MATERIALIZE_BACKEND"] = "copy"
@@ -474,6 +495,7 @@ class LeaseLifecycleTests(TriHarness):
         self.assertEqual(runs[0]["status"], "released")
         self.assertFalse(Path(runs[0]["path"]).exists())
 
+    @unittest.skipUnless(POSIX, "uses kill -9 to crash the run")
     def test_orphaned_run_dir_is_salvaged_and_removed(self) -> None:
         import subprocess
 
@@ -770,6 +792,28 @@ class EnvCacheTests(TriHarness):
         statuses = sorted(result["data"]["materialized_directory"]["environments"][0]["status"] for result in results)
         self.assertEqual(statuses, ["built", "reused"])
 
+    def test_copy_backend_runs_can_write_into_env_outputs(self) -> None:
+        self.define()
+        os.environ["TRI_MATERIALIZE_BACKEND"] = "copy"
+        check = self.run_cmd(self.workspace(), "echo mutated > deps/pkg/lib.txt && echo y > app.out")
+        self.assertEqual(check["status"], "passed", "tools write into dependency/build dirs (cargo target/, node_modules/.cache)")
+        self.assertEqual(self.changed(check), ["app.out"])
+        build = self.tri("env", "inspect", "app", "deps")["data"]["builds"][0]
+        self.assertEqual((Path(build["path"]) / "deps" / "pkg" / "lib.txt").read_text(), "v1\n")
+
+    def test_overlay_env_layer_is_a_writable_copy(self) -> None:
+        from tri.cli import writable_env_layer
+
+        self.define()
+        self.run_cmd(self.workspace(), "true")
+        build = self.tri("env", "inspect", "app", "deps")["data"]["builds"][0]
+        frozen = Path(build["path"]) / "deps" / "pkg" / "lib.txt"
+        layer = writable_env_layer(Path(build["path"]))
+        self.assertNotEqual(layer, Path(build["path"]))
+        self.assertTrue((layer / "deps" / "pkg" / "lib.txt").stat().st_mode & 0o200, "overlay layers must be writable by the caller")
+        self.assertFalse(frozen.stat().st_mode & 0o222, "the shared env stays frozen for symlinked use")
+        self.assertEqual(writable_env_layer(Path(build["path"])), layer, "built once per env")
+
     def test_env_attached_to_mount(self) -> None:
         from tri.materialize import probe_clone
 
@@ -818,14 +862,14 @@ class GcTests(TriHarness):
 
     def test_gc_dry_run_changes_nothing(self) -> None:
         ws, blob = self.discarded_workspace_with("only in a discarded workspace " * 20)
-        plan = self.tri("gc", "--retention-days", "0", "--grace-seconds", "0")["data"]
+        plan = self.tri("gc", "--retention-days", "0", "--grace-seconds", "0", "--unsafe-no-grace")["data"]
         self.assertFalse(plan["applied"])
         self.assertGreaterEqual(plan["plan"]["blobs"]["count"], 1)
         self.assertTrue(blob.exists())
 
     def test_gc_purges_discarded_workspace_content_after_retention(self) -> None:
         ws, blob = self.discarded_workspace_with("only in a discarded workspace " * 20)
-        result = self.tri("gc", "--apply", "--retention-days", "0", "--grace-seconds", "0")["data"]
+        result = self.tri("gc", "--apply", "--retention-days", "0", "--grace-seconds", "0", "--unsafe-no-grace")["data"]
         self.assertTrue(result["applied"])
         self.assertGreaterEqual(result["purged"]["blobs"], 1)
         self.assertFalse(blob.exists())
@@ -838,7 +882,7 @@ class GcTests(TriHarness):
         self.tri("files", "write", live, "live.txt", "--text", "live content " * 20)
         live_blob = self.blob_path(live, "live.txt")
         _, retained_blob = self.discarded_workspace_with("discarded but within retention " * 20)
-        self.tri("gc", "--apply", "--grace-seconds", "0")
+        self.tri("gc", "--apply", "--grace-seconds", "0", "--unsafe-no-grace")
         self.assertTrue(live_blob.exists())
         self.assertTrue(retained_blob.exists())
         _, recent_blob = self.discarded_workspace_with("discarded just now " * 20)
@@ -848,7 +892,7 @@ class GcTests(TriHarness):
     def test_put_blob_after_purge_rewrites(self) -> None:
         text = "content that comes back " * 20
         _, blob = self.discarded_workspace_with(text)
-        self.tri("gc", "--apply", "--retention-days", "0", "--grace-seconds", "0")
+        self.tri("gc", "--apply", "--retention-days", "0", "--grace-seconds", "0", "--unsafe-no-grace")
         self.assertFalse(blob.exists())
         ws = self.workspace()
         self.tri("files", "write", ws, "again.txt", "--text", text)
@@ -1024,6 +1068,7 @@ class ReviewFixTests(TriHarness):
             store.close()
 
     # C2 -----------------------------------------------------------------
+    @unittest.skipUnless(POSIX, "uses ln -s to make an escaping symlink")
     def test_failed_import_keeps_run_dir_for_salvage(self) -> None:
         ws = self.workspace()
         failed = self.tri("run", ws, "--", "sh", "-c", "echo work > a.txt && ln -s /usr/bin/true esc", ok=False)
@@ -1119,6 +1164,7 @@ class ReviewFixTests(TriHarness):
             store.close()
 
     # I4 -----------------------------------------------------------------
+    @unittest.skipUnless(POSIX, "Windows st_ctime is creation time, so cp -p rewrites are not detectable there")
     def test_same_size_copy_preserving_mtime_is_imported(self) -> None:
         ws = self.workspace()
         check = self.run_cmd(ws, "cp -p config.example.json config.json")
@@ -1171,6 +1217,243 @@ class GcMarkScalingTests(unittest.TestCase):
                 store.close()
 
 
+class CleanupGapTests(TriHarness):
+    files = {"README.md": "hello\n", "deps.lock": "v1\n"}
+
+    def home(self) -> Path:
+        return Path(os.environ["TRI_HOME"])
+
+    def test_orphan_run_and_staging_dirs_are_swept(self) -> None:
+        from tri.locking import FileLock
+
+        self.workspace()
+        old = time.time() - 7200
+        orphan = self.home() / "runs" / "check_orphan"
+        (orphan / "work").mkdir(parents=True)
+        (orphan / "work" / "x.txt").write_text("x")
+        os.utime(orphan, (old, old))
+        live = self.home() / "runs" / "check_live_no_row"
+        live.mkdir(parents=True)
+        holder = FileLock(live / ".holder.lock")
+        holder.acquire(exclusive=True)
+        os.utime(live, (old, old))
+        staging = self.home() / "envs" / ".env_abc.1234.tmp"
+        (staging / "deps").mkdir(parents=True)
+        os.utime(staging, (old, old))
+        fresh = self.home() / "runs" / "check_fresh"
+        fresh.mkdir(parents=True)
+        try:
+            report = self.tri("leases", "reap")["data"]
+            self.assertFalse(orphan.exists())
+            self.assertFalse(staging.exists())
+            self.assertTrue(live.exists(), "a directory whose holder is alive must stay")
+            self.assertTrue(fresh.exists(), "a just-created directory may not have its lease row yet")
+            self.assertEqual(sorted(Path(p).name for p in report["swept"]), [".env_abc.1234.tmp", "check_orphan"])
+        finally:
+            holder.close()
+
+    def test_env_claims_are_conditional(self) -> None:
+        from tri.cli import Store, claim_env_for_eviction, claim_env_for_use
+
+        self.tri("env", "define", "app", "deps", "--key-file", "deps.lock", "--install", "sh -c 'mkdir -p deps && echo x > deps/x'", "--output", "deps")
+        self.run_cmd(self.workspace(), "true")
+        store = Store()
+        try:
+            row = store.row("SELECT * FROM env_builds", ())
+            self.assertTrue(claim_env_for_use(store, row["key"]))
+            stale = store.row("SELECT * FROM env_builds", ())
+            with store.conn:
+                store.conn.execute("UPDATE env_builds SET last_used_at = '2999-01-01T00:00:00Z' WHERE key = ?", (row["key"],))
+            self.assertFalse(claim_env_for_eviction(store, stale), "a reuse after the eviction read must win")
+            fresh = store.row("SELECT * FROM env_builds", ())
+            self.assertTrue(claim_env_for_eviction(store, fresh))
+            self.assertFalse(claim_env_for_use(store, row["key"]), "an env being evicted must not be handed out")
+        finally:
+            store.close()
+
+    def test_gc_purge_also_removes_cached_copies(self) -> None:
+        ws = self.workspace()
+        text = "secret that leaked " * 40
+        self.tri("files", "write", ws, "leak.txt", "--text", text)
+        self.run_cmd(ws, "true")
+        import hashlib
+
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        from tri.cli import Store
+
+        store = Store()
+        try:  # make sure the cache holds it whatever backend this host uses
+            blob_id = store.row("SELECT id FROM blobs WHERE hash = ?", (digest,))["id"]
+            cached = store.materializer.cache.path_for(digest, blob_id, False)
+        finally:
+            store.close()
+        self.assertTrue(cached.exists())
+        self.tri("workspace", "discard", ws)
+        self.tri("gc", "--apply", "--retention-days", "0", "--grace-seconds", "0", "--unsafe-no-grace")
+        self.assertFalse(cached.exists())
+
+    def test_gc_refuses_short_grace_without_opt_in(self) -> None:
+        refused = self.tri("gc", "--apply", "--grace-seconds", "5", ok=False)
+        self.assertEqual(refused["diagnostics"][0]["code"], "invalid_command")
+        self.tri("gc", "--apply", "--grace-seconds", "5", "--unsafe-no-grace")
+
+    def test_put_tree_batches_node_writes(self) -> None:
+        from tri.cli import Store
+
+        store = Store()
+        try:
+            entries = {}
+            for i in range(20):
+                blob = store.put_blob(f"{i}".encode())
+                entries[f"d{i % 5}/f{i}.txt"] = {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": "100644"}
+            store.put_tree(entries)
+            statements: list[str] = []
+            store.conn.set_trace_callback(statements.append)
+            tree = store.put_tree(dict(entries))
+            store.conn.set_trace_callback(None)
+            tree_statements = [s for s in statements if "trees" in s]
+            self.assertLessEqual(len(tree_statements), 2, "an unchanged tree of 6 nodes needs one lookup and one bulk touch, not 2 statements per node")
+            store.conn.commit()
+            store._tree_cache.clear()
+            self.assertEqual(store.load_tree(tree["id"]), {k: dict(v) for k, v in entries.items()})
+        finally:
+            store.close()
+
+    def test_reap_errors_surface_in_doctor(self) -> None:
+        from tri.cli import Store, maybe_auto_reap
+        import tri.cli as cli
+
+        os.environ["TRI_AUTO_REAP"] = "1"
+        store = Store()
+        original = cli.reap_leases
+        try:
+            cli.reap_leases = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+            with store.conn:
+                store.conn.execute("DELETE FROM store_meta")
+            maybe_auto_reap(store)
+        finally:
+            cli.reap_leases = original
+            store.close()
+        doctor = self.tri("doctor")["data"]["materialization"]["leases"]
+        self.assertIn("boom", doctor["last_reap_error"])
+
+
+class ClearCachesTests(TriHarness):
+    files = {"README.md": "hello\n", "deps.lock": "v1\n"}
+
+    def test_clear_caches_removes_unused_caches_but_keeps_live_ones(self) -> None:
+        home = Path(os.environ["TRI_HOME"])
+        self.tri("env", "define", "app", "deps", "--key-file", "deps.lock", "--install", "sh -c 'mkdir -p deps && echo x > deps/x'", "--output", "deps", "--mode", "link")
+        self.run_cmd(self.workspace(), "true")
+        self.tri("files", "write", self.workspace(), "deps.lock", "--text", "v2\n")
+        live_ws = self.workspace()
+        self.tri("files", "write", live_ws, "deps.lock", "--text", "v3\n")
+        mount = self.root / "m"
+        self.tri("workspace", "mount", live_ws, str(mount))
+        builds = {b["key"]: b for b in self.tri("env", "inspect", "app", "deps")["data"]["builds"]}
+        self.assertEqual(len(builds), 2)
+        result = self.tri("gc", "--clear-caches")["data"]
+        evicted = {e["key"] for e in result["evicted"]["envs"]}
+        self.assertEqual(len(evicted), 1, "the env linked into the live mount stays")
+        self.assertTrue((mount / "deps" / "x").exists())
+        self.assertEqual(self.tri("doctor")["data"]["materialization"]["caches"]["checkout_cache_bytes"], 0)
+        import shutil
+
+        self.tri("leases", "reap", self.tri("leases", "list", "--workspace", live_ws)["data"]["leases"][0]["id"], "--force")
+        self.tri("gc", "--clear-caches")
+        shutil.rmtree(home)  # a cleared store deletes with plain tools (no read-only leftovers)
+        self.assertFalse(home.exists())
+
+
+class ServeAndDoctorTests(TriHarness):
+    def test_server_bind_skips_reverse_dns(self) -> None:
+        import socket
+        from tri.cli import TriAPIHandler, TriHTTPServer
+
+        original = socket.getfqdn
+        socket.getfqdn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("reverse DNS lookup during bind"))
+        try:
+            server = TriHTTPServer(("127.0.0.1", 0), TriAPIHandler)
+            server.server_close()
+        finally:
+            socket.getfqdn = original
+
+    def test_doctor_degraded_warning_is_advertised(self) -> None:
+        from tri.cli import SCHEMA_CATALOG
+
+        os.environ["TRI_MATERIALIZE_BACKEND"] = "copy"
+        warnings = self.tri("doctor")["warnings"]
+        self.assertIn("materialization_degraded", [w["code"] for w in warnings])
+        self.assertIn("materialization_degraded", SCHEMA_CATALOG["tri.diagnostic"]["codes"])
+
+
+class StoreOpenConcurrencyTests(unittest.TestCase):
+    def test_opening_a_packed_store_never_waits_for_long_lived_stores(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, TRI_HOME=home, TRI_AUTO_REAP="0")
+            open_close = "from tri.cli import Store; Store().close()"
+            subprocess.run([sys.executable, "-c", open_close], cwd=ROOT, env=env, check=True)
+            self.assertTrue((Path(home) / "tri.sqlite3.tri").exists(), "fixture: database starts packed")
+            # The holder unpacks slowly (patched here, in the test's subprocess), so the
+            # openers below always arrive while the database is still packed; it then
+            # stays open for a long time, like a long `tri run`.
+            holder_code = (
+                "import time; from tri.cli import Store\n"
+                "original = Store.unpack_db\n"
+                "def slow(self):\n    time.sleep(1.0)\n    original(self)\n"
+                "Store.unpack_db = slow\n"
+                "s = Store(); time.sleep(6); s.close()\n"
+            )
+            holder = subprocess.Popen([sys.executable, "-c", holder_code], cwd=ROOT, env=env)
+            time.sleep(0.5)
+            openers = [subprocess.Popen([sys.executable, "-c", open_close], cwd=ROOT, env=env) for _ in range(4)]
+            started = time.time()
+            for opener in openers:
+                opener.wait(timeout=30)
+            elapsed = time.time() - started
+            holder.wait(timeout=30)
+            self.assertLess(elapsed, 3.5, "an opener waited for another store's whole lifetime")
+
+
+class CoarseTimestampTests(unittest.TestCase):
+    def test_update_baseline_skips_racily_clean_entries(self) -> None:
+        from tri.materialize import Materialization
+
+        mat = Materialization(path=Path("/nonexistent"), backend="copy", degraded=True, baseline={"a": [1, 0, 1, 33188, 0]})
+        now_ns = time.time_ns()
+        mat.update_baseline({"a": [2, now_ns, 1, 33188, now_ns], "b": [3, now_ns - 10_000_000_000, 2, 33188, now_ns - 10_000_000_000]})
+        self.assertEqual(mat.baseline["a"], [1, 0, 1, 33188, 0], "an entry written within the timestamp tick is not trusted")
+        self.assertEqual(mat.baseline["b"][0], 3)
+
+
+class WindowsFallbackTests(unittest.TestCase):
+    def test_link_attachment_falls_back_to_copy_when_symlinks_fail(self) -> None:
+        import tri.materialize as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "env" / "deps"
+            src.mkdir(parents=True)
+            (src / "x").write_text("x")
+            blobs = FakeBlobs()
+            cache = m.CheckoutCache(root / "home" / "checkout", blobs.read)
+            mat = m.Materializer(root / "home", cache, read_blob=blobs.read)
+            original = m.os.symlink
+
+            def deny(*args: object, **kwargs: object) -> None:
+                raise OSError(1314, "A required privilege is not held by the client")
+
+            m.os.symlink = deny
+            try:
+                result = mat.materialize({"a.txt": blobs.entry(b"a")}, root / "w", attachments=[m.Attachment("deps", src, "link")], backend="copy")
+            finally:
+                m.os.symlink = original
+            self.assertEqual((root / "w" / "deps" / "x").read_text(), "x")
+            self.assertIn("attachment_link_failed", [n["code"] for n in result.notes])
+
+
 def overlay_available() -> bool:
     if not sys.platform.startswith("linux"):
         return False
@@ -1198,6 +1481,14 @@ class OverlayTests(TriHarness):
         self.assertEqual(self.changed(check), ["README.md", "new.txt", "src/app.txt"])
         text = self.tri("files", "read", ws, "src/app.txt")["data"]["text"]
         self.assertEqual(text, "head edit\ne\n")
+
+    def test_overlay_command_runs_as_caller_when_possible(self) -> None:
+        ws = self.workspace()
+        check = self.run_cmd(ws, f"test \"$(id -u)\" = {os.getuid()}")
+        overlay = check["materialized_directory"]["overlay"]
+        if overlay["mode"] == "userns" and not overlay["drop_root"]:
+            self.skipTest("util-linux on this host cannot map the caller's uid in a nested namespace")
+        self.assertEqual(check["status"], "passed", "commands must not run as root over the overlay")
 
     def test_overlay_upper_holds_only_changes(self) -> None:
         from tri.cli import Store

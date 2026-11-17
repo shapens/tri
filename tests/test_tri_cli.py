@@ -23,13 +23,18 @@ if str(ROOT) not in sys.path:
 from tri.cli import SCHEMA_CATALOG, SCHEMA_VERSION, Store, TriError, cmd_conflicts_resolve, cmd_workspace_snapshot, cmd_workspace_update, utcnow
 
 
+def lf(text: str) -> str:
+    """Programs print \r\n on Windows; compare text by content, not line endings."""
+    return text.replace("\r\n", "\n")
+
+
 class TriCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="tri-test-")
         self.root = Path(self.tmp.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
-        subprocess.run(["git", "init"], cwd=self.repo, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo, check=True, stdout=subprocess.PIPE)
         subprocess.run(["git", "config", "user.email", "tri@example.com"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Tri Test"], cwd=self.repo, check=True)
         (self.repo / "src").mkdir()
@@ -1037,7 +1042,7 @@ class TriCliTests(unittest.TestCase):
             self.assertTrue(artifact_view["data"]["fingerprint"].startswith("sha256:"))
             self.assertEqual(artifact_view["data"]["storage"]["content_route"], f"/v0/artifacts/{stdout_artifact}/content")
             artifact_content = self.api_get(port, f"/v0/artifacts/{stdout_artifact}/content", actor="agent:api")
-            self.assertEqual(artifact_content["data"]["text"], "api ok\n")
+            self.assertEqual(lf(artifact_content["data"]["text"]), "api ok\n")
             self.assertIsNone(artifact_content["data"]["path"])
             self.assertEqual(artifact_content["data"]["fingerprint"], artifact_view["data"]["fingerprint"])
             workspace_events = self.api_get(port, f"/v0/workspaces/{workspace}/events?limit=5", actor="agent:api")
@@ -1482,7 +1487,7 @@ class TriCliTests(unittest.TestCase):
         self.assertTrue(refreshed_summary["data"]["check_summary"]["required_satisfied"])
 
         streamed = self.tri("checks", "stream", new_check["id"], "--log", "stdout")["data"]
-        self.assertEqual(streamed["text"], "ok\n")
+        self.assertEqual(lf(streamed["text"]), "ok\n")
         self.tri("review", "approve", review)
         self.assertTrue(self.tri("policy", "evaluate", "export", changeset["id"])["data"]["allowed"])
 
@@ -2074,11 +2079,11 @@ class TriCliTests(unittest.TestCase):
         self.assertNotIn(workspace, public_check_event["refs"].get("workspaces", []))
 
         streamed = self.tri("--actor", "agent:b", "checks", "stream", check["id"], "--log", "stdout")
-        self.assertEqual(streamed["data"]["text"], "review-evidence\n")
+        self.assertEqual(lf(streamed["data"]["text"]), "review-evidence\n")
         artifacts = self.tri("--actor", "agent:b", "checks", "artifacts", check["id"])
         self.assertEqual({item["id"] for item in artifacts["data"]["artifacts"]}, set(check["artifacts"]))
         stdout_artifact = self.tri("--actor", "agent:b", "artifacts", "read", check["logs"]["stdout"])
-        self.assertEqual(stdout_artifact["data"]["text"], "review-evidence\n")
+        self.assertEqual(lf(stdout_artifact["data"]["text"]), "review-evidence\n")
         self.assertIsNone(stdout_artifact["data"]["path"])
         self.assertTrue(stdout_artifact["data"]["storage"]["path_redacted"])
         self.assertEqual({origin["policy_object"] for origin in stdout_artifact["data"]["origins"]}, {changeset})
@@ -2340,6 +2345,7 @@ class TriCliTests(unittest.TestCase):
         imported = self.import_project()
         workspace = self.tri("workspace", "create", "app", "--from", imported["data"]["target"]["name"])["data"]["id"]
         before = self.tri("workspace", "inspect", workspace)["data"]["head_snapshot"]
+        release = self.root / "release-run"
         proc = subprocess.Popen(
             [
                 "python3",
@@ -2350,7 +2356,8 @@ class TriCliTests(unittest.TestCase):
                 "--",
                 "python3",
                 "-c",
-                "import time; from pathlib import Path; time.sleep(0.5); Path('src/app.txt').write_text('run edit\\n')",
+                # Wait for the test to finish its concurrent write instead of racing a fixed sleep.
+                f"import time; from pathlib import Path; deadline = time.time() + 30\nwhile not Path({str(release)!r}).exists() and time.time() < deadline: time.sleep(0.02)\nPath('src/app.txt').write_text('run edit\\n')",
             ],
             cwd=ROOT,
             env=self.env,
@@ -2373,7 +2380,8 @@ class TriCliTests(unittest.TestCase):
             self.fail(f"tri run did not create check.started\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
 
         concurrent = self.tri("files", "write", workspace, "README.md", "--text", "concurrent\n")
-        stdout, stderr = proc.communicate(timeout=10)
+        release.write_text("go")
+        stdout, stderr = proc.communicate(timeout=30)
         self.assertNotEqual(proc.returncode, 0, stdout)
         result = json.loads(stdout)
         self.assertFalse(result["ok"])
@@ -2878,7 +2886,7 @@ class TriCliTests(unittest.TestCase):
 
         artifact = self.tri("artifacts", "read", stdout_artifact)
         self.assert_schema_required_keys("tri.artifacts.read", artifact["data"])
-        self.assertEqual(artifact["data"]["text"], "agent-log\n")
+        self.assertEqual(lf(artifact["data"]["text"]), "agent-log\n")
         self.assertIsNone(artifact["data"]["path"])
         self.assertTrue(artifact["data"]["fingerprint"].startswith("sha256:"))
         self.assertEqual(artifact["data"]["storage"]["content_command"], ["artifacts", "read", stdout_artifact])
@@ -2969,7 +2977,7 @@ class TriCliTests(unittest.TestCase):
         self.assertEqual(allowed_event_visibility["data"]["object_type"], "event")
         self.assertTrue(allowed_event_visibility["data"]["access"]["allowed"])
         allowed_artifact = self.tri("--actor", "agent:b", "artifacts", "read", stdout_artifact)
-        self.assertEqual(allowed_artifact["data"]["text"], "agent-log\n")
+        self.assertEqual(lf(allowed_artifact["data"]["text"]), "agent-log\n")
         self.assertIsNone(allowed_artifact["data"]["path"])
         self.assertEqual(allowed_artifact["data"]["fingerprint"], artifact["data"]["fingerprint"])
         allowed_config = self.tri("--actor", "agent:b", "artifacts", "read", config_artifact)
@@ -2994,7 +3002,7 @@ class TriCliTests(unittest.TestCase):
             store.close()
 
         mixed_origin = self.tri("--actor", "agent:b", "artifacts", "read", stdout_artifact)
-        self.assertEqual(mixed_origin["data"]["text"], "agent-log\n")
+        self.assertEqual(lf(mixed_origin["data"]["text"]), "agent-log\n")
         self.assertEqual(mixed_origin["data"]["access"]["origin_count"], 3)
         self.assertEqual(mixed_origin["data"]["access"]["redacted_origins"], 1)
         self.assertEqual(len(mixed_origin["data"]["origins"]), 2)
@@ -3150,7 +3158,7 @@ class TriCliTests(unittest.TestCase):
         self.assertEqual(sync["data"]["lease"], lease)
 
         read = self.tri("files", "read", workspace, "src/app.txt")
-        self.assertEqual(read["data"]["text"], "mounted edit\n")
+        self.assertEqual(lf(read["data"]["text"]), "mounted edit\n")
         files = {item["path"] for item in self.tri("files", "list", workspace)["data"]["files"]}
         self.assertNotIn("tmp/ignored.txt", files)
 
@@ -3180,7 +3188,7 @@ class TriCliTests(unittest.TestCase):
         sync_a = self.tri("--actor", "agent:a", "workspace", "sync", workspace)
         self.assertEqual(sync_a["data"]["lease"], lease_a)
         self.assertEqual(sync_a["data"]["paths"], ["src/app.txt"])
-        self.assertEqual(self.tri("--actor", "agent:a", "files", "read", workspace, "src/app.txt")["data"]["text"], "agent a mount edit\n")
+        self.assertEqual(lf(self.tri("--actor", "agent:a", "files", "read", workspace, "src/app.txt")["data"]["text"]), "agent a mount edit\n")
 
         ambiguous = self.tri("workspace", "sync", workspace, ok=False)
         self.assertEqual(ambiguous["diagnostics"][0]["code"], "stale_materialization")
@@ -3925,7 +3933,7 @@ class TriCliTests(unittest.TestCase):
         self.assertFalse(first_chunk["eof"])
 
         second_chunk = self.tri("checks", "stream", check_id, "--log", "stdout", "--offset", str(first_chunk["next_offset"]), "--limit", "1024")["data"]
-        self.assertEqual(second_chunk["text"], "able\n")
+        self.assertEqual(lf(second_chunk["text"]), "able\n")
         self.assertTrue(second_chunk["eof"])
 
         stderr_chunk = self.tri("checks", "stream", check_id, "--log", "stderr")["data"]

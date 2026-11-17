@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri.ignore import IgnoreRules
 from tri.locking import FileLock
-from tri.trees import decode_node, flatten as flatten_tree, is_hierarchical, write_tree
+from tri.trees import build_tree_nodes, decode_node, flatten as flatten_tree, is_hierarchical
 from tri.overlay import OverlayMaterialization, overlay_from_payload, prepare_overlay_run, probe_overlay
 from tri.materialize import (
     Attachment,
@@ -38,7 +38,9 @@ from tri.materialize import (
     MaterializeError,
     Materializer,
     clone_dir_supported,
+    clone_file,
     load_materialization,
+    make_tree_writable,
     probe_clone,
     remove_tree,
     stat_key,
@@ -67,7 +69,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "import", "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]", "schema": "tri.import", "description": "Import a Git repo or directory into Tri snapshots."},
     {"name": "projects-list", "usage": "tri projects list", "schema": "tri.project.list", "description": "List projects in the local Tri store."},
     {"name": "projects-inspect", "usage": "tri projects inspect <project>", "schema": "tri.project.inspect", "description": "Inspect project metadata and child object counts."},
-    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
+    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>] [--unsafe-no-grace] [--clear-caches]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
     {"name": "env-define", "usage": "tri env define <project> <name> --install <cmd> --output <path> [--output <path>] [--key-file <glob>] [--key-command <cmd>] [--mode auto|copy|link|private]", "schema": "tri.env.recipe", "description": "Declare a dependency environment built once per key (key files + key commands + platform) and shared read-only by runs and mounts."},
     {"name": "env-list", "usage": "tri env list <project>", "schema": "tri.env.list", "description": "List environment recipes."},
     {"name": "env-inspect", "usage": "tri env inspect <project> <name>", "schema": "tri.env.inspect", "description": "Inspect an environment recipe and its cached builds."},
@@ -226,6 +228,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
             "stale_materialization",
             "lease_already_reaped",
             "mount_path_in_use",
+            "materialization_degraded",
             "content_purged",
             "gc_in_progress",
             "salvage_already_adopted",
@@ -285,7 +288,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.env.list": {"required": ["project", "recipes"]},
     "tri.env.inspect": {"required": ["recipe", "builds"]},
     "tri.lease.list": {"required": ["workspace", "leases"]},
-    "tri.lease.reap": {"required": ["reaped", "salvaged", "needs_attention", "errors", "checked", "busy"]},
+    "tri.lease.reap": {"required": ["reaped", "salvaged", "needs_attention", "errors", "checked", "busy", "swept"]},
     "tri.salvage.list": {"required": ["workspace", "salvages"]},
     "tri.salvage.adopt": {"required": ["salvage", "workspace", "operation", "snapshot", "paths"]},
     "tri.disk_lease.inspect": {"required": ["id", "kind", "path", "workspace", "status", "backend", "created_at", "released_at"]},
@@ -528,9 +531,23 @@ class Store:
         self._blob_cache: dict[str, bytes] = {}
         self._tree_cache: dict[str, tuple[dict[str, dict[str, Any]], set[str]]] = {}
         self.home.mkdir(parents=True, exist_ok=True)
+        # Two locks, so no lock is ever converted between shared and exclusive
+        # (flock conversion is not atomic):
+        # - the open lock is held shared by every open Store; packing takes it
+        #   exclusive, so the database is only removed when nobody has it open;
+        # - the admin lock serializes unpacking, schema setup, and packing.
+        # Opening therefore never waits on another open Store, only on a pack or
+        # unpack in progress.
         self.lock_file = FileLock(self.lock_path)
-        needs_exclusive_open = not self.db_path.exists()
-        self.lock_file.acquire(exclusive=needs_exclusive_open)
+        self.lock_file.acquire(exclusive=False)
+        self.admin_lock = FileLock(self.home / "tri.sqlite3.admin.lock")
+        self.admin_lock.acquire(exclusive=True)
+        try:
+            self._open_db(pack_on_close)
+        finally:
+            self.admin_lock.release()
+
+    def _open_db(self, pack_on_close: bool | None) -> None:
         self.pack_db_max_bytes: int | None = None
         if pack_on_close is None:
             pack_value = os.environ.get("TRI_SQLITE_PACK", "auto").lower()
@@ -561,8 +578,6 @@ class Store:
                 page_size = 512
             self.conn.execute(f"PRAGMA page_size={page_size}")
         self.init_db()
-        if needs_exclusive_open:
-            self.lock_file.acquire(exclusive=False)
 
     @property
     def materializer(self) -> Materializer:
@@ -1076,16 +1091,23 @@ class Store:
         except sqlite3.Error:
             pass
         self.conn.close()
-        if self.pack_on_close:
+        if self.pack_on_close and self.lock_file is not None:
             try:
-                assert self.lock_file is not None
-                if self.lock_file.acquire(exclusive=True, blocking=False):
-                    self.pack_db()
+                self.admin_lock.acquire(exclusive=True)
+                try:
+                    # Drop our open lock, then pack only if nobody else has the
+                    # store open; a Store that opens meanwhile keeps it unpacked.
+                    self.lock_file.release()
+                    if self.lock_file.acquire(exclusive=True, blocking=False):
+                        self.pack_db()
+                finally:
+                    self.admin_lock.release()
             except OSError:
                 pass
         if self.lock_file is not None:
             self.lock_file.close()
             self.lock_file = None
+        self.admin_lock.close()
 
     def row(self, sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
         return self.conn.execute(sql, params).fetchone()
@@ -1145,8 +1167,33 @@ class Store:
 
     def put_tree(self, entries: dict[str, dict[str, Any]]) -> dict[str, str]:
         """Store ``entries`` as directory-level nodes; unchanged directories are shared."""
-        tree_id, digest = write_tree(entries, self._store_tree_row)
+        tree_id, digest, nodes = build_tree_nodes(entries)
+        self._store_tree_rows(nodes)
         return {"id": tree_id, "hash": digest}
+
+    def _store_tree_rows(self, nodes: list[tuple[str, str, str]]) -> None:
+        """Write tree nodes in bulk: one lookup, inserts for new nodes, one touch
+        (which also protects them from a concurrent GC) for existing ones."""
+        unique = {tree_id: (digest, stored) for tree_id, digest, stored in nodes}
+        ids = list(unique)
+        existing: dict[str, Any] = {}
+        for offset in range(0, len(ids), 900):
+            chunk = ids[offset : offset + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(f"SELECT id, purged_at FROM trees WHERE id IN ({placeholders})", chunk):
+                existing[row["id"]] = row["purged_at"]
+        now = utcnow()
+        missing = [(tree_id, unique[tree_id][0], unique[tree_id][1], now, now) for tree_id in ids if tree_id not in existing]
+        if missing:
+            self.conn.executemany("INSERT OR IGNORE INTO trees (id, hash, entries_json, created_at, last_referenced_at) VALUES (?, ?, ?, ?, ?)", missing)
+        for tree_id, purged_at in existing.items():
+            if purged_at:
+                self._store_tree_row(tree_id, unique[tree_id][0], unique[tree_id][1])
+        live = [tree_id for tree_id, purged_at in existing.items() if not purged_at]
+        for offset in range(0, len(live), 900):
+            chunk = live[offset : offset + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(f"UPDATE trees SET last_referenced_at = ? WHERE id IN ({placeholders})", (now, *chunk))
 
     def _store_tree_row(self, tree_id: str, digest: str, stored_entries: str) -> None:
         now = utcnow()
@@ -2780,6 +2827,37 @@ def load_any_materialization(path: Path, baseline_file: Path) -> Materialization
     return load_materialization(path, baseline_file)
 
 
+def writable_env_layer(env_root: Path) -> Path:
+    """A writable-mode twin of a frozen env, built once per env, for use as an
+    overlay lower layer: commands run as the caller there, so read-only modes
+    would block the copy-up of any file they write. Uses clones where the volume
+    supports them."""
+    env_root = Path(env_root)
+    twin = env_root.with_name(env_root.name + ".layer")
+    if twin.is_dir():
+        return twin
+    staging = env_root.with_name(f".{env_root.name}.layer.{uuid.uuid4().hex}.tmp")
+    method = probe_clone(env_root.parent)
+
+    def copy_one(src: str, dst: str) -> None:
+        if method is not None:
+            try:
+                clone_file(Path(src), Path(dst), method)
+                shutil.copystat(src, dst)
+                return
+            except OSError:
+                pass
+        shutil.copy2(src, dst)
+
+    shutil.copytree(env_root, staging, symlinks=True, copy_function=copy_one)
+    make_tree_writable(staging)
+    try:
+        os.rename(staging, twin)
+    except OSError:
+        remove_tree(staging)
+    return twin
+
+
 def materialize_for_run(
     store: Store,
     entries: dict[str, dict[str, Any]],
@@ -2793,15 +2871,21 @@ def materialize_for_run(
     overlay (Linux namespaces) > clone > copy."""
     preference = (os.environ.get("TRI_MATERIALIZE_BACKEND") or "auto").lower()
     notes: list[dict[str, Any]] = []
-    # Overlay runs are opt-in (TRI_MATERIALIZE_BACKEND=overlay) until they have been
-    # verified on Linux hosts; "auto" uses clone (reflink) or copy there.
-    if allow_overlay and preference == "overlay":
+    # Linux hosts that allow unprivileged user + mount namespaces get overlay runs
+    # automatically (verified in CI); others fall back to clone (reflink) or copy.
+    if allow_overlay and preference in ("auto", "overlay"):
         info = probe_overlay(store.runs)
         if info is not None:
             base_row = store.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (base_snapshot,)) if base_snapshot else None
             base = (base_row["root_tree_id"], store.load_tree(base_row["root_tree_id"])) if base_row else None
             if base is None:
                 base = (f"head_{entries_fingerprint(entries)[7:23]}", entries)
+            layer_attachments = []
+            for attachment in attachments:
+                env_root = Path(attachment.source)
+                for _ in attachment.rel.split("/"):
+                    env_root = env_root.parent
+                layer_attachments.append(Attachment(attachment.rel, writable_env_layer(env_root) / attachment.rel, attachment.mode))
             try:
                 return prepare_overlay_run(
                     run_root=run_lease.dir,
@@ -2810,7 +2894,7 @@ def materialize_for_run(
                     read_blob=store.read_blob,
                     entries=entries,
                     base=base,
-                    attachments=attachments,
+                    attachments=layer_attachments,
                     info=info,
                 )
             except MaterializeError as exc:
@@ -6428,8 +6512,10 @@ class RunLease:
         # sees the lock drop can never mistake a cleanup in progress for a crash.
         with self.store.conn:
             self.store.conn.execute("UPDATE disk_leases SET status = 'released', released_at = ? WHERE id = ? AND status = 'active'", (utcnow(), self.id))
-        remove_tree(self.dir)
+        # The reaper only claims 'active' leases, so the lock can drop now; it must
+        # close before removal because Windows cannot delete an open file.
         self.holder.close()
+        remove_tree(self.dir)
 
     def abandon(self) -> None:
         """Keep the directory for the reaper to salvage (the command ran but its
@@ -6820,7 +6906,7 @@ def reap_leases(
     explicit = force_lease is not None or workspace_id is not None
     if not reaper_lock.acquire(exclusive=True, blocking=explicit):
         reaper_lock.close()
-        return {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": True}
+        return {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": True, "swept": []}
     try:
         return _reap_leases_locked(store, actor=actor, limit=limit, force_lease=force_lease, workspace_id=workspace_id, reason=reason, force=force)
     finally:
@@ -6837,7 +6923,7 @@ def _reap_leases_locked(
     reason: str | None,
     force: bool = True,
 ) -> dict[str, Any]:
-    report: dict[str, Any] = {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": False}
+    report: dict[str, Any] = {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": False, "swept": []}
 
     def record(result: dict[str, Any] | None) -> None:
         if result is None:
@@ -6896,8 +6982,53 @@ def _reap_leases_locked(
             continue
         budget -= 1
         attempt(lambda mount=mount, why=why: reap_mount_lease(store, mount, actor=actor, reason=why), mount["id"])
+    if workspace_id is None and force_lease is None:
+        report["swept"] = sweep_orphan_dirs(store)
     store_meta_set(store, "last_reap_at", utcnow())
     return report
+
+
+ORPHAN_DIR_MIN_AGE_SECONDS = 600
+STAGING_DIR_MIN_AGE_SECONDS = 3600
+
+
+def sweep_orphan_dirs(store: Store) -> list[str]:
+    """Remove run directories no active lease owns (crashes before the lease row
+    was written, leaks from older versions) and stale env staging directories."""
+    swept: list[str] = []
+    now = time.time()
+    owned = {Path(row["path"]).parent.name for row in store.rows("SELECT path FROM disk_leases WHERE status IN ('active', 'reaping')")}
+    if store.runs.exists():
+        for child in store.runs.iterdir():
+            if child.name in owned:
+                continue
+            try:
+                if now - child.lstat().st_mtime < ORPHAN_DIR_MIN_AGE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            holder = child / ".holder.lock"
+            if holder.exists():
+                probe = FileLock(holder)
+                try:
+                    if not probe.acquire(exclusive=True, blocking=False):
+                        continue
+                finally:
+                    probe.close()
+            remove_tree(child)
+            swept.append(str(child))
+    envs = store.home / "envs"
+    if envs.exists():
+        for child in envs.iterdir():
+            if child.name.startswith(".") and child.name.endswith(".tmp"):
+                try:
+                    if now - child.lstat().st_mtime < STAGING_DIR_MIN_AGE_SECONDS:
+                        continue
+                except OSError:
+                    continue
+                remove_tree(child)
+                swept.append(str(child))
+    return swept
 
 
 def maybe_auto_reap(store: Store) -> None:
@@ -6911,8 +7042,14 @@ def maybe_auto_reap(store: Store) -> None:
         except ValueError:
             pass
     store_meta_set(store, "last_reap_at", utcnow())
-    reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
-    evict_caches(store)
+    try:
+        reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
+        evict_caches(store)
+    except Exception as exc:  # maintenance never fails the user's command; surface it in doctor
+        store_meta_set(store, "last_reap_error", f"{utcnow()} {type(exc).__name__}: {exc}")
+        return
+    with store.conn:
+        store.conn.execute("DELETE FROM store_meta WHERE key = 'last_reap_error'")
 
 
 def start_reaper_thread(interval: float = SERVE_REAP_INTERVAL_SECONDS) -> threading.Event:
@@ -6948,6 +7085,7 @@ def lease_status_summary(store: Store) -> dict[str, Any]:
         "needs_attention": attention,
         "grandfathered": grandfathered,
         "last_reap_at": store_meta_get(store, "last_reap_at"),
+        "last_reap_error": store_meta_get(store, "last_reap_error"),
     }
 
 
@@ -7117,7 +7255,9 @@ _ENV_KEY_COMMAND_CACHE: dict[str, str] = {}
 
 
 def split_command(command_text: str) -> list[str]:
-    return shlex.split(command_text, posix=os.name != "nt")
+    """Recipe commands use POSIX shell-style quoting on every platform and run
+    without a shell (use ``sh -c``/``cmd /c`` for shell features)."""
+    return shlex.split(command_text, posix=True)
 
 
 def env_platform_tag() -> str:
@@ -7242,6 +7382,24 @@ def _record_env_build(store: Store, key: str, recipe: sqlite3.Row, **fields: Any
             store.conn.execute(f"UPDATE env_builds SET {columns} WHERE key = ?", (*fields.values(), key))
 
 
+def claim_env_for_use(store: Store, key: str) -> bool:
+    """Mark a ready env as just used; fails if eviction claimed it first."""
+    with store.conn:
+        return store.conn.execute("UPDATE env_builds SET last_used_at = ? WHERE key = ? AND status = 'ready'", (utcnow(), key)).rowcount == 1
+
+
+def claim_env_for_eviction(store: Store, row: sqlite3.Row) -> bool:
+    """Claim an env for eviction only if nobody used it since ``row`` was read."""
+    with store.conn:
+        return (
+            store.conn.execute(
+                "UPDATE env_builds SET status = 'evicting' WHERE key = ? AND status = 'ready' AND last_used_at = ?",
+                (row["key"], row["last_used_at"]),
+            ).rowcount
+            == 1
+        )
+
+
 def ensure_env(store: Store, recipe: sqlite3.Row, entries: dict[str, dict[str, Any]], *, actor: str, workspace: sqlite3.Row | None) -> tuple[sqlite3.Row, str]:
     """Return a ready shared environment for ``entries``, building it once per key."""
     key, inputs = env_key(recipe, entries)
@@ -7255,16 +7413,14 @@ def ensure_env(store: Store, recipe: sqlite3.Row, entries: dict[str, dict[str, A
         return None
 
     row = ready_row()
-    if row is not None:
-        with store.conn:
-            store.conn.execute("UPDATE env_builds SET last_used_at = ? WHERE key = ?", (utcnow(), key))
-        return row, "reused"
+    if row is not None and claim_env_for_use(store, key):
+        return store.row("SELECT * FROM env_builds WHERE key = ?", (key,)), "reused"
     key_lock = FileLock(envs_root / f".{key}.lock")
     key_lock.acquire(exclusive=True)
     try:
         row = ready_row()
-        if row is not None:
-            return row, "reused"
+        if row is not None and claim_env_for_use(store, key):
+            return store.row("SELECT * FROM env_builds WHERE key = ?", (key,)), "reused"
         _record_env_build(store, key, recipe, status="building", error_json=None)
         build = RunLease(store, kind="env_build", key=f"envbuild_{key}_{uuid.uuid4().hex[:8]}", workspace_id=workspace["id"] if workspace is not None else None, before_snapshot=None)
         try:
@@ -7450,6 +7606,7 @@ def cmd_env_remove(store: Store, args: argparse.Namespace, command: list[str], s
 
 GC_RETENTION_DAYS = 14
 GC_GRACE_SECONDS = 3600
+GC_MIN_GRACE_SECONDS = 60
 ROOT_SNAPSHOT_SOURCES = ("imported", "merge")
 
 
@@ -7592,11 +7749,14 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
             freed = 0
             purged_blobs = 0
             purged_trees = 0
+            purged_hashes: list[str] = []
+            purged_tree_ids: list[str] = []
             for row in computed["blob_rows"]:
                 current = store.conn.execute("SELECT purged_at, created_at, last_referenced_at FROM blobs WHERE id = ?", (row["id"],)).fetchone()
                 if current is None or current["purged_at"] or (current["last_referenced_at"] or current["created_at"]) >= mark_start:
                     continue
                 purged_blobs += 1
+                purged_hashes.append(row["hash"])
                 store.conn.execute("UPDATE blobs SET purged_at = ? WHERE id = ?", (now, row["id"]))
                 path = blob_object_path(store, row)
                 try:
@@ -7610,6 +7770,7 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
                 if current is None or current["purged_at"] or (current["last_referenced_at"] or current["created_at"]) >= mark_start:
                     continue
                 purged_trees += 1
+                purged_tree_ids.append(row["id"])
                 store.conn.execute("UPDATE trees SET purged_at = ?, entries_json = '' WHERE id = ?", (now, row["id"]))
             store._tree_cache.clear()
             store.create_event(
@@ -7621,6 +7782,19 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
         except BaseException:
             store.conn.rollback()
             raise
+        # Purged bytes must not linger in derived caches (matters when GC is used
+        # to scrub leaked content).
+        for digest in purged_hashes:
+            for suffix in ("", ".x"):
+                try:
+                    (store.checkout / digest[:2] / (digest + suffix)).unlink()
+                except FileNotFoundError:
+                    pass
+        for tree_id in purged_tree_ids:
+            for name in (tree_id, f"{tree_id}.links"):
+                base = store.home / "bases" / name
+                if base.exists():
+                    remove_tree(base)
         return {"blobs": purged_blobs, "trees": purged_trees, "freed_bytes": freed}
     finally:
         gc_lock.close()
@@ -7661,13 +7835,13 @@ def live_workspace_hashes(store: Store) -> set[str]:
     return hashes
 
 
-def evict_caches(store: Store) -> dict[str, Any]:
+def evict_caches(store: Store, *, clear: bool = False) -> dict[str, Any]:
     """Keep derived caches (checkout cache, base dirs, env builds) within budgets,
-    never removing what a live lease depends on."""
+    never removing what a live lease depends on. ``clear`` drops everything else."""
     report: dict[str, Any] = {"envs": [], "bases_removed": [], "checkout_cache_bytes_freed": 0}
     # Environment builds: LRU beyond the byte budget.
-    env_budget = env_int("TRI_ENV_CACHE_MAX_BYTES", 10 * 1024**3)
-    grace = iso_before(env_int("TRI_ENV_EVICT_GRACE_SECONDS", 600))
+    env_budget = -1 if clear else env_int("TRI_ENV_CACHE_MAX_BYTES", 10 * 1024**3)
+    grace = utcnow() if clear else iso_before(env_int("TRI_ENV_EVICT_GRACE_SECONDS", 600))
     protected = active_lease_env_keys(store)
     ready = store.rows("SELECT * FROM env_builds WHERE status = 'ready' ORDER BY last_used_at, created_at")
     total = sum(row["size_bytes"] or 0 for row in ready)
@@ -7676,7 +7850,10 @@ def evict_caches(store: Store) -> dict[str, Any]:
             break
         if row["key"] in protected or row["last_used_at"] > grace:
             continue
+        if not claim_env_for_eviction(store, row):
+            continue
         remove_tree(Path(row["path"]))
+        remove_tree(Path(row["path"] + ".layer"))
         with store.conn:
             store.conn.execute("UPDATE env_builds SET status = 'evicted' WHERE key = ?", (row["key"],))
         total -= row["size_bytes"] or 0
@@ -7684,7 +7861,7 @@ def evict_caches(store: Store) -> dict[str, Any]:
     # Base directories: keep the most recently used N.
     bases_root = store.home / "bases"
     if bases_root.exists():
-        keep = env_int("TRI_BASE_CACHE_MAX_COUNT", 8)
+        keep = 0 if clear else env_int("TRI_BASE_CACHE_MAX_COUNT", 8)
         in_use = active_overlay_lowers(store)
         stale_tmp = iso_before(3600)
         candidates = []
@@ -7703,7 +7880,7 @@ def evict_caches(store: Store) -> dict[str, Any]:
             report["bases_removed"].append(child.name)
     # Checkout cache: drop blobs no live workspace needs, then everything if still over.
     cache = store.materializer.cache
-    budget = env_int("TRI_CHECKOUT_CACHE_MAX_BYTES", 2 * 1024**3)
+    budget = -1 if clear else env_int("TRI_CHECKOUT_CACHE_MAX_BYTES", 2 * 1024**3)
     size = cache.size_bytes()
     if size > budget and cache.root.exists():
         live = live_workspace_hashes(store)
@@ -7732,10 +7909,18 @@ def cmd_gc(store: Store, args: argparse.Namespace, command: list[str], start: fl
     grace = GC_GRACE_SECONDS if args.grace_seconds is None else args.grace_seconds
     if retention < 0 or grace < 0:
         raise TriError("invalid_command", "Retention and grace must be non-negative.")
+    if grace < GC_MIN_GRACE_SECONDS and not args.unsafe_no_grace:
+        raise TriError(
+            "invalid_command",
+            f"A grace period under {GC_MIN_GRACE_SECONDS} s can purge content a command has written but not yet committed; pass --unsafe-no-grace only when nothing else is using the store.",
+            grace_seconds=grace,
+        )
     data: dict[str, Any] = {"applied": bool(args.apply), "reaped": None, "evicted": None, "purged": None}
     if args.reap or args.apply:
         data["reaped"] = reap_leases(store, actor=args.actor)
         data["evicted"] = evict_caches(store)
+    if args.clear_caches:
+        data["evicted"] = evict_caches(store, clear=True)
     data["plan"] = gc_plan_summary(store, gc_compute(store, retention_days=retention, grace_seconds=grace))
     if args.apply:
         data["purged"] = gc_apply(store, retention_days=retention, grace_seconds=grace)
@@ -13026,7 +13211,7 @@ def cmd_export_patch(store: Store, args: argparse.Namespace, command: list[str],
         if args.output:
             out = Path(args.output)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(patch)
+            out.write_text(patch, newline="\n")
             artifact_id = write_artifact(store, "git_patch", f"{export_id}.patch", patch.encode(), labels=[])
             data: dict[str, Any] = {"export": export_id, "changeset": cs["id"], "output": str(out), "artifact": artifact_id}
         else:
@@ -13082,7 +13267,7 @@ def cmd_export_commit(store: Store, args: argparse.Namespace, command: list[str]
             patch = patch_for_snapshots(store, cs["base_snapshot_id"], cs["head_snapshot_id"], effective_hidden_patterns(store, cs["project_id"], loads(cs["hidden_paths_json"], []), actor=args.actor))
             artifact_id = write_artifact(store, "git_patch", f"{export_id}.patch", patch.encode(), labels=[])
             patch_path = store.artifacts / f"{export_id}-apply.patch"
-            patch_path.write_text(patch)
+            patch_path.write_text(patch, newline="\n")
             run_git(repo, ["apply", "--check", str(patch_path)], text=True)
             run_git(repo, ["apply", str(patch_path)], text=True)
             run_git(repo, ["add", "-A"], text=True)
@@ -13170,7 +13355,7 @@ def cmd_export_github_pr(store: Store, args: argparse.Namespace, command: list[s
                 patch = patch_for_snapshots(store, cs["base_snapshot_id"], cs["head_snapshot_id"], effective_hidden_patterns(store, cs["project_id"], loads(cs["hidden_paths_json"], []), actor=args.actor))
                 patch_artifact = write_artifact(store, "git_patch", f"{export_id}.patch", patch.encode(), labels=[])
                 patch_path = store.artifacts / f"{export_id}-apply.patch"
-                patch_path.write_text(patch)
+                patch_path.write_text(patch, newline="\n")
                 run_git(repo, ["apply", "--check", str(patch_path)], text=True)
                 run_git(repo, ["apply", str(patch_path)], text=True)
                 run_git(repo, ["add", "-A"], text=True)
@@ -13589,8 +13774,8 @@ def directory_count(path: Path) -> int:
 
 def materialization_status(store: Store) -> dict[str, Any]:
     store.checkout.mkdir(parents=True, exist_ok=True)
-    method = probe_clone(store.checkout)
     override = os.environ.get("TRI_MATERIALIZE_BACKEND") or None
+    method = None if (override or "").lower() == "copy" else probe_clone(store.checkout)
     return {
         "store_volume": {
             "backend": "clone" if method else "copy",
@@ -13977,6 +14162,17 @@ def cmd_changeset_compare(store: Store, args: argparse.Namespace, command: list[
 
 class TriHTTPServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind resolves socket.getfqdn(host), a reverse DNS
+        # lookup that can stall for ~30 s on hosts with slow resolvers (seen on
+        # macOS CI). The name is only cosmetic, so use the host as given.
+        import socketserver
+
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 
 
 def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
@@ -14487,6 +14683,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true")
     p.add_argument("--retention-days", type=float)
     p.add_argument("--grace-seconds", type=float)
+    p.add_argument("--unsafe-no-grace", action="store_true")
+    p.add_argument("--clear-caches", action="store_true")
     p.set_defaults(func=cmd_gc)
 
     p = sub.add_parser("env")

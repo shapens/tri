@@ -21,6 +21,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ from typing import Any, Callable, Iterable
 FIXED_MTIME = 946684800  # 2000-01-01T00:00:00Z: old enough to be stable, new enough for zip tools.
 _FIXED_NS = FIXED_MTIME * 1_000_000_000
 BACKEND_ENV = "TRI_MATERIALIZE_BACKEND"
+RACY_WINDOW_NS = 2_000_000_000
 
 
 class MaterializeError(Exception):
@@ -208,6 +210,10 @@ def probe_clone(directory: Path) -> str | None:
 # Helpers
 
 
+def make_tree_writable(root: Path) -> None:
+    _force_writable(root)
+
+
 def _force_writable(root: Path) -> None:
     if not root.exists() or root.is_symlink():
         return
@@ -243,19 +249,23 @@ def remove_tree(root: Path) -> None:
         return
 
     def onerror(func: Callable[..., Any], path: str, exc_info: Any) -> None:
-        try:
-            os.chmod(os.path.dirname(path), 0o700)
-            if not os.path.islink(path):
-                os.chmod(path, 0o700)
-            func(path)
-        except OSError:
-            pass
+        # Unlock what blocked us; the pass below retries the whole tree. Never
+        # re-invoke ``func``: for os.open it needs more than a path.
+        for target in (os.path.dirname(path), path):
+            try:
+                if not os.path.islink(target):
+                    os.chmod(target, 0o700)
+            except OSError:
+                pass
 
     try:
         os.chmod(root, 0o700)
     except OSError:
         pass
     shutil.rmtree(root, onerror=onerror)
+    if root.exists():
+        _force_writable(root)
+        shutil.rmtree(root, onerror=onerror)
     if root.exists():
         _force_writable(root)
         shutil.rmtree(root, ignore_errors=True)
@@ -349,7 +359,7 @@ class Attachment:
 
     rel: str
     source: Path
-    mode: str  # "clone" | "link" | "copy" | "auto" (clone, else link) | "clone-only" (clone, else skip)
+    mode: str  # "clone" | "link" | "copy" | "auto" (clone, else copy) | "clone-only" (clone, else skip)
 
 
 @dataclass
@@ -407,7 +417,14 @@ class Materialization:
     def update_baseline(self, observed: dict[str, list[int]], deleted: Iterable[str] = ()) -> None:
         """Record stats observed *before* changed files were read, so a write
         racing with an import still shows up on the next scan."""
-        self.baseline.update(observed)
+        # A file modified within the last couple of seconds is "racily clean": on
+        # coarse-timestamp filesystems a further same-size write could keep its
+        # stat key, so leave the old key and let the next scan re-hash it.
+        horizon = time.time_ns() - RACY_WINDOW_NS
+        for path, key in observed.items():
+            if len(key) > 1 and key[1] >= horizon:
+                continue
+            self.baseline[path] = key
         for path in deleted:
             self.baseline.pop(path, None)
 
@@ -658,15 +675,22 @@ class Materializer:
         source = Path(attachment.source)
         mode = attachment.mode
         if mode == "auto":
-            mode = "clone" if method is not None else "link"
+            # Tools write into dependency/build dirs (cargo target/, node_modules/.cache),
+            # so a run needs a private, writable copy when the volume cannot clone.
+            mode = "clone" if method is not None else "copy"
         elif mode == "clone-only":
             if method is None:
                 notes.append({"code": "attachment_not_cloned", "path": attachment.rel, "message": "Volume cannot clone; shared directory not attached (use --env-link to symlink it)."})
                 return False
             mode = "clone"
         if mode == "link":
-            os.symlink(source, target, target_is_directory=True)
-            return True
+            try:
+                os.symlink(source, target, target_is_directory=True)
+                return True
+            except OSError as exc:
+                # Windows without symlink privilege: fall back to a private copy.
+                notes.append({"code": "attachment_link_failed", "path": attachment.rel, "message": f"Could not symlink the shared directory ({exc}); copied it instead."})
+                mode = "copy"
         if mode == "clone" and method is not None:
             if clone_dir(source, target):
                 _force_writable(target)
