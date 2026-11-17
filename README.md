@@ -93,6 +93,40 @@ curl -s -X POST http://127.0.0.1:8765/v0/command \
 - successful exports advance the changeset lifecycle to `exported` while keeping repeated export records inspectable
 - export record listing/inspection with policy decisions, exported object ids, source event ranges, and re-export determinism metadata
 
+## Bounded-Disk Workspaces
+
+Git worktrees make every attempt a full checkout, grow their own `node_modules`/`.venv`/build output, and stay on disk until someone removes them. Tri keeps disk use proportional to the directories in use *right now*:
+
+- **An attempt is a database row.** `tri workspace create` writes no files. Agents edit through the file API; directories exist only while a command runs (`tri run`) or a mount is leased.
+- **Directories cost what they change.** Each machine is probed for the cheapest safe way to lay out a tree:
+
+  | Backend | Where | How |
+  | --- | --- | --- |
+  | `clone` | APFS (macOS), btrfs / XFS / bcachefs / ZFS (Linux `FICLONE`), ReFS / Dev Drive (Windows) | Copy-on-write clones from a raw checkout cache; on macOS a whole base tree is cloned in one call and only the workspace's delta is applied |
+  | `overlay` | Linux with user + mount namespaces (opt-in: `TRI_MATERIALIZE_BACKEND=overlay`) | The run's directory is an overlay mount that exists only inside the command's namespace; only written files land on disk |
+  | `copy` | Anywhere else (ext4, NTFS, cross-volume mounts) | Plain files, reported as `degraded` by `tri doctor`, checks, and leases |
+
+  Override with `TRI_MATERIALIZE_BACKEND=auto|clone|copy|overlay`. Change detection compares a stat baseline (`size`, `mtime`, inode, mode), so a run only reads files it touched. Materialized files carry the fixed mtime 2000-01-01.
+- **Dependencies exist once per lockfile.** `tri env define app deps --key-file package-lock.json --install "npm ci" --output node_modules` builds `node_modules` once per key (key files + key commands + platform) under a per-key lock, freezes it read-only, and attaches it to every run and mount by clone (or a read-only symlink on `copy`; `--mode copy|link|private` overrides). Env outputs are never imported into snapshots.
+- **Every directory has an expiring owner.** Runs hold a lease and a holder lock; a crashed run's directory is salvaged and removed by the reaper. Mounts default to a 24-hour TTL (`--no-ttl` to opt out; `tri workspace sync` and `tri leases renew` extend it). Before anything is deleted, unsynced edits are captured as a **salvage snapshot** (`tri salvage list`, `tri salvage adopt`); only ignored dependency/build directories (`node_modules`, `.venv`, `target`, `dist`, `__pycache__`, … plus `TRI_DERIVED_DIRS`) and OS junk files are deleted without capture; a directory holding secret-like files, other ignored files, or a hand-made `.git` waits in `expired_needs_attention` until `tri leases reap <lease> --force`. One live lease owns a directory: mounting onto a path another live lease owns is refused (`mount_path_in_use`), and a directory that was deleted and recreated by someone else is never reaped. Mounts created before this change are grandfathered and never auto-reaped. The reaper runs after CLI commands (at most every 10 minutes; `TRI_AUTO_REAP=0` disables), every 5 minutes inside `tri serve`, and on demand with `tri leases reap`.
+- **Old data is reclaimable.** `tri gc` plans; `tri gc --reap` reaps leases and trims caches to budget (`TRI_CHECKOUT_CACHE_MAX_BYTES`, `TRI_BASE_CACHE_MAX_COUNT`, `TRI_ENV_CACHE_MAX_BYTES`); `tri gc --apply` also purges content no live object references once retired work passes the retention window (14 days; `--retention-days`, `--grace-seconds`). Metadata and events are kept; reading purged content returns `content_purged`.
+- **History grows with the size of a change.** Snapshot trees are stored as one content-addressed node per directory, so an edit writes only the nodes on its path.
+
+**Behavior change:** runs, syncs, and salvage no longer import *new* files matched by the snapshot's `.gitignore` files or by `tri ignore add <project> <glob>` patterns (build output, caches). Tracked files are always imported, even under ignored directories.
+
+### Measured (macOS, APFS, `tri-bench-fanout`)
+
+Each attempt edits two files, needs a dependency tree, and runs a check. Space is the dedicated APFS volume's own used figure, so shared clone blocks count once. `tri` = API edits + ephemeral runs; `tri-mount` = additionally keeps one persistent mounted directory per attempt (the closest analogue of a worktree); `git` = one worktree per attempt with dependencies installed in each.
+
+| Fixture | Attempts | `tri` | `tri-mount` | git worktrees |
+| --- | ---: | ---: | ---: | ---: |
+| 2,000 source + 5,000 dependency files | 10 | 60.6 MiB | 83.2 MiB | 325.5 MiB |
+| 1,000 source + 2,000 dependency files | 10 | 28.7 MiB | 38.4 MiB | 141.8 MiB |
+| 1,000 source + 2,000 dependency files | 50 | 30.4 MiB | 79.1 MiB | 672.6 MiB |
+| Same fixture: growth per extra attempt (10→50) | | ~43 KiB | ~1.0 MiB | ~13.3 MiB |
+
+Raw results: `benchmark-results/fanout-10`, `fanout-10-small`, `fanout-50`. Fifty Tri attempts use about 1.4× the space of a single git worktree with its dependencies; fifty worktrees use about 30×. A persistent mount costs per-file metadata for its cloned tree (~1 MiB per 3,000 files), not file contents.
+
 ## Verify
 
 ```sh
@@ -134,6 +168,12 @@ tri-bench-tasks
 
 The workflow benchmark writes `results.json` and `summary.md` under `benchmark-results/<timestamp>/`. It compares Tri, Git worktree, SVN, GitButler, and Entire targets when the required CLIs are installed, with optional `tri-cli` and `tri-http` targets for comparing Tri's batch primitive over subprocess and local HTTP transports.
 
+Run the fan-out disk benchmark (N attempts that each edit, install dependencies, and run a check; Tri versus git worktrees, measured on dedicated APFS volumes on macOS):
+
+```sh
+tri-bench-fanout --attempts 10
+```
+
 The task benchmark uses `benchmarks/tasks/<task-id>/` packages with `task.toml`, `instruction.md`, `environment/`, `tests/`, and `solution/`. These task verifiers complement the workflow benchmark by checking observable Tri behavior such as workspace isolation, hidden-path redaction, and conflict resolution. See [benchmarks/README.md](benchmarks/README.md).
 
 ## Example
@@ -165,6 +205,15 @@ tri workspace snapshot ws_... --expect-head snap_...
 tri workspace update ws_... --from main --expect-head snap_...
 tri conflicts list --workspace ws_...
 tri conflicts resolve conflict_... --strategy theirs
+tri env define app deps --key-file package-lock.json --install "npm ci" --output node_modules
+tri ignore add app "coverage/**"
+tri leases list --workspace ws_...
+tri leases renew lease_... --ttl-seconds 86400
+tri leases reap
+tri salvage list ws_...
+tri salvage adopt salvage_...
+tri gc --reap
+tri gc --apply
 tri secrets put app API_TOKEN --value-file ./token.txt
 tri secrets inspect secret_...
 tri secrets request-lease ws_... API_TOKEN --env API_TOKEN
@@ -215,6 +264,8 @@ tri export list app --changeset cs_...
 ```
 
 ## Remaining Gates
+
+- verify the `overlay` run backend on Linux hosts and make it the Linux default; verify `FICLONE` (btrfs/XFS) and ReFS/Dev Drive clone paths and the Windows port on real machines (all are probe-guarded and fall back to `copy`)
 
 - hosted collaboration layer
 - broader hosted Policy v0 language: visibility role mapping, embargo lifecycle, cross-object inheritance rules, and actor identity binding

@@ -4,7 +4,6 @@ import argparse
 import base64
 import copy
 import difflib
-import fcntl
 import fnmatch
 import hashlib
 import http.server
@@ -14,17 +13,36 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from socketserver import ThreadingMixIn
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
+
+from tri.ignore import IgnoreRules
+from tri.locking import FileLock
+from tri.trees import decode_node, flatten as flatten_tree, is_hierarchical, write_tree
+from tri.overlay import OverlayMaterialization, overlay_from_payload, prepare_overlay_run, probe_overlay
+from tri.materialize import (
+    Attachment,
+    CheckoutCache,
+    Materialization,
+    MaterializeError,
+    Materializer,
+    clone_dir_supported,
+    load_materialization,
+    probe_clone,
+    remove_tree,
+    stat_key,
+)
 
 
 SCHEMA_VERSION = "0.1.0"
@@ -49,6 +67,14 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "import", "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]", "schema": "tri.import", "description": "Import a Git repo or directory into Tri snapshots."},
     {"name": "projects-list", "usage": "tri projects list", "schema": "tri.project.list", "description": "List projects in the local Tri store."},
     {"name": "projects-inspect", "usage": "tri projects inspect <project>", "schema": "tri.project.inspect", "description": "Inspect project metadata and child object counts."},
+    {"name": "gc", "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>]", "schema": "tri.gc", "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references."},
+    {"name": "env-define", "usage": "tri env define <project> <name> --install <cmd> --output <path> [--output <path>] [--key-file <glob>] [--key-command <cmd>] [--mode auto|copy|link|private]", "schema": "tri.env.recipe", "description": "Declare a dependency environment built once per key (key files + key commands + platform) and shared read-only by runs and mounts."},
+    {"name": "env-list", "usage": "tri env list <project>", "schema": "tri.env.list", "description": "List environment recipes."},
+    {"name": "env-inspect", "usage": "tri env inspect <project> <name>", "schema": "tri.env.inspect", "description": "Inspect an environment recipe and its cached builds."},
+    {"name": "env-remove", "usage": "tri env remove <project> <name>", "schema": "tri.env.list", "description": "Remove an environment recipe; cached builds age out through GC."},
+    {"name": "ignore-add", "usage": "tri ignore add <project> <glob...>", "schema": "tri.ignore.list", "description": "Add project ignore patterns: matching new files are never imported from runs, syncs, or salvage."},
+    {"name": "ignore-remove", "usage": "tri ignore remove <project> <glob...>", "schema": "tri.ignore.list", "description": "Remove project ignore patterns."},
+    {"name": "ignore-list", "usage": "tri ignore list <project>", "schema": "tri.ignore.list", "description": "List project ignore patterns (applied on top of the snapshot's .gitignore files)."},
     {"name": "packages-declare", "usage": "tri packages declare <project> <name> --path <glob> [--visibility <selector>] [--owner <principal>]", "schema": "tri.package.inspect", "description": "Declare an inspectable package boundary for project policy and splitting."},
     {"name": "packages-list", "usage": "tri packages list <project>", "schema": "tri.package.list", "description": "List project package boundaries."},
     {"name": "packages-inspect", "usage": "tri packages inspect <project> <name-or-id> | <package>", "schema": "tri.package.inspect", "description": "Inspect one project package boundary."},
@@ -74,12 +100,17 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "workspace-inspect", "usage": "tri workspace inspect <workspace>", "schema": "tri.workspace.inspect", "description": "Inspect workspace state."},
     {"name": "workspace-update", "usage": "tri workspace update <workspace> --from <target> [--expect-head <snapshot>]", "schema": "tri.workspace.update", "description": "Merge a workspace onto the current target snapshot."},
     {"name": "workspace-snapshot", "usage": "tri workspace snapshot <workspace> [--expect-head <snapshot>]", "schema": "tri.workspace.snapshot", "description": "Create an explicit workspace checkpoint snapshot."},
-    {"name": "workspace-mount", "usage": "tri workspace mount <workspace> <path> [--ttl-seconds <n>] [--ignore-path <glob>]", "schema": "tri.workspace.mount", "description": "Materialize a workspace into a local directory and create a materialization lease."},
+    {"name": "workspace-mount", "usage": "tri workspace mount <workspace> <path> [--ttl-seconds <n> | --no-ttl] [--ignore-path <glob>] [--no-env] [--env-link]", "schema": "tri.workspace.mount", "description": "Materialize a workspace into a local directory and create a materialization lease."},
     {"name": "workspace-sync", "usage": "tri workspace sync <workspace> [--lease <lease>]", "schema": "tri.workspace.sync", "description": "Import mounted filesystem edits back into Tri through a materialization lease."},
     {"name": "workspace-leases", "usage": "tri workspace leases <workspace>", "schema": "tri.workspace.materialization_leases", "description": "List materialization leases for a workspace."},
     {"name": "workspace-lease-inspect", "usage": "tri workspace lease-inspect <lease>", "schema": "tri.workspace.materialization_lease", "description": "Inspect a materialization lease."},
     {"name": "workspace-lease-revoke", "usage": "tri workspace lease-revoke <lease>", "schema": "tri.workspace.materialization_lease", "description": "Revoke a materialization lease."},
     {"name": "leases-inspect", "usage": "tri leases inspect <lease>", "schema": "tri.lease.inspect", "description": "Inspect a secret or materialization lease by id."},
+    {"name": "leases-list", "usage": "tri leases list [--workspace <workspace>] [--status <status>]", "schema": "tri.lease.list", "description": "List mount leases and run/env-build directory leases with backend and lifecycle state."},
+    {"name": "leases-renew", "usage": "tri leases renew <lease> [--ttl-seconds <n>]", "schema": "tri.workspace.materialization_lease", "description": "Extend a mount lease (sync also renews it)."},
+    {"name": "leases-reap", "usage": "tri leases reap [<lease> --force]", "schema": "tri.lease.reap", "description": "Reap expired, revoked, discarded, and orphaned directories, salvaging unsynced edits first."},
+    {"name": "salvage-list", "usage": "tri salvage list <workspace>", "schema": "tri.salvage.list", "description": "List snapshots salvaged from reaped directories."},
+    {"name": "salvage-adopt", "usage": "tri salvage adopt <salvage> [--expect-head <snapshot>]", "schema": "tri.salvage.adopt", "description": "Make a salvage snapshot the workspace head when the head has not moved since."},
     {"name": "workspace-pause", "usage": "tri workspace pause <workspace>", "schema": "tri.workspace.lifecycle", "description": "Pause an active workspace so it remains readable but rejects mutation."},
     {"name": "workspace-resume", "usage": "tri workspace resume <workspace>", "schema": "tri.workspace.lifecycle", "description": "Resume a paused workspace."},
     {"name": "workspace-discard", "usage": "tri workspace discard <workspace>", "schema": "tri.workspace.lifecycle", "description": "Mark an active workspace as discarded."},
@@ -98,7 +129,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "operations-inspect", "usage": "tri operations inspect <operation>", "schema": "tri.operation.inspect", "description": "Inspect one policy-gated operation provenance record."},
     {"name": "search", "usage": "tri search <project> <query> [--scope <scope>] [--glob <glob>] [--include-history] [--limit <n>] [--case-sensitive]", "schema": "tri.search", "description": "Search authorized project work with provenance across files and Tri objects."},
     {"name": "diff", "usage": "tri diff <workspace-or-changeset> | tri diff <base-snapshot> <head-snapshot> [--mode summary|files|patch|machine] [--path <glob>]", "schema": "tri.diff", "description": "Diff workspace, changeset, or explicit snapshots."},
-    {"name": "run", "usage": "tri run <workspace> [--with-lease <lease>] [--assumption <text>] [--no-import-changes] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run."},
+    {"name": "run", "usage": "tri run <workspace> [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run."},
     {"name": "checks-list", "usage": "tri checks list <workspace-or-changeset>", "schema": "tri.check.list", "description": "List check runs for a workspace or changeset."},
     {"name": "checks-inspect", "usage": "tri checks inspect <check>", "schema": "tri.check.inspect", "description": "Inspect one structured check run."},
     {"name": "checks-set-create", "usage": "tri checks set-create <project> <name> --required-check <cmd>", "schema": "tri.check_set.inspect", "description": "Create a reusable project required-check set."},
@@ -193,6 +224,13 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
         "codes": [
             "stale_workspace_head",
             "stale_materialization",
+            "lease_already_reaped",
+            "mount_path_in_use",
+            "content_purged",
+            "gc_in_progress",
+            "salvage_already_adopted",
+            "env_build_failed",
+            "env_output_missing",
             "policy_denied",
             "path_not_found",
             "path_escaped_mount",
@@ -241,6 +279,16 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.workspace.inspect": {"required": ["id", "project", "base_snapshot", "head_snapshot", "owner", "task", "task_run", "status", "visibility", "hidden_paths", "advisory", "last_operation", "materializations", "checks", "redacted_checks", "changesets", "redacted_changesets"]},
     "tri.workspace.update": {"required": ["workspace", "base_snapshot", "head_snapshot", "conflicts"]},
     "tri.workspace.snapshot": {"required": ["workspace", "operation", "snapshot"]},
+    "tri.ignore.list": {"required": ["project", "patterns"]},
+    "tri.gc": {"required": ["applied", "plan", "reaped", "evicted", "purged"]},
+    "tri.env.recipe": {"required": ["id", "project", "name", "key_files", "key_commands", "install", "outputs", "mode"]},
+    "tri.env.list": {"required": ["project", "recipes"]},
+    "tri.env.inspect": {"required": ["recipe", "builds"]},
+    "tri.lease.list": {"required": ["workspace", "leases"]},
+    "tri.lease.reap": {"required": ["reaped", "salvaged", "needs_attention", "errors", "checked", "busy"]},
+    "tri.salvage.list": {"required": ["workspace", "salvages"]},
+    "tri.salvage.adopt": {"required": ["salvage", "workspace", "operation", "snapshot", "paths"]},
+    "tri.disk_lease.inspect": {"required": ["id", "kind", "path", "workspace", "status", "backend", "created_at", "released_at"]},
     "tri.workspace.sync": {"required": ["workspace", "lease", "operation", "snapshot", "paths"]},
     "tri.workspace.mount": {"required": ["workspace", "path", "snapshot", "lease", "read_only", "materialization"]},
     "tri.workspace.materialization_lease": {"required": ["id", "workspace", "path", "status", "read_only", "mounted_snapshot", "last_sync_snapshot", "owner", "ignored_paths", "generated_artifacts", "expires_at", "created_at", "revoked_at"]},
@@ -470,15 +518,19 @@ class Store:
         self.artifacts = self.home / "artifacts"
         self.runs = self.home / "runs"
         self.secrets = self.home / "secrets"
+        self.checkout = self.home / "checkout"
+        self.leases_dir = self.home / "leases"
+        self._materializer: Materializer | None = None
         self.db_path = self.home / "tri.sqlite3"
         self.packed_db_path = self.home / "tri.sqlite3.tri"
         self.lock_path = self.home / "tri.sqlite3.lock"
         self.lock_file: Any | None = None
         self._blob_cache: dict[str, bytes] = {}
+        self._tree_cache: dict[str, tuple[dict[str, dict[str, Any]], set[str]]] = {}
         self.home.mkdir(parents=True, exist_ok=True)
-        self.lock_file = self.lock_path.open("a+b")
+        self.lock_file = FileLock(self.lock_path)
         needs_exclusive_open = not self.db_path.exists()
-        fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX if needs_exclusive_open else fcntl.LOCK_SH)
+        self.lock_file.acquire(exclusive=needs_exclusive_open)
         self.pack_db_max_bytes: int | None = None
         if pack_on_close is None:
             pack_value = os.environ.get("TRI_SQLITE_PACK", "auto").lower()
@@ -498,7 +550,7 @@ class Store:
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.runs.mkdir(parents=True, exist_ok=True)
         self.secrets.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, timeout=30)
         self.conn.row_factory = sqlite3.Row
         if new_db:
             try:
@@ -510,7 +562,13 @@ class Store:
             self.conn.execute(f"PRAGMA page_size={page_size}")
         self.init_db()
         if needs_exclusive_open:
-            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_SH)
+            self.lock_file.acquire(exclusive=False)
+
+    @property
+    def materializer(self) -> Materializer:
+        if self._materializer is None:
+            self._materializer = Materializer(self.home, CheckoutCache(self.checkout, self.read_blob), read_blob=self.read_blob)
+        return self._materializer
 
     def init_db(self) -> None:
         journal_mode = os.environ.get("TRI_SQLITE_JOURNAL", "DELETE").upper()
@@ -784,6 +842,76 @@ class Store:
               created_at TEXT NOT NULL,
               revoked_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS disk_leases (
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              path TEXT NOT NULL,
+              workspace_id TEXT,
+              check_id TEXT,
+              before_snapshot_id TEXT,
+              baseline_path TEXT,
+              holder_lock TEXT,
+              backend TEXT,
+              status TEXT NOT NULL,
+              salvage_id TEXT,
+              created_at TEXT NOT NULL,
+              released_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS salvages (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              lease_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              base_snapshot_id TEXT NOT NULL,
+              snapshot_id TEXT NOT NULL,
+              paths_json TEXT NOT NULL,
+              deleted_ignored_json TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              adopted_at TEXT,
+              adopted_by TEXT
+            );
+            CREATE TABLE IF NOT EXISTS store_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS env_recipes (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              key_files_json TEXT NOT NULL,
+              key_commands_json TEXT NOT NULL,
+              install TEXT NOT NULL,
+              outputs_json TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE (project_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS env_builds (
+              key TEXT PRIMARY KEY,
+              recipe_id TEXT NOT NULL,
+              project_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              path TEXT NOT NULL,
+              outputs_json TEXT NOT NULL,
+              size_bytes INTEGER,
+              exit_status INTEGER,
+              stdout_artifact TEXT,
+              stderr_artifact TEXT,
+              error_json TEXT,
+              workspace_id TEXT,
+              built_by TEXT,
+              created_at TEXT NOT NULL,
+              last_used_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS project_ignores (
+              project_id TEXT NOT NULL,
+              pattern TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (project_id, pattern)
+            );
             CREATE TABLE IF NOT EXISTS policy_grants (
               id TEXT PRIMARY KEY,
               project_id TEXT,
@@ -871,6 +999,32 @@ class Store:
         task_run_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(task_runs)").fetchall()}
         if "assumptions_json" not in task_run_columns:
             self.conn.execute("ALTER TABLE task_runs ADD COLUMN assumptions_json TEXT NOT NULL DEFAULT '[]'")
+        for table in ("blobs", "trees"):
+            object_columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for column in ("last_referenced_at", "purged_at"):
+                if column not in object_columns:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        disk_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(disk_leases)").fetchall()}
+        if "env_keys_json" not in disk_columns:
+            self.conn.execute("ALTER TABLE disk_leases ADD COLUMN env_keys_json TEXT NOT NULL DEFAULT '[]'")
+        lease_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(materialization_leases)").fetchall()}
+        for column, ddl in (
+            ("backend", "TEXT"),
+            ("degraded", "INTEGER"),
+            ("baseline_path", "TEXT"),
+            ("ttl_seconds", "INTEGER"),
+            ("attention_json", "TEXT"),
+            ("reaped_at", "TEXT"),
+            ("salvage_id", "TEXT"),
+            ("env_keys_json", "TEXT"),
+            ("root_identity", "TEXT"),
+        ):
+            if column not in lease_columns:
+                self.conn.execute(f"ALTER TABLE materialization_leases ADD COLUMN {column} {ddl}")
+        if "grandfathered" not in lease_columns:
+            # Mounts created before leases could expire keep their old contract: never auto-reaped.
+            self.conn.execute("ALTER TABLE materialization_leases ADD COLUMN grandfathered INTEGER NOT NULL DEFAULT 0")
+            self.conn.execute("UPDATE materialization_leases SET grandfathered = 1")
         task_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "body" not in task_columns:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN body TEXT NOT NULL DEFAULT ''")
@@ -925,12 +1079,11 @@ class Store:
         if self.pack_on_close:
             try:
                 assert self.lock_file is not None
-                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self.pack_db()
-            except (BlockingIOError, OSError):
+                if self.lock_file.acquire(exclusive=True, blocking=False):
+                    self.pack_db()
+            except OSError:
                 pass
         if self.lock_file is not None:
-            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
             self.lock_file.close()
             self.lock_file = None
 
@@ -945,16 +1098,26 @@ class Store:
         blob_id = f"blob_{digest[:16]}"
         object_path = self.blobs / digest[:2] / digest
         object_path.parent.mkdir(parents=True, exist_ok=True)
-        if not object_path.exists():
-            compressed = zlib.compress(data)
-            object_path.write_bytes(COMPRESSED_BLOB_MAGIC + compressed if len(compressed) + len(COMPRESSED_BLOB_MAGIC) < len(data) else data)
-        self.conn.execute(
+        # Touch the row first: the write lock it takes keeps GC from purging this
+        # blob between our existence check and the commit that references it.
+        now = utcnow()
+        inserted = self.conn.execute(
             """
-            INSERT OR IGNORE INTO blobs (id, hash, size, object_path, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO blobs (id, hash, size, object_path, created_at, last_referenced_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (blob_id, digest, len(data), "", utcnow()),
-        )
+            (blob_id, digest, len(data), "", now, now),
+        ).rowcount
+        was_purged = False
+        if not inserted:
+            row = self.conn.execute("SELECT purged_at FROM blobs WHERE id = ?", (blob_id,)).fetchone()
+            was_purged = bool(row and row["purged_at"])
+            self.conn.execute("UPDATE blobs SET last_referenced_at = ?, purged_at = NULL WHERE id = ?", (now, blob_id))
+        if was_purged or not object_path.exists():
+            compressed = zlib.compress(data)
+            tmp = object_path.with_name(f".{object_path.name}.{uuid.uuid4().hex}.tmp")
+            tmp.write_bytes(COMPRESSED_BLOB_MAGIC + compressed if len(compressed) + len(COMPRESSED_BLOB_MAGIC) < len(data) else data)
+            os.replace(tmp, object_path)
         self._blob_cache[blob_id] = data
         return {"id": blob_id, "hash": digest, "size": len(data), "object_path": str(object_path)}
 
@@ -962,46 +1125,113 @@ class Store:
         cached = self._blob_cache.get(blob_id)
         if cached is not None:
             return cached
-        row = self.row("SELECT hash, object_path FROM blobs WHERE id = ?", (blob_id,))
+        row = self.row("SELECT hash, object_path, purged_at FROM blobs WHERE id = ?", (blob_id,))
         if row is None:
             raise TriError("path_not_found", "Blob not found.", object=blob_id)
+        if row["purged_at"]:
+            raise TriError("content_purged", "Blob content was removed by garbage collection.", object=blob_id, purged_at=row["purged_at"])
         stored_path = row["object_path"]
         path = Path(stored_path) if stored_path else self.blobs / row["hash"][:2] / row["hash"]
         if stored_path and not path.is_absolute():
             path = self.blobs / stored_path
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            raise TriError("path_not_found", "Blob content file is missing from the object store.", object=blob_id) from None
         if data.startswith(COMPRESSED_BLOB_MAGIC):
             data = zlib.decompress(data[len(COMPRESSED_BLOB_MAGIC) :])
         self._blob_cache[blob_id] = data
         return data
 
     def put_tree(self, entries: dict[str, dict[str, Any]]) -> dict[str, str]:
-        payload, stored_entries = encode_tree_json(entries)
-        digest = sha256(payload)
-        tree_id = f"tree_{digest[:16]}"
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO trees (id, hash, entries_json, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (tree_id, digest, stored_entries, utcnow()),
-        )
+        """Store ``entries`` as directory-level nodes; unchanged directories are shared."""
+        tree_id, digest = write_tree(entries, self._store_tree_row)
         return {"id": tree_id, "hash": digest}
 
-    def load_tree(self, tree_id: str) -> dict[str, dict[str, Any]]:
-        row = self.row("SELECT entries_json FROM trees WHERE id = ?", (tree_id,))
+    def _store_tree_row(self, tree_id: str, digest: str, stored_entries: str) -> None:
+        now = utcnow()
+        inserted = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO trees (id, hash, entries_json, created_at, last_referenced_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (tree_id, digest, stored_entries, now, now),
+        ).rowcount
+        if not inserted:
+            # Re-referencing a tree also restores content GC may have purged.
+            self.conn.execute(
+                "UPDATE trees SET last_referenced_at = ?, entries_json = CASE WHEN purged_at IS NULL THEN entries_json ELSE ? END, purged_at = NULL WHERE id = ?",
+                (now, stored_entries, tree_id),
+            )
+
+    def _tree_row_text(self, tree_id: str) -> str:
+        row = self.row("SELECT entries_json, purged_at FROM trees WHERE id = ?", (tree_id,))
         if row is None:
             raise TriError("path_not_found", "Tree not found.", object=tree_id)
-        entries = decode_tree_json(row["entries_json"])
+        if row["purged_at"]:
+            raise TriError("content_purged", "Tree content was removed by garbage collection.", object=tree_id, purged_at=row["purged_at"])
+        return row["entries_json"]
+
+    def _resolve_tree(self, tree_id: str) -> tuple[dict[str, dict[str, Any]], set[str]]:
+        cached = self._tree_cache.get(tree_id)
+        if cached is not None:
+            return cached
+        text = self._tree_row_text(tree_id)
+        if is_hierarchical(text):
+            resolved = flatten_tree(tree_id, lambda node_id: decode_node(self._tree_row_text(node_id)))
+        else:
+            resolved = (decode_tree_json(text), {tree_id})
+        self._tree_cache[tree_id] = resolved
+        return resolved
+
+    def load_tree(self, tree_id: str) -> dict[str, dict[str, Any]]:
+        resolved, _ = self._resolve_tree(tree_id)
+        entries = {path: dict(entry) for path, entry in resolved.items()}
         missing = sorted({entry["blob"] for entry in entries.values() if "hash" not in entry and isinstance(entry.get("blob"), str)})
         if missing:
-            placeholders = ",".join("?" for _ in missing)
-            hashes = {row["id"]: row["hash"] for row in self.rows(f"SELECT id, hash FROM blobs WHERE id IN ({placeholders})", tuple(missing))}
+            hashes: dict[str, str] = {}
+            for offset in range(0, len(missing), 900):
+                chunk = missing[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                hashes.update({row["id"]: row["hash"] for row in self.rows(f"SELECT id, hash FROM blobs WHERE id IN ({placeholders})", tuple(chunk))})
             for entry in entries.values():
                 blob = entry.get("blob")
                 if "hash" not in entry and isinstance(blob, str) and blob in hashes:
                     entry["hash"] = hashes[blob]
         return entries
+
+    def collect_references(self, roots: list[str]) -> tuple[set[str], set[str]]:
+        """Tree nodes and blobs reachable from ``roots``, visiting each node once.
+
+        Never flattens whole snapshots, so marking cost follows the number of
+        distinct nodes rather than snapshots x files. A live root whose content is
+        missing aborts (GC must fail closed); already-purged content is skipped."""
+        visited: set[str] = set()
+        blobs: set[str] = set()
+        stack = list(roots)
+        while stack:
+            tree_id = stack.pop()
+            if tree_id in visited:
+                continue
+            visited.add(tree_id)
+            try:
+                text = self._tree_row_text(tree_id)
+            except TriError as exc:
+                if exc.diagnostic.get("code") == "content_purged":
+                    continue
+                raise
+            if is_hierarchical(text):
+                node = decode_node(text)
+                blobs.update(entry["blob"] for entry in node.get("f", {}).values() if isinstance(entry.get("blob"), str))
+                stack.extend(child for child in node.get("d", {}).values() if child not in visited)
+            else:
+                blobs.update(entry["blob"] for entry in decode_tree_json(text).values() if isinstance(entry.get("blob"), str))
+        return visited, blobs
+
+    def tree_references(self, tree_id: str) -> tuple[set[str], set[str]]:
+        """Tree (node) ids and blob ids reachable from ``tree_id``."""
+        entries, nodes = self._resolve_tree(tree_id)
+        return set(nodes), {entry["blob"] for entry in entries.values() if isinstance(entry.get("blob"), str)}
 
     def load_snapshot_tree(self, snapshot_id: str) -> dict[str, dict[str, Any]]:
         snapshot = self.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (snapshot_id,))
@@ -2490,6 +2720,174 @@ def materialize_tree(store: Store, entries: dict[str, dict[str, Any]], root: Pat
         dest.write_bytes(store.read_blob(entry["blob"]))
 
 
+def tri_error_from_materialize(exc: MaterializeError) -> TriError:
+    return TriError(exc.code, exc.message, **exc.fields)
+
+
+def project_ignore_patterns(store: Store, project_id: str) -> list[str]:
+    return [row["pattern"] for row in store.rows("SELECT pattern FROM project_ignores WHERE project_id = ? ORDER BY pattern", (project_id,))]
+
+
+def import_rules(store: Store, project_id: str, entries: dict[str, dict[str, Any]]) -> IgnoreRules:
+    """Rules deciding which *new* files a run, sync, or salvage may import:
+    the snapshot's .gitignore files plus project-declared patterns."""
+
+    def read_text(path: str) -> str | None:
+        entry = entries.get(path)
+        if not entry or entry.get("mode") == "120000":
+            return None
+        try:
+            return store.read_blob(entry["blob"]).decode("utf-8", errors="replace")
+        except TriError:
+            return None
+
+    junk = [".DS_Store", "Thumbs.db", "desktop.ini"]
+    return IgnoreRules.from_entries(entries, read_text, [*junk, *project_ignore_patterns(store, project_id)])
+
+
+def snapshot_base(store: Store, snapshot_id: str | None) -> tuple[str, dict[str, dict[str, Any]]] | None:
+    """Base tree for whole-directory clones; only worth loading where dir clone exists."""
+    if not snapshot_id or not clone_dir_supported():
+        return None
+    row = store.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (snapshot_id,))
+    if row is None:
+        return None
+    try:
+        return row["root_tree_id"], store.load_tree(row["root_tree_id"])
+    except TriError:
+        return None
+
+
+def materialize_entries(
+    store: Store,
+    entries: dict[str, dict[str, Any]],
+    dest: Path,
+    *,
+    base_snapshot: str | None = None,
+    attachments: list[Attachment] | tuple[Attachment, ...] = (),
+    backend: str | None = None,
+) -> Materialization:
+    try:
+        return store.materializer.materialize(entries, dest, base=snapshot_base(store, base_snapshot), attachments=attachments, backend=backend)
+    except MaterializeError as exc:
+        raise tri_error_from_materialize(exc) from None
+
+
+def load_any_materialization(path: Path, baseline_file: Path) -> Materialization:
+    payload = json.loads(Path(baseline_file).read_text())
+    if payload.get("overlay"):
+        return overlay_from_payload(path, payload)
+    return load_materialization(path, baseline_file)
+
+
+def materialize_for_run(
+    store: Store,
+    entries: dict[str, dict[str, Any]],
+    run_lease: "RunLease",
+    *,
+    base_snapshot: str | None,
+    attachments: list[Attachment] | tuple[Attachment, ...] = (),
+    allow_overlay: bool = True,
+) -> Materialization:
+    """Materialize an ephemeral run directory with the cheapest backend available:
+    overlay (Linux namespaces) > clone > copy."""
+    preference = (os.environ.get("TRI_MATERIALIZE_BACKEND") or "auto").lower()
+    notes: list[dict[str, Any]] = []
+    # Overlay runs are opt-in (TRI_MATERIALIZE_BACKEND=overlay) until they have been
+    # verified on Linux hosts; "auto" uses clone (reflink) or copy there.
+    if allow_overlay and preference == "overlay":
+        info = probe_overlay(store.runs)
+        if info is not None:
+            base_row = store.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (base_snapshot,)) if base_snapshot else None
+            base = (base_row["root_tree_id"], store.load_tree(base_row["root_tree_id"])) if base_row else None
+            if base is None:
+                base = (f"head_{entries_fingerprint(entries)[7:23]}", entries)
+            try:
+                return prepare_overlay_run(
+                    run_root=run_lease.dir,
+                    bases=store.home / "bases",
+                    cache=store.materializer.cache,
+                    read_blob=store.read_blob,
+                    entries=entries,
+                    base=base,
+                    attachments=attachments,
+                    info=info,
+                )
+            except MaterializeError as exc:
+                if exc.code != "overlay_unsuitable":
+                    raise tri_error_from_materialize(exc) from None
+                notes.append({"code": "overlay_unsuitable", "message": exc.message})
+                for leftover in ("upper", "ovl-work", "work", "deletions.txt"):
+                    target = run_lease.dir / leftover
+                    if target.is_dir():
+                        remove_tree(target)
+                    elif target.exists():
+                        target.unlink()
+        elif preference == "overlay":
+            notes.append({"code": "overlay_unavailable", "message": "Overlay runs need Linux user+mount namespaces; used clone/copy instead."})
+    materialization = materialize_entries(
+        store,
+        entries,
+        run_lease.work,
+        base_snapshot=base_snapshot,
+        attachments=attachments,
+        backend=None if preference in ("auto", "overlay") else preference,
+    )
+    materialization.notes.extend(notes)
+    return materialization
+
+
+def entries_after_scan(
+    store: Store,
+    root: Path,
+    before_entries: dict[str, dict[str, Any]],
+    changed: list[str],
+    deleted: list[str],
+    observed: dict[str, list[int]] | None = None,
+    *,
+    skip_escaping: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Apply scanned changes to ``before_entries``; unchanged content keeps its entry.
+
+    ``observed`` (when given) receives each changed path's stat key, taken
+    before its content was read."""
+    after = dict(before_entries)
+    for path in deleted:
+        after.pop(path, None)
+    for raw_path in changed:
+        path = normalize_path(raw_path)
+        full = root / path
+        try:
+            st = os.lstat(full)
+        except FileNotFoundError:
+            after.pop(path, None)
+            continue
+        if observed is not None:
+            observed[path] = stat_key(st)
+        prev = before_entries.get(path)
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(full)
+            if symlink_target_escapes(root, full, target):
+                if skip_escaping:
+                    continue
+                raise TriError("path_escaped_mount", "Symlink target escapes the materialized workspace root.", object=str(full), target=target)
+            entry = symlink_entry(store, target)
+        elif stat.S_ISREG(st.st_mode):
+            blob = store.put_blob(full.read_bytes())
+            if os.name == "nt" and prev and prev.get("mode") in ("100644", "100755"):
+                mode = prev["mode"]
+            else:
+                mode = "100755" if st.st_mode & 0o111 else "100644"
+            entry = {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": mode}
+        else:
+            continue
+        if prev is not None and prev.get("blob") == entry["blob"] and prev.get("mode") == entry["mode"] and prev.get("symlink_target") == entry.get("symlink_target"):
+            after[path] = prev
+        else:
+            after[path] = entry
+    return dict(sorted(after.items()))
+
+
 def make_materialization_read_only(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if path.is_symlink():
@@ -2955,7 +3353,18 @@ def materialization_lease_data(row: sqlite3.Row) -> dict[str, Any]:
         "expires_at": row["expires_at"],
         "created_at": row["created_at"],
         "revoked_at": row["revoked_at"],
+        "backend": row_value(row, "backend"),
+        "degraded": None if row_value(row, "degraded") is None else bool(row_value(row, "degraded")),
+        "ttl_seconds": row_value(row, "ttl_seconds"),
+        "grandfathered": bool(row_value(row, "grandfathered", 0)),
+        "attention": loads(row_value(row, "attention_json"), None) if row_value(row, "attention_json") else None,
+        "reaped_at": row_value(row, "reaped_at"),
+        "salvage": row_value(row, "salvage_id"),
     }
+
+
+def row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
+    return row[key] if key in row.keys() else default
 
 
 def resolve_lease_for_inspect(store: Store, lease_id: str) -> tuple[str, sqlite3.Row]:
@@ -2965,6 +3374,9 @@ def resolve_lease_for_inspect(store: Store, lease_id: str) -> tuple[str, sqlite3
     secret = store.row("SELECT * FROM secret_leases WHERE id = ?", (lease_id,))
     if secret is not None:
         return "secret", secret
+    disk = store.row("SELECT * FROM disk_leases WHERE id = ?", (lease_id,))
+    if disk is not None:
+        return "directory", disk
     raise TriError("path_not_found", "Lease not found.", object=lease_id)
 
 
@@ -3145,8 +3557,9 @@ def materialized_directory_record(
     before_entries: dict[str, dict[str, Any]],
     after_entries: dict[str, dict[str, Any]],
     mode: str,
+    materialization: Materialization | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "path": str(path),
         "mode": mode,
         "input_snapshot": input_snapshot,
@@ -3155,6 +3568,9 @@ def materialized_directory_record(
         "fingerprint_after": entries_fingerprint(after_entries),
         "mutated": changed_paths(before_entries, after_entries) != [],
     }
+    if materialization is not None:
+        record.update(materialization.describe())
+    return record
 
 
 def check_environment_policy(secret_leases: list[dict[str, Any]], secret_env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -5782,9 +6198,14 @@ def set_workspace_status(store: Store, args: argparse.Namespace, command: list[s
             task_id=ws["task_id"],
             object_refs={"workspace": ws["id"], "previous_status": previous_status, "status": status},
         )
+    reaped = None
+    if status in ("discarded", "archived"):
+        reaped = reap_leases(store, actor=args.actor, workspace_id=ws["id"], reason=f"workspace_{status}")
     data = workspace_data(store, ws["id"], actor=args.actor)
     data["previous_status"] = previous_status
     data["transition"] = f"{previous_status}->{status}"
+    if reaped is not None:
+        data["reaped_leases"] = reaped
     return envelope("tri.workspace.lifecycle", command, actor=args.actor, start=start, events=[evt], data=data)
 
 
@@ -5818,11 +6239,20 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
     ignored_paths = normalize_hidden_patterns(args.ignore_path)
     if args.ttl_seconds is not None and args.ttl_seconds <= 0:
         raise TriError("invalid_command", "Materialization lease TTL must be positive.", object=ws["id"])
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=args.ttl_seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z") if args.ttl_seconds else None
+    if args.no_ttl and args.ttl_seconds is not None:
+        raise TriError("invalid_command", "Pass either --ttl-seconds or --no-ttl, not both.", object=ws["id"])
+    ttl_seconds = None if args.no_ttl else (args.ttl_seconds or DEFAULT_MOUNT_TTL_SECONDS)
+    expires_at = lease_expiry(ttl_seconds) if ttl_seconds else None
+    claim_mount_path(store, root, actor=args.actor)
     lease_id = new_id("lease")
-    materialize_tree(store, entries, root)
+    env_plan = EnvPlan() if args.no_env else plan_environments(store, ws["project_id"], entries, actor=args.actor, workspace=ws, purpose="mount", env_link=args.env_link)
+    materialization = materialize_entries(store, entries, root, base_snapshot=ws["base_snapshot_id"], attachments=env_plan.attachments)
+    env_plan.finalize(materialization)
     if read_only:
         make_materialization_read_only(root)
+        materialization.refresh_baseline()
+    baseline_path = store.leases_dir / f"{lease_id}.baseline.json"
+    materialization.save_baseline(baseline_path)
     with store.conn:
         store.conn.execute(
             "UPDATE workspaces SET materialized_path = ?, materialized_snapshot_id = ?, updated_at = ? WHERE id = ?",
@@ -5832,8 +6262,9 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
             """
             INSERT INTO materialization_leases (
               id, workspace_id, actor, path, mounted_snapshot_id, last_sync_snapshot_id,
-              ignored_paths_json, generated_artifacts_json, status, expires_at, created_at, revoked_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ignored_paths_json, generated_artifacts_json, status, expires_at, created_at, revoked_at,
+              backend, degraded, baseline_path, ttl_seconds, env_keys_json, root_identity
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lease_id,
@@ -5848,6 +6279,12 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
                 expires_at,
                 utcnow(),
                 None,
+                materialization.backend,
+                1 if materialization.degraded else 0,
+                str(baseline_path),
+                ttl_seconds,
+                dumps([record["key"] for record in env_plan.records if record.get("key")]),
+                directory_identity(root),
             ),
         )
         evt = store.create_event(
@@ -5871,6 +6308,8 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
             "lease": lease_id,
             "read_only": read_only,
             "materialization": materialization_lease_data(store.get_materialization_lease(lease_id)),
+            "environments": env_plan.records,
+            "notes": materialization.notes,
         },
     )
 
@@ -5893,6 +6332,10 @@ def cmd_leases_inspect(store: Store, args: argparse.Namespace, command: list[str
     if kind == "materialization":
         require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read")
         data = lease_inspect_data(kind, materialization_lease_data(row))
+    elif kind == "directory":
+        if row["workspace_id"]:
+            require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read")
+        data = {"id": row["id"], "kind": "directory", "schema": "tri.disk_lease.inspect", "lease": disk_lease_data(row)}
     else:
         secret_lease_inspect_access(store, row, actor=args.actor)
         data = lease_inspect_data(kind, secret_lease_data(row))
@@ -5916,6 +6359,1387 @@ def cmd_workspace_lease_revoke(store: Store, args: argparse.Namespace, command: 
             object_refs={"workspace": ws["id"], "lease": lease["id"], "path": lease["path"]},
         )
     return envelope("tri.workspace.materialization_lease", command, actor=args.actor, start=start, events=[evt], data=materialization_lease_data(store.get_materialization_lease(args.lease)))
+
+
+DEFAULT_MOUNT_TTL_SECONDS = 86400
+AUTO_REAP_INTERVAL_SECONDS = 600
+SERVE_REAP_INTERVAL_SECONDS = 300
+AUTO_REAP_LIMIT = 20
+REAPER_ACTOR = "service:tri-reaper"
+GENERATED_CONFIG_PREFIX = ".tri/generated-config"
+REAPABLE_MOUNT_STATUSES = ("active", "read_only", "expired", "revoked", "expired_needs_attention")
+
+
+def lease_expiry(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def store_meta_get(store: Store, key: str) -> str | None:
+    row = store.row("SELECT value FROM store_meta WHERE key = ?", (key,))
+    return row["value"] if row else None
+
+
+def store_meta_set(store: Store, key: str, value: str) -> None:
+    with store.conn:
+        store.conn.execute("INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+
+class RunLease:
+    """A directory Tri owns while a command runs, with a holder lock that the
+    reaper probes to tell a live run from a crashed one."""
+
+    def __init__(self, store: Store, *, kind: str, key: str, workspace_id: str | None, before_snapshot: str | None) -> None:
+        self.store = store
+        self.id = new_id("lease")
+        self.kind = kind
+        self.dir = store.runs / key
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.work = self.dir / "work"
+        self.baseline_path = self.dir / "baseline.json"
+        self.holder = FileLock(self.dir / ".holder.lock")
+        self.holder.acquire(exclusive=True)
+        self.command_finished = False
+        with store.conn:
+            store.conn.execute(
+                """
+                INSERT INTO disk_leases (id, kind, path, workspace_id, check_id, before_snapshot_id, baseline_path, holder_lock, backend, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?)
+                """,
+                (self.id, kind, str(self.work), workspace_id, key, before_snapshot, str(self.baseline_path), str(self.dir / ".holder.lock"), utcnow()),
+            )
+
+    def record_envs(self, plan: "EnvPlan") -> None:
+        keys = [record["key"] for record in plan.records if record.get("key")]
+        if keys:
+            with self.store.conn:
+                self.store.conn.execute("UPDATE disk_leases SET env_keys_json = ? WHERE id = ?", (dumps(keys), self.id))
+
+    def record_materialization(self, materialization: Materialization) -> None:
+        materialization.save_baseline(self.baseline_path)
+        with self.store.conn:
+            self.store.conn.execute("UPDATE disk_leases SET backend = ? WHERE id = ?", (materialization.backend, self.id))
+
+    def release(self) -> None:
+        # Mark released while still holding the holder lock, so a reaper that
+        # sees the lock drop can never mistake a cleanup in progress for a crash.
+        with self.store.conn:
+            self.store.conn.execute("UPDATE disk_leases SET status = 'released', released_at = ? WHERE id = ? AND status = 'active'", (utcnow(), self.id))
+        remove_tree(self.dir)
+        self.holder.close()
+
+    def abandon(self) -> None:
+        """Keep the directory for the reaper to salvage (the command ran but its
+        changes were not imported); only drop the holder lock."""
+        self.holder.close()
+
+    def finish(self, failed: bool) -> None:
+        if failed and self.command_finished:
+            self.abandon()
+        else:
+            self.release()
+
+
+def disk_lease_data(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "path": row["path"],
+        "workspace": row["workspace_id"],
+        "check": row["check_id"],
+        "before_snapshot": row["before_snapshot_id"],
+        "backend": row["backend"],
+        "status": row["status"],
+        "salvage": row["salvage_id"],
+        "created_at": row["created_at"],
+        "released_at": row["released_at"],
+    }
+
+
+def salvage_data(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "workspace": row["workspace_id"],
+        "lease": row["lease_id"],
+        "kind": row["kind"],
+        "base_snapshot": row["base_snapshot_id"],
+        "snapshot": row["snapshot_id"],
+        "paths": loads(row["paths_json"], []),
+        "deleted_ignored": loads(row["deleted_ignored_json"], {"count": 0, "paths": []}),
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "adopted_at": row["adopted_at"],
+        "adopted_by": row["adopted_by"],
+    }
+
+
+def create_salvage(
+    store: Store,
+    ws: sqlite3.Row,
+    *,
+    lease_id: str,
+    kind: str,
+    base_snapshot: str,
+    entries: dict[str, dict[str, Any]],
+    paths: list[str],
+    deleted_ignored: dict[str, Any],
+    actor: str,
+) -> dict[str, Any]:
+    salvage_id = new_id("salvage")
+    with store.conn:
+        snapshot = store.create_snapshot(
+            ws["project_id"],
+            entries,
+            parents=[base_snapshot],
+            source="workspace",
+            actor=actor,
+            metadata={"workspace": ws["id"], "operation": "salvage", "lease": lease_id, "salvage": salvage_id},
+        )
+        store.conn.execute(
+            """
+            INSERT INTO salvages (id, workspace_id, lease_id, kind, base_snapshot_id, snapshot_id, paths_json, deleted_ignored_json, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (salvage_id, ws["id"], lease_id, kind, base_snapshot, snapshot["id"], dumps(paths), dumps(deleted_ignored), actor, utcnow()),
+        )
+        store.create_event(
+            kind="lease.salvaged",
+            actor=actor,
+            project_id=ws["project_id"],
+            workspace_id=ws["id"],
+            task_id=ws["task_id"],
+            object_refs={"salvage": salvage_id, "lease": lease_id, "snapshot": snapshot["id"], "paths": paths},
+            input_fingerprints={"snapshot": base_snapshot},
+            output_fingerprints={"snapshot": snapshot["id"]},
+        )
+    return salvage_data(store.row("SELECT * FROM salvages WHERE id = ?", (salvage_id,)))
+
+
+DERIVED_DIR_NAMES = frozenset(
+    {
+        "node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build", ".pytest_cache", ".mypy_cache",
+        ".ruff_cache", ".next", ".nuxt", ".svelte-kit", ".turbo", ".gradle", ".tox", ".parcel-cache", ".cache", "coverage",
+    }
+)
+JUNK_FILE_NAMES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def derived_dir_names() -> frozenset[str]:
+    extra = {name.strip() for name in os.environ.get("TRI_DERIVED_DIRS", "").split(",") if name.strip()}
+    return DERIVED_DIR_NAMES | extra
+
+
+def classify_uncaptured(
+    root: Path,
+    materialization: Materialization,
+    before_entries: dict[str, dict[str, Any]],
+    captured: set[str],
+    rules: IgnoreRules,
+    lease_ignored: list[str],
+) -> dict[str, Any]:
+    """Sort files a reap would not capture into "deletable" and "needs a human".
+
+    Deletable: everything inside ignored dependency/build directories
+    (``node_modules``, ``.venv``, ``target``...) and OS junk files. Needs a human:
+    secret-like files, other ignored files, and ``.git`` directories the user made.
+    """
+    derived = derived_dir_names()
+    skip = set(materialization.skip_prefixes)
+    secret_like: list[str] = []
+    user_git: list[str] = []
+    ignored_kept: set[str] = set()
+    collapsed: set[str] = set()
+    count = 0
+
+    def ignored_dir(rel: str) -> bool:
+        return rules.dir_ignored(rel) or path_matches_hidden(rel, lease_ignored)
+
+    def walk(directory: str, rel: str, derived_root: str | None, ignored_root: str | None) -> None:
+        nonlocal count
+        try:
+            it = os.scandir(directory)
+        except OSError:
+            return
+        with it:
+            for entry in it:
+                child = f"{rel}/{entry.name}" if rel else entry.name
+                if child in skip or child == GENERATED_CONFIG_PREFIX or child.startswith(GENERATED_CONFIG_PREFIX + "/"):
+                    continue
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if derived_root is not None:
+                    if is_dir:
+                        walk(entry.path, child, derived_root, ignored_root)
+                    else:
+                        count += 1
+                        collapsed.add(derived_root + "/")
+                    continue
+                if entry.name == ".git":
+                    user_git.append(child)
+                    continue
+                if is_dir:
+                    if child not in before_entries and ignored_dir(child):
+                        if entry.name in derived:
+                            walk(entry.path, child, child, ignored_root)
+                        else:
+                            walk(entry.path, child, None, ignored_root or child)
+                        continue
+                    walk(entry.path, child, None, ignored_root)
+                    continue
+                if child in captured or (child in before_entries and not path_matches_hidden(child, lease_ignored)):
+                    continue
+                if entry.name in JUNK_FILE_NAMES:
+                    count += 1
+                    collapsed.add(child)
+                elif is_secret_like_path(child):
+                    secret_like.append(child)
+                else:
+                    ignored_kept.add(ignored_root + "/" if ignored_root else child)
+
+    walk(str(root), "", None, None)
+    ordered = sorted(collapsed)
+    return {
+        "secret_like_paths": sorted(secret_like),
+        "user_git_dirs": sorted(user_git),
+        "ignored_paths": sorted(ignored_kept),
+        "deleted_ignored": {"count": count, "paths": ordered[:200], "truncated": len(ordered) > 200},
+    }
+
+
+def _lease_update(store: Store, table: str, lease_id: str, **fields: Any) -> None:
+    columns = ", ".join(f"{name} = ?" for name in fields)
+    with store.conn:
+        store.conn.execute(f"UPDATE {table} SET {columns} WHERE id = ?", (*fields.values(), lease_id))
+
+
+def directory_identity(path: Path) -> str | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return f"{st.st_dev}:{st.st_ino}"
+
+
+def reap_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, force: bool = False, reason: str = "expired") -> dict[str, Any] | None:
+    with store.conn:
+        claimed = store.conn.execute(
+            "UPDATE materialization_leases SET status = 'reaping' WHERE id = ? AND status = ? AND reaped_at IS NULL",
+            (lease["id"], lease["status"]),
+        ).rowcount
+    if claimed != 1:
+        return None
+    try:
+        return _reap_claimed_mount_lease(store, lease, actor=actor, force=force, reason=reason)
+    except BaseException:
+        with store.conn:
+            store.conn.execute("UPDATE materialization_leases SET status = ? WHERE id = ? AND status = 'reaping'", (lease["status"], lease["id"]))
+        raise
+
+
+def _reap_claimed_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, force: bool, reason: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"lease": lease["id"], "kind": "mount", "path": lease["path"], "workspace": lease["workspace_id"], "reason": reason}
+    root = Path(lease["path"])
+    identity = row_value(lease, "root_identity")
+    if root.is_symlink() or not root.is_dir() or (identity and directory_identity(root) != identity):
+        # Gone, or replaced by a directory Tri did not create: delete nothing.
+        _lease_update(store, "materialization_leases", lease["id"], status="gone", reaped_at=utcnow())
+        result["status"] = "gone"
+        return result
+    ws = store.get_workspace(lease["workspace_id"])
+    before = lease["last_sync_snapshot_id"]
+    before_entries = store.load_snapshot_tree(before)
+    baseline_file = row_value(lease, "baseline_path")
+    if baseline_file and Path(baseline_file).exists():
+        materialization = load_materialization(root, Path(baseline_file))
+    else:
+        materialization = Materialization(path=root, backend=row_value(lease, "backend") or "copy", degraded=True)
+    rules = import_rules(store, ws["project_id"], before_entries)
+    lease_ignored = loads(lease["ignored_paths_json"], [])
+    changed, deleted = materialization.scan(before_entries, ignore=rules)
+    captured_changed = [
+        path
+        for path in changed
+        if not path_matches_hidden(path, lease_ignored)
+        and not path.startswith(GENERATED_CONFIG_PREFIX + "/")
+        and (path in before_entries or not is_secret_like_path(path))
+    ]
+    captured_deleted = [path for path in deleted if not path_matches_hidden(path, lease_ignored)]
+    analysis = classify_uncaptured(root, materialization, before_entries, set(captured_changed), rules, lease_ignored)
+    blocked = analysis["secret_like_paths"] or analysis["user_git_dirs"] or analysis["ignored_paths"]
+    if blocked and not force:
+        attention = {
+            "reason": reason,
+            "secret_like_paths": analysis["secret_like_paths"][:50],
+            "user_git_dirs": analysis["user_git_dirs"][:50],
+            "ignored_paths": analysis["ignored_paths"][:50],
+            "message": "Directory holds files Tri did not create and will not capture (secret-like files, ignored files outside dependency/build directories, or a .git directory). Remove or move them, or run `tri leases reap <lease> --force`.",
+            "detected_at": utcnow(),
+        }
+        with store.conn:
+            store.conn.execute("UPDATE materialization_leases SET status = 'expired_needs_attention', attention_json = ? WHERE id = ?", (dumps(attention), lease["id"]))
+            store.create_event(kind="lease.needs_attention", actor=actor, project_id=ws["project_id"], workspace_id=ws["id"], task_id=ws["task_id"], object_refs={"lease": lease["id"], "path": str(root), "reason": reason})
+        result.update(status="expired_needs_attention", attention=attention)
+        return result
+    after_entries = entries_after_scan(store, root, before_entries, captured_changed, captured_deleted, skip_escaping=True)
+    paths = changed_paths(before_entries, after_entries)
+    salvage = None
+    if paths:
+        salvage = create_salvage(store, ws, lease_id=lease["id"], kind="mount", base_snapshot=before, entries=after_entries, paths=paths, deleted_ignored=analysis["deleted_ignored"], actor=actor)
+    remove_tree(root)
+    if baseline_file:
+        Path(baseline_file).unlink(missing_ok=True)
+    with store.conn:
+        store.conn.execute(
+            "UPDATE materialization_leases SET status = 'reaped', reaped_at = ?, salvage_id = ?, attention_json = NULL WHERE id = ?",
+            (utcnow(), salvage["id"] if salvage else None, lease["id"]),
+        )
+        store.create_event(
+            kind="lease.reaped",
+            actor=actor,
+            project_id=ws["project_id"],
+            workspace_id=ws["id"],
+            task_id=ws["task_id"],
+            object_refs={"lease": lease["id"], "path": str(root), "reason": reason, "salvage": salvage["id"] if salvage else None, "forced": force, "deleted_ignored": analysis["deleted_ignored"]},
+        )
+    result.update(status="reaped", salvage=salvage, deleted_ignored=analysis["deleted_ignored"])
+    return result
+
+
+def run_lease_holder_alive(lease: sqlite3.Row) -> bool:
+    lock_path = lease["holder_lock"]
+    if not lock_path or not Path(lock_path).exists():
+        return False
+    probe = FileLock(Path(lock_path))
+    try:
+        return not probe.acquire(exclusive=True, blocking=False)
+    finally:
+        probe.close()
+
+
+def reap_disk_lease(store: Store, lease: sqlite3.Row, *, actor: str) -> dict[str, Any] | None:
+    """Reap a run/env-build directory whose owning process is gone. Returns None if still live."""
+    if run_lease_holder_alive(lease):
+        return None
+    with store.conn:
+        claimed = store.conn.execute("UPDATE disk_leases SET status = 'reaping' WHERE id = ? AND status = 'active'", (lease["id"],)).rowcount
+    if claimed != 1:
+        return None
+    try:
+        return _reap_claimed_disk_lease(store, lease, actor=actor)
+    except BaseException:
+        with store.conn:
+            store.conn.execute("UPDATE disk_leases SET status = 'active' WHERE id = ? AND status = 'reaping'", (lease["id"],))
+        raise
+
+
+def _reap_claimed_disk_lease(store: Store, lease: sqlite3.Row, *, actor: str) -> dict[str, Any]:
+    work = Path(lease["path"])
+    lease_dir = work.parent
+    result: dict[str, Any] = {"lease": lease["id"], "kind": lease["kind"], "path": str(work), "workspace": lease["workspace_id"], "reason": "orphaned"}
+    salvage = None
+    baseline_file = lease["baseline_path"]
+    if (
+        lease["kind"] == "run"
+        and lease_dir.is_dir()
+        and baseline_file
+        and Path(baseline_file).exists()
+        and lease["before_snapshot_id"]
+        and lease["workspace_id"]
+    ):
+        ws = store.row("SELECT * FROM workspaces WHERE id = ?", (lease["workspace_id"],))
+        if ws is not None and ws["status"] in ("active", "paused"):
+            materialization = load_any_materialization(work, Path(baseline_file))
+            before_entries = store.load_snapshot_tree(lease["before_snapshot_id"])
+            rules = import_rules(store, ws["project_id"], before_entries)
+            changed, deleted = materialization.scan(before_entries, ignore=rules)
+            changed = [path for path in changed if not path.startswith(GENERATED_CONFIG_PREFIX + "/") and (path in before_entries or not is_secret_like_path(path))]
+            after_entries = entries_after_scan(store, materialization.content_root, before_entries, changed, deleted, skip_escaping=True)
+            paths = changed_paths(before_entries, after_entries)
+            if paths:
+                salvage = create_salvage(
+                    store,
+                    ws,
+                    lease_id=lease["id"],
+                    kind="run",
+                    base_snapshot=lease["before_snapshot_id"],
+                    entries=after_entries,
+                    paths=paths,
+                    deleted_ignored={"count": 0, "paths": []},
+                    actor=actor,
+                )
+    remove_tree(lease_dir)
+    with store.conn:
+        store.conn.execute(
+            "UPDATE disk_leases SET status = 'reaped', released_at = ?, salvage_id = ? WHERE id = ?",
+            (utcnow(), salvage["id"] if salvage else None, lease["id"]),
+        )
+        store.create_event(
+            kind="lease.reaped",
+            actor=actor,
+            workspace_id=lease["workspace_id"],
+            object_refs={"lease": lease["id"], "kind": lease["kind"], "path": str(work), "reason": "orphaned", "salvage": salvage["id"] if salvage else None},
+        )
+    result.update(status="reaped", salvage=salvage)
+    return result
+
+
+def _mount_reap_reason(lease: sqlite3.Row, ws_status: str | None, now: str) -> str | None:
+    if row_value(lease, "grandfathered", 0):
+        return None
+    if ws_status == "discarded":
+        return "workspace_discarded"
+    if lease["status"] == "revoked":
+        return "revoked"
+    if lease["status"] in ("expired", "expired_needs_attention"):
+        return "expired"
+    if lease["expires_at"] and lease["expires_at"] <= now:
+        return "expired"
+    return None
+
+
+def reap_leases(
+    store: Store,
+    *,
+    actor: str,
+    limit: int | None = None,
+    force_lease: str | None = None,
+    workspace_id: str | None = None,
+    reason: str | None = None,
+    force: bool = True,
+) -> dict[str, Any]:
+    """Reap expired/orphaned directories, salvaging unsynced edits first.
+
+    Reapers are serialized by ``reaper.lock``; background passes skip (``busy``)
+    instead of waiting, explicit ones wait."""
+    reaper_lock = FileLock(store.home / "reaper.lock")
+    explicit = force_lease is not None or workspace_id is not None
+    if not reaper_lock.acquire(exclusive=True, blocking=explicit):
+        reaper_lock.close()
+        return {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": True}
+    try:
+        return _reap_leases_locked(store, actor=actor, limit=limit, force_lease=force_lease, workspace_id=workspace_id, reason=reason, force=force)
+    finally:
+        reaper_lock.close()
+
+
+def _reap_leases_locked(
+    store: Store,
+    *,
+    actor: str,
+    limit: int | None,
+    force_lease: str | None,
+    workspace_id: str | None,
+    reason: str | None,
+    force: bool = True,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {"reaped": [], "salvaged": [], "needs_attention": [], "errors": [], "checked": 0, "busy": False}
+
+    def record(result: dict[str, Any] | None) -> None:
+        if result is None:
+            return
+        if result.get("status") == "expired_needs_attention":
+            report["needs_attention"].append(result)
+            return
+        report["reaped"].append(result)
+        if result.get("salvage"):
+            report["salvaged"].append(result["salvage"])
+
+    def attempt(fn: Callable[[], dict[str, Any] | None], lease_id: str) -> None:
+        report["checked"] += 1
+        try:
+            record(fn())
+        except TriError as exc:
+            report["errors"].append({"lease": lease_id, **exc.diagnostic})
+        except OSError as exc:
+            report["errors"].append({"lease": lease_id, "code": "reap_failed", "message": str(exc)})
+
+    if force_lease is not None:
+        mount = store.row("SELECT * FROM materialization_leases WHERE id = ?", (force_lease,))
+        if mount is not None:
+            if mount["status"] in ("reaped", "gone"):
+                raise TriError("lease_already_reaped", "Lease directory was already reaped.", object=force_lease, status=mount["status"])
+            attempt(lambda: reap_mount_lease(store, mount, actor=actor, force=force, reason=reason or "forced"), mount["id"])
+            return report
+        disk = store.row("SELECT * FROM disk_leases WHERE id = ?", (force_lease,))
+        if disk is None:
+            raise TriError("path_not_found", "Lease not found.", object=force_lease)
+        if disk["status"] != "active":
+            raise TriError("lease_already_reaped", "Lease directory was already released.", object=force_lease, status=disk["status"])
+        attempt(lambda: reap_disk_lease(store, disk, actor=actor), disk["id"])
+        return report
+
+    budget = limit if limit is not None else 1 << 30
+    if workspace_id is None:
+        for disk in store.rows("SELECT * FROM disk_leases WHERE status = 'active' ORDER BY created_at"):
+            if budget <= 0:
+                break
+            budget -= 1
+            attempt(lambda disk=disk: reap_disk_lease(store, disk, actor=actor), disk["id"])
+    now = utcnow()
+    placeholders = ",".join("?" for _ in REAPABLE_MOUNT_STATUSES)
+    params: tuple[Any, ...] = REAPABLE_MOUNT_STATUSES
+    sql = f"SELECT * FROM materialization_leases WHERE status IN ({placeholders}) AND reaped_at IS NULL"
+    if workspace_id is not None:
+        sql += " AND workspace_id = ?"
+        params = (*params, workspace_id)
+    for mount in store.rows(sql + " ORDER BY created_at, rowid", params):
+        if budget <= 0:
+            break
+        ws = store.row("SELECT status FROM workspaces WHERE id = ?", (mount["workspace_id"],))
+        why = reason if workspace_id is not None else _mount_reap_reason(mount, ws["status"] if ws else None, now)
+        if why is None:
+            continue
+        budget -= 1
+        attempt(lambda mount=mount, why=why: reap_mount_lease(store, mount, actor=actor, reason=why), mount["id"])
+    store_meta_set(store, "last_reap_at", utcnow())
+    return report
+
+
+def maybe_auto_reap(store: Store) -> None:
+    if os.environ.get("TRI_AUTO_REAP", "1") == "0":
+        return
+    last = store_meta_get(store, "last_reap_at")
+    if last:
+        try:
+            if (datetime.now(timezone.utc) - parse_utc(last)).total_seconds() < AUTO_REAP_INTERVAL_SECONDS:
+                return
+        except ValueError:
+            pass
+    store_meta_set(store, "last_reap_at", utcnow())
+    reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
+    evict_caches(store)
+
+
+def start_reaper_thread(interval: float = SERVE_REAP_INTERVAL_SECONDS) -> threading.Event:
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(interval):
+            try:
+                reaper_store = Store()
+                try:
+                    reap_leases(reaper_store, actor=REAPER_ACTOR, limit=50)
+                    evict_caches(reaper_store)
+                finally:
+                    reaper_store.close()
+            except Exception:  # never let maintenance kill the API server
+                continue
+
+    threading.Thread(target=loop, name="tri-reaper", daemon=True).start()
+    return stop
+
+
+def lease_status_summary(store: Store) -> dict[str, Any]:
+    counts = {row["status"]: row["count"] for row in store.rows("SELECT status, COUNT(*) AS count FROM materialization_leases GROUP BY status")}
+    runs = {row["status"]: row["count"] for row in store.rows("SELECT status, COUNT(*) AS count FROM disk_leases GROUP BY status")}
+    attention = [row["id"] for row in store.rows("SELECT id FROM materialization_leases WHERE status = 'expired_needs_attention' ORDER BY created_at")]
+    grandfathered = [
+        row["id"]
+        for row in store.rows("SELECT id FROM materialization_leases WHERE grandfathered = 1 AND status NOT IN ('reaped', 'gone') ORDER BY created_at")
+    ]
+    return {
+        "mounts_by_status": counts,
+        "run_dirs_by_status": runs,
+        "needs_attention": attention,
+        "grandfathered": grandfathered,
+        "last_reap_at": store_meta_get(store, "last_reap_at"),
+    }
+
+
+def claim_mount_path(store: Store, root: Path, *, actor: str) -> None:
+    """One live lease per directory: refuse a path a live lease owns; reap
+    (salvaging first) a dead lease that still owns it."""
+    now = utcnow()
+    for lease in store.rows("SELECT * FROM materialization_leases WHERE path = ? AND reaped_at IS NULL AND status NOT IN ('reaped', 'gone')", (str(root),)):
+        live = lease["status"] in ("active", "read_only") and not (lease["expires_at"] and lease["expires_at"] <= now)
+        if live or lease["status"] == "expired_needs_attention":
+            raise TriError(
+                "mount_path_in_use",
+                "Another materialization lease owns this directory; sync and release it (tri leases reap <lease> --force) or mount somewhere else.",
+                object=str(root),
+                lease=lease["id"],
+                status=lease["status"],
+            )
+        report = reap_leases(store, actor=actor, force_lease=lease["id"], reason="remount", force=False)
+        if report["needs_attention"] or report["errors"]:
+            raise TriError("mount_path_in_use", "The previous lease on this directory could not be reaped safely.", object=str(root), lease=lease["id"], report=report)
+
+
+def renew_mount_lease(store: Store, lease_id: str, ttl_seconds: int | None = None) -> None:
+    lease = store.get_materialization_lease(lease_id)
+    ttl = ttl_seconds or row_value(lease, "ttl_seconds")
+    if not ttl:
+        return
+    with store.conn:
+        store.conn.execute("UPDATE materialization_leases SET expires_at = ?, ttl_seconds = ? WHERE id = ?", (lease_expiry(ttl), ttl, lease_id))
+
+
+def cmd_leases_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    if args.workspace:
+        ws = store.get_workspace(args.workspace)
+        require_object_access(store, ws["id"], actor=args.actor, action="workspace.read")
+    readable: dict[str, bool] = {}
+
+    def can_read(workspace_id: str | None) -> bool:
+        if workspace_id is None:
+            return True
+        if workspace_id not in readable:
+            decision, _ = object_access_decision(store, workspace_id, actor=args.actor, action="workspace.read")
+            readable[workspace_id] = bool(decision["allowed"])
+        return readable[workspace_id]
+
+    leases: list[dict[str, Any]] = []
+    mount_sql = "SELECT * FROM materialization_leases" + (" WHERE workspace_id = ?" if args.workspace else "") + " ORDER BY created_at, rowid"
+    for row in store.rows(mount_sql, (args.workspace,) if args.workspace else ()):
+        if can_read(row["workspace_id"]):
+            leases.append({"kind": "mount", **materialization_lease_data(row)})
+    disk_sql = "SELECT * FROM disk_leases" + (" WHERE workspace_id = ?" if args.workspace else "") + " ORDER BY created_at, rowid"
+    for row in store.rows(disk_sql, (args.workspace,) if args.workspace else ()):
+        if can_read(row["workspace_id"]):
+            leases.append(disk_lease_data(row))
+    if args.status:
+        leases = [lease for lease in leases if lease["status"] == args.status]
+    return envelope("tri.lease.list", command, actor=args.actor, start=start, data={"workspace": args.workspace, "leases": leases})
+
+
+def cmd_leases_renew(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    lease = store.get_materialization_lease(args.lease)
+    if lease["actor"] != args.actor:
+        require_object_access(store, lease["workspace_id"], actor=args.actor, action="workspace.write")
+    if args.ttl_seconds is not None and args.ttl_seconds <= 0:
+        raise TriError("invalid_command", "Materialization lease TTL must be positive.", object=lease["id"])
+    if lease["status"] in ("reaped", "gone", "revoked"):
+        raise TriError("stale_materialization", "Lease can no longer be renewed.", object=lease["id"], status=lease["status"])
+    if not Path(lease["path"]).is_dir():
+        raise TriError("stale_materialization", "Materialized path no longer exists.", object=lease["path"], lease=lease["id"])
+    ttl = args.ttl_seconds or row_value(lease, "ttl_seconds") or DEFAULT_MOUNT_TTL_SECONDS
+    ws = store.get_workspace(lease["workspace_id"])
+    status = lease["status"]
+    if status in ("expired", "expired_needs_attention"):
+        status = "read_only" if ws["status"] == "archived" else "active"
+    with store.conn:
+        store.conn.execute(
+            "UPDATE materialization_leases SET expires_at = ?, ttl_seconds = ?, status = ?, attention_json = NULL WHERE id = ?",
+            (lease_expiry(ttl), ttl, status, lease["id"]),
+        )
+        evt = store.create_event(kind="lease.renewed", actor=args.actor, project_id=ws["project_id"], workspace_id=ws["id"], task_id=ws["task_id"], object_refs={"lease": lease["id"], "ttl_seconds": ttl})
+    return envelope("tri.workspace.materialization_lease", command, actor=args.actor, start=start, events=[evt], data=materialization_lease_data(store.get_materialization_lease(lease["id"])))
+
+
+def cmd_leases_reap(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    if args.lease:
+        mount = store.row("SELECT * FROM materialization_leases WHERE id = ?", (args.lease,))
+        workspace_id = mount["workspace_id"] if mount is not None else None
+        if mount is None:
+            disk = store.row("SELECT * FROM disk_leases WHERE id = ?", (args.lease,))
+            workspace_id = disk["workspace_id"] if disk is not None else None
+        if workspace_id and (mount is None or mount["actor"] != args.actor):
+            require_object_access(store, workspace_id, actor=args.actor, action="workspace.write")
+        if not args.force:
+            raise TriError("invalid_command", "Reaping one lease deletes its directory; pass --force to confirm.", object=args.lease)
+        report = reap_leases(store, actor=args.actor, force_lease=args.lease)
+    else:
+        report = reap_leases(store, actor=args.actor)
+    return envelope("tri.lease.reap", command, actor=args.actor, start=start, data=report)
+
+
+def cmd_salvage_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    ws = store.get_workspace(args.workspace)
+    require_object_access(store, ws["id"], actor=args.actor, action="workspace.read")
+    rows = store.rows("SELECT * FROM salvages WHERE workspace_id = ? ORDER BY created_at, rowid", (ws["id"],))
+    return envelope("tri.salvage.list", command, actor=args.actor, start=start, data={"workspace": ws["id"], "salvages": [salvage_data(row) for row in rows]})
+
+
+def cmd_salvage_adopt(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    row = store.row("SELECT * FROM salvages WHERE id = ?", (args.salvage,))
+    if row is None:
+        raise TriError("path_not_found", "Salvage not found.", object=args.salvage)
+    ws = store.get_workspace(row["workspace_id"])
+    if ws["status"] != "active":
+        raise TriError("policy_denied", "Only active workspaces can adopt salvaged edits.", object=ws["id"], status=ws["status"])
+    require_object_access(store, ws["id"], actor=args.actor, action="workspace.write")
+    if row["adopted_at"]:
+        raise TriError("salvage_already_adopted", "Salvage was already adopted.", object=row["id"], adopted_at=row["adopted_at"])
+    head = ws["head_snapshot_id"]
+    if args.expect_head and args.expect_head != head:
+        raise TriError("stale_workspace_head", "Workspace head does not match --expect-head.", object=ws["id"], expected=args.expect_head, actual=head, retryable=True)
+    if head != row["base_snapshot_id"]:
+        raise TriError(
+            "stale_workspace_head",
+            "Workspace head moved after these edits were salvaged; adopt applies only onto the snapshot they were salvaged from. Compare with `tri diff <base> <salvage-snapshot>` and re-apply the paths you need.",
+            object=ws["id"],
+            expected=row["base_snapshot_id"],
+            actual=head,
+            salvage_snapshot=row["snapshot_id"],
+            retryable=False,
+        )
+    paths = loads(row["paths_json"], [])
+    with store.conn:
+        op_id = new_id("op")
+        store.conn.execute(
+            "INSERT INTO operations (id, workspace_id, actor, kind, input_snapshot_id, output_snapshot_id, path_set_json, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (op_id, ws["id"], args.actor, "salvage_adopt", head, row["snapshot_id"], dumps(paths), dumps({"salvage": row["id"], "lease": row["lease_id"]}), utcnow()),
+        )
+        updated = store.conn.execute(
+            "UPDATE workspaces SET head_snapshot_id = ?, updated_at = ? WHERE id = ? AND head_snapshot_id = ?",
+            (row["snapshot_id"], utcnow(), ws["id"], head),
+        )
+        if updated.rowcount != 1:
+            raise TriError("stale_workspace_head", "Workspace head changed while adopting salvage.", object=ws["id"], expected=head, retryable=True)
+        store.conn.execute("UPDATE salvages SET adopted_at = ?, adopted_by = ? WHERE id = ?", (utcnow(), args.actor, row["id"]))
+        evt = store.create_event(
+            kind="salvage.adopted",
+            actor=args.actor,
+            project_id=ws["project_id"],
+            workspace_id=ws["id"],
+            task_id=ws["task_id"],
+            object_refs={"salvage": row["id"], "operation": op_id, "snapshot": row["snapshot_id"], "paths": paths},
+            input_fingerprints={"snapshot": head},
+            output_fingerprints={"snapshot": row["snapshot_id"]},
+        )
+    return envelope(
+        "tri.salvage.adopt",
+        command,
+        actor=args.actor,
+        start=start,
+        events=[evt],
+        data={"salvage": row["id"], "workspace": ws["id"], "operation": op_id, "snapshot": row["snapshot_id"], "paths": paths},
+    )
+
+
+ENV_MODES = ("auto", "copy", "link", "private")
+_ENV_KEY_COMMAND_CACHE: dict[str, str] = {}
+
+
+def split_command(command_text: str) -> list[str]:
+    return shlex.split(command_text, posix=os.name != "nt")
+
+
+def env_platform_tag() -> str:
+    import platform as _platform
+
+    libc = "-".join(part for part in _platform.libc_ver() if part) or "nolibc"
+    return f"{sys.platform}-{_platform.machine()}-{libc}"
+
+
+def env_recipe_data(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "project": row["project_id"],
+        "name": row["name"],
+        "key_files": loads(row["key_files_json"], []),
+        "key_commands": loads(row["key_commands_json"], []),
+        "install": row["install"],
+        "outputs": loads(row["outputs_json"], []),
+        "mode": row["mode"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+    }
+
+
+def env_build_data(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "key": row["key"],
+        "recipe": row["recipe_id"],
+        "status": row["status"],
+        "path": row["path"],
+        "outputs": loads(row["outputs_json"], []),
+        "size_bytes": row["size_bytes"],
+        "exit_status": row["exit_status"],
+        "stdout_artifact": row["stdout_artifact"],
+        "stderr_artifact": row["stderr_artifact"],
+        "error": loads(row["error_json"], None) if row["error_json"] else None,
+        "workspace": row["workspace_id"],
+        "built_by": row["built_by"],
+        "created_at": row["created_at"],
+        "last_used_at": row["last_used_at"],
+    }
+
+
+def env_key_command_output(command_text: str) -> str:
+    cached = _ENV_KEY_COMMAND_CACHE.get(command_text)
+    if cached is not None:
+        return cached
+    try:
+        proc = subprocess.run(split_command(command_text), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, check=False)
+        output = f"exit={proc.returncode}\n" + proc.stdout.decode(errors="replace").strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        output = f"error={type(exc).__name__}"
+    _ENV_KEY_COMMAND_CACHE[command_text] = output
+    return output
+
+
+def env_key(recipe: sqlite3.Row, entries: dict[str, dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    """Content key for an environment: recipe + key-file contents + key-command outputs + platform."""
+    files: dict[str, str | None] = {}
+    for pattern in loads(recipe["key_files_json"], []):
+        matched = [path for path in entries if path == pattern or fnmatch.fnmatch(path, pattern)]
+        if not matched:
+            files[pattern] = None
+        for path in matched:
+            entry = entries[path]
+            files[path] = entry.get("hash") or entry.get("blob")
+    inputs = {
+        "recipe": {
+            "install": recipe["install"],
+            "outputs": loads(recipe["outputs_json"], []),
+            "key_files": loads(recipe["key_files_json"], []),
+            "key_commands": loads(recipe["key_commands_json"], []),
+        },
+        "files": files,
+        "commands": {command_text: env_key_command_output(command_text) for command_text in loads(recipe["key_commands_json"], [])},
+        "platform": env_platform_tag(),
+    }
+    return f"env_{sha256(dumps(inputs).encode())[:24]}", inputs
+
+
+def freeze_read_only(root: Path) -> None:
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path):
+                continue
+            try:
+                os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o222)
+            except OSError:
+                pass
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                try:
+                    os.chmod(path, 0o555)
+                except OSError:
+                    pass
+
+
+def tree_size_bytes(root: Path) -> int:
+    total = 0
+    for dirpath, _, filenames in os.walk(root):
+        for name in filenames:
+            try:
+                total += os.lstat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _record_env_build(store: Store, key: str, recipe: sqlite3.Row, **fields: Any) -> None:
+    now = utcnow()
+    existing = store.row("SELECT key FROM env_builds WHERE key = ?", (key,))
+    with store.conn:
+        if existing is None:
+            store.conn.execute(
+                "INSERT INTO env_builds (key, recipe_id, project_id, status, path, outputs_json, created_at, last_used_at) VALUES (?, ?, ?, 'building', '', ?, ?, ?)",
+                (key, recipe["id"], recipe["project_id"], recipe["outputs_json"], now, now),
+            )
+        if fields:
+            columns = ", ".join(f"{name} = ?" for name in fields)
+            store.conn.execute(f"UPDATE env_builds SET {columns} WHERE key = ?", (*fields.values(), key))
+
+
+def ensure_env(store: Store, recipe: sqlite3.Row, entries: dict[str, dict[str, Any]], *, actor: str, workspace: sqlite3.Row | None) -> tuple[sqlite3.Row, str]:
+    """Return a ready shared environment for ``entries``, building it once per key."""
+    key, inputs = env_key(recipe, entries)
+    envs_root = store.home / "envs"
+    envs_root.mkdir(parents=True, exist_ok=True)
+
+    def ready_row() -> sqlite3.Row | None:
+        row = store.row("SELECT * FROM env_builds WHERE key = ?", (key,))
+        if row is not None and row["status"] == "ready" and Path(row["path"]).is_dir():
+            return row
+        return None
+
+    row = ready_row()
+    if row is not None:
+        with store.conn:
+            store.conn.execute("UPDATE env_builds SET last_used_at = ? WHERE key = ?", (utcnow(), key))
+        return row, "reused"
+    key_lock = FileLock(envs_root / f".{key}.lock")
+    key_lock.acquire(exclusive=True)
+    try:
+        row = ready_row()
+        if row is not None:
+            return row, "reused"
+        _record_env_build(store, key, recipe, status="building", error_json=None)
+        build = RunLease(store, kind="env_build", key=f"envbuild_{key}_{uuid.uuid4().hex[:8]}", workspace_id=workspace["id"] if workspace is not None else None, before_snapshot=None)
+        try:
+            materialization = materialize_entries(store, entries, build.work)
+            build.record_materialization(materialization)
+            argv = split_command(recipe["install"])
+            try:
+                proc = subprocess.run(argv, cwd=build.work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=os.environ.copy())
+                exit_status, out, err = proc.returncode, proc.stdout, proc.stderr
+            except OSError as exc:
+                exit_status, out, err = 127, b"", str(exc).encode()
+            with store.conn:
+                stdout_artifact = write_artifact(store, "stdout", f"{key}-{build.id}-stdout.txt", out, labels=["env-build"])
+                stderr_artifact = write_artifact(store, "stderr", f"{key}-{build.id}-stderr.txt", err, labels=["env-build"])
+            common = {"recipe": recipe["name"], "key": key, "stdout_artifact": stdout_artifact, "stderr_artifact": stderr_artifact}
+            if exit_status != 0:
+                error = {"code": "env_build_failed", "exit_status": exit_status}
+                _record_env_build(store, key, recipe, status="failed", exit_status=exit_status, stdout_artifact=stdout_artifact, stderr_artifact=stderr_artifact, error_json=dumps(error), built_by=actor)
+                raise TriError("env_build_failed", f"Environment '{recipe['name']}' install command failed.", object=recipe["name"], exit_status=exit_status, retryable=True, **common)
+            outputs = loads(recipe["outputs_json"], [])
+            missing = [out_path for out_path in outputs if not os.path.lexists(build.work / out_path)]
+            if missing:
+                error = {"code": "env_output_missing", "outputs": missing}
+                _record_env_build(store, key, recipe, status="failed", exit_status=exit_status, stdout_artifact=stdout_artifact, stderr_artifact=stderr_artifact, error_json=dumps(error), built_by=actor)
+                raise TriError("env_output_missing", f"Environment '{recipe['name']}' install did not produce its declared outputs.", object=recipe["name"], outputs=missing, retryable=False, **common)
+            staging = envs_root / f".{key}.{uuid.uuid4().hex}.tmp"
+            for out_path in outputs:
+                destination = staging / out_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(build.work / out_path, destination)
+            freeze_read_only(staging)
+            final = envs_root / key
+            if final.exists():
+                remove_tree(final)
+            os.rename(staging, final)
+            _record_env_build(
+                store,
+                key,
+                recipe,
+                status="ready",
+                path=str(final),
+                size_bytes=tree_size_bytes(final),
+                exit_status=exit_status,
+                stdout_artifact=stdout_artifact,
+                stderr_artifact=stderr_artifact,
+                built_by=actor,
+                workspace_id=workspace["id"] if workspace is not None else None,
+                last_used_at=utcnow(),
+            )
+            with store.conn:
+                store.create_event(
+                    kind="env.built",
+                    actor=actor,
+                    project_id=recipe["project_id"],
+                    workspace_id=workspace["id"] if workspace is not None else None,
+                    object_refs={"recipe": recipe["id"], "name": recipe["name"], "key": key, "inputs": inputs["files"], "platform": inputs["platform"]},
+                )
+        finally:
+            build.release()
+        row = ready_row()
+        assert row is not None
+        return row, "built"
+    finally:
+        key_lock.close()
+
+
+class EnvPlan:
+    def __init__(self) -> None:
+        self.attachments: list[Attachment] = []
+        self.reserved: list[str] = []
+        self.private: list[sqlite3.Row] = []
+        self.records: list[dict[str, Any]] = []
+
+    def finalize(self, materialization: Materialization) -> None:
+        materialization.skip_prefixes = sorted(set(materialization.skip_prefixes) | set(self.reserved))
+
+    def install_private(self, work: Path, env: dict[str, str]) -> None:
+        for recipe in self.private:
+            try:
+                proc = subprocess.run(split_command(recipe["install"]), cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
+                exit_status = proc.returncode
+            except OSError:
+                exit_status = 127
+            if exit_status != 0:
+                raise TriError("env_build_failed", f"Environment '{recipe['name']}' per-run install failed.", object=recipe["name"], exit_status=exit_status, mode="private", retryable=True)
+
+
+def plan_environments(
+    store: Store,
+    project_id: str,
+    entries: dict[str, dict[str, Any]],
+    *,
+    actor: str,
+    workspace: sqlite3.Row | None,
+    purpose: str,
+    env_link: bool = False,
+) -> EnvPlan:
+    plan = EnvPlan()
+    for recipe in store.rows("SELECT * FROM env_recipes WHERE project_id = ? ORDER BY name", (project_id,)):
+        outputs = loads(recipe["outputs_json"], [])
+        free = [out_path for out_path in outputs if not any(path == out_path or path.startswith(out_path + "/") for path in entries)]
+        conflicting = sorted(set(outputs) - set(free))
+        plan.reserved.extend(free)
+        if recipe["mode"] == "private":
+            if purpose == "run":
+                plan.private.append(recipe)
+            plan.records.append({"recipe": recipe["name"], "key": None, "status": "per_run" if purpose == "run" else "skipped", "mode": "private", "outputs": free, "conflicting_outputs": conflicting})
+            continue
+        build, status = ensure_env(store, recipe, entries, actor=actor, workspace=workspace)
+        if recipe["mode"] == "auto":
+            attach_mode = "auto" if purpose == "run" else ("link" if env_link else "clone-only")
+        else:
+            attach_mode = recipe["mode"]
+        for out_path in free:
+            plan.attachments.append(Attachment(out_path, Path(build["path"]) / out_path, attach_mode))
+        plan.records.append({"recipe": recipe["name"], "key": build["key"], "status": status, "mode": attach_mode, "outputs": free, "conflicting_outputs": conflicting})
+    return plan
+
+
+def require_env_maintainer(args: argparse.Namespace) -> None:
+    if "role:maintainer" not in actor_selectors(args.actor):
+        raise TriError("policy_denied", "Only maintainers can change environment recipes.", object=args.project, action="env.define", required_grant="role:maintainer")
+
+
+def get_env_recipe(store: Store, project_id: str, name: str) -> sqlite3.Row:
+    row = store.row("SELECT * FROM env_recipes WHERE project_id = ? AND (name = ? OR id = ?)", (project_id, name, name))
+    if row is None:
+        raise TriError("path_not_found", "Environment recipe not found.", object=name)
+    return row
+
+
+def cmd_env_define(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_env_maintainer(args)
+    project = store.get_project(args.project)
+    if args.mode not in ENV_MODES:
+        raise TriError("invalid_command", "Unknown environment mode.", object=args.name, allowed=list(ENV_MODES))
+    outputs = sorted({normalize_path(out_path) for out_path in args.output or []})
+    if not outputs:
+        raise TriError("invalid_command", "An environment needs at least one --output path.", object=args.name)
+    if not split_command(args.install):
+        raise TriError("invalid_command", "An environment needs a non-empty --install command.", object=args.name)
+    key_files = sorted({normalize_path(path) for path in args.key_file or []})
+    key_commands = list(dict.fromkeys(args.key_command or []))
+    existing = store.row("SELECT id FROM env_recipes WHERE project_id = ? AND name = ?", (project["id"], args.name))
+    recipe_id = existing["id"] if existing else new_id("envr")
+    with store.conn:
+        store.conn.execute(
+            """
+            INSERT INTO env_recipes (id, project_id, name, key_files_json, key_commands_json, install, outputs_json, mode, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, name) DO UPDATE SET key_files_json = excluded.key_files_json, key_commands_json = excluded.key_commands_json,
+              install = excluded.install, outputs_json = excluded.outputs_json, mode = excluded.mode
+            """,
+            (recipe_id, project["id"], args.name, dumps(key_files), dumps(key_commands), args.install, dumps(outputs), args.mode, args.actor, utcnow()),
+        )
+        evt = store.create_event(kind="env.defined", actor=args.actor, project_id=project["id"], object_refs={"recipe": recipe_id, "name": args.name})
+    return envelope("tri.env.recipe", command, actor=args.actor, start=start, events=[evt], data=env_recipe_data(get_env_recipe(store, project["id"], args.name)))
+
+
+def cmd_env_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    project = store.get_project(args.project)
+    recipes = [env_recipe_data(row) for row in store.rows("SELECT * FROM env_recipes WHERE project_id = ? ORDER BY name", (project["id"],))]
+    return envelope("tri.env.list", command, actor=args.actor, start=start, data={"project": project["id"], "recipes": recipes})
+
+
+def cmd_env_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    project = store.get_project(args.project)
+    recipe = get_env_recipe(store, project["id"], args.name)
+    builds = [env_build_data(row) for row in store.rows("SELECT * FROM env_builds WHERE recipe_id = ? ORDER BY created_at, rowid", (recipe["id"],))]
+    return envelope("tri.env.inspect", command, actor=args.actor, start=start, data={"recipe": env_recipe_data(recipe), "builds": builds})
+
+
+def cmd_env_remove(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_env_maintainer(args)
+    project = store.get_project(args.project)
+    recipe = get_env_recipe(store, project["id"], args.name)
+    with store.conn:
+        store.conn.execute("DELETE FROM env_recipes WHERE id = ?", (recipe["id"],))
+        evt = store.create_event(kind="env.removed", actor=args.actor, project_id=project["id"], object_refs={"recipe": recipe["id"], "name": recipe["name"]})
+    recipes = [env_recipe_data(row) for row in store.rows("SELECT * FROM env_recipes WHERE project_id = ? ORDER BY name", (project["id"],))]
+    return envelope("tri.env.list", command, actor=args.actor, start=start, events=[evt], data={"project": project["id"], "recipes": recipes})
+
+
+GC_RETENTION_DAYS = 14
+GC_GRACE_SECONDS = 3600
+ROOT_SNAPSHOT_SOURCES = ("imported", "merge")
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def iso_before(seconds: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def gc_live_snapshots(store: Store, *, retention_cutoff: str, grace_cutoff: str) -> set[str]:
+    """Snapshots GC must keep: target history, everything a live object references,
+    and anything newer than the grace cutoff."""
+    live: set[str] = set()
+
+    def add(*values: Any) -> None:
+        for value in values:
+            if isinstance(value, str) and value:
+                live.add(value)
+
+    for row in store.rows("SELECT snapshot_id FROM targets"):
+        add(row["snapshot_id"])
+    placeholders = ",".join("?" for _ in ROOT_SNAPSHOT_SOURCES)
+    for row in store.rows(f"SELECT id FROM snapshots WHERE source IN ({placeholders}) OR created_at > ?", (*ROOT_SNAPSHOT_SOURCES, grace_cutoff)):
+        add(row["id"])
+    retired_ws = {
+        row["id"]
+        for row in store.rows("SELECT id FROM workspaces WHERE status = 'discarded' AND updated_at <= ?", (retention_cutoff,))
+    }
+    live_ws: set[str] = set()
+    for row in store.rows("SELECT id, base_snapshot_id, head_snapshot_id, materialized_snapshot_id FROM workspaces"):
+        if row["id"] in retired_ws:
+            continue
+        live_ws.add(row["id"])
+        add(row["base_snapshot_id"], row["head_snapshot_id"], row["materialized_snapshot_id"])
+    for row in store.rows("SELECT workspace_id, input_snapshot_id, output_snapshot_id FROM operations"):
+        if row["workspace_id"] in live_ws:
+            add(row["input_snapshot_id"], row["output_snapshot_id"])
+    live_cs: set[str] = set()
+    for row in store.rows("SELECT id, status, base_snapshot_id, head_snapshot_id, lifecycle_json, created_at FROM changesets"):
+        retired_at = loads(row["lifecycle_json"], {}).get("updated_at") or row["created_at"]
+        if row["status"] in ("discarded", "superseded") and retired_at <= retention_cutoff:
+            continue
+        live_cs.add(row["id"])
+        add(row["base_snapshot_id"], row["head_snapshot_id"])
+    for row in store.rows("SELECT workspace_id, changeset_id, snapshot_before, snapshot_after FROM check_runs"):
+        if row["workspace_id"] in live_ws or row["changeset_id"] in live_cs:
+            add(row["snapshot_before"], row["snapshot_after"])
+    for row in store.rows("SELECT workspace_id, base_snapshot_id, head_snapshot_id, target_snapshot_id FROM workspace_conflicts"):
+        if row["workspace_id"] in live_ws:
+            add(row["base_snapshot_id"], row["head_snapshot_id"], row["target_snapshot_id"])
+    for row in store.rows("SELECT workspace_id, base_snapshot_id, snapshot_id FROM salvages"):
+        if row["workspace_id"] in live_ws:
+            add(row["base_snapshot_id"], row["snapshot_id"])
+    for row in store.rows("SELECT last_sync_snapshot_id, mounted_snapshot_id FROM materialization_leases WHERE status NOT IN ('reaped', 'gone')"):
+        add(row["last_sync_snapshot_id"], row["mounted_snapshot_id"])
+    return live
+
+
+def gc_compute(store: Store, *, retention_days: float, grace_seconds: float) -> dict[str, Any]:
+    retention_cutoff = iso_before(retention_days * 86400)
+    grace_cutoff = iso_before(grace_seconds)
+    live_snapshots = gc_live_snapshots(store, retention_cutoff=retention_cutoff, grace_cutoff=grace_cutoff)
+    roots: list[str] = []
+    for snapshot in live_snapshots:
+        row = store.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (snapshot,))
+        if row is not None:
+            roots.append(row["root_tree_id"])
+    live_trees, live_blobs = store.collect_references(roots)
+    blob_rows = [
+        row
+        for row in store.rows("SELECT id, hash, size, object_path, created_at, last_referenced_at FROM blobs WHERE purged_at IS NULL")
+        if row["id"] not in live_blobs and (row["last_referenced_at"] or row["created_at"]) <= grace_cutoff
+    ]
+    tree_rows = [
+        row
+        for row in store.rows("SELECT id, created_at, last_referenced_at FROM trees WHERE purged_at IS NULL")
+        if row["id"] not in live_trees and (row["last_referenced_at"] or row["created_at"]) <= grace_cutoff
+    ]
+    return {
+        "retention_cutoff": retention_cutoff,
+        "grace_cutoff": grace_cutoff,
+        "live_snapshots": len(live_snapshots),
+        "blob_rows": blob_rows,
+        "tree_rows": tree_rows,
+    }
+
+
+def blob_object_path(store: Store, row: sqlite3.Row) -> Path:
+    stored = row["object_path"]
+    if stored:
+        path = Path(stored)
+        return path if path.is_absolute() else store.blobs / stored
+    return store.blobs / row["hash"][:2] / row["hash"]
+
+
+def gc_plan_summary(store: Store, computed: dict[str, Any]) -> dict[str, Any]:
+    disk_bytes = 0
+    for row in computed["blob_rows"]:
+        try:
+            disk_bytes += blob_object_path(store, row).stat().st_size
+        except OSError:
+            pass
+    return {
+        "retention_cutoff": computed["retention_cutoff"],
+        "grace_cutoff": computed["grace_cutoff"],
+        "live_snapshots": computed["live_snapshots"],
+        "blobs": {"count": len(computed["blob_rows"]), "content_bytes": sum(row["size"] for row in computed["blob_rows"]), "disk_bytes": disk_bytes},
+        "trees": {"count": len(computed["tree_rows"])},
+    }
+
+
+def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _after_mark: Callable[[], None] | None = None) -> dict[str, Any]:
+    """Purge unreachable content. Runs in one write transaction so writers that
+    dedup against a candidate either finish first (and protect it) or wait and
+    then restore it."""
+    gc_lock = FileLock(store.home / "gc.lock")
+    if not gc_lock.acquire(exclusive=True, blocking=False):
+        gc_lock.close()
+        raise TriError("gc_in_progress", "Another garbage collection is running.", retryable=True)
+    try:
+        store.conn.commit()
+        # Mark without holding the write lock. Start on a fresh second so any
+        # object touched after the mark began has last_referenced_at >= mark_start.
+        start_second = utcnow()
+        while utcnow() == start_second:
+            time.sleep(0.05)
+        mark_start = utcnow()
+        computed = gc_compute(store, retention_days=retention_days, grace_seconds=grace_seconds)
+        if _after_mark is not None:
+            _after_mark()
+        store.conn.commit()
+        store.conn.execute("BEGIN IMMEDIATE")
+        try:
+            now = utcnow()
+            freed = 0
+            purged_blobs = 0
+            purged_trees = 0
+            for row in computed["blob_rows"]:
+                current = store.conn.execute("SELECT purged_at, created_at, last_referenced_at FROM blobs WHERE id = ?", (row["id"],)).fetchone()
+                if current is None or current["purged_at"] or (current["last_referenced_at"] or current["created_at"]) >= mark_start:
+                    continue
+                purged_blobs += 1
+                store.conn.execute("UPDATE blobs SET purged_at = ? WHERE id = ?", (now, row["id"]))
+                path = blob_object_path(store, row)
+                try:
+                    freed += path.stat().st_size
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                store._blob_cache.pop(row["id"], None)
+            for row in computed["tree_rows"]:
+                current = store.conn.execute("SELECT purged_at, created_at, last_referenced_at FROM trees WHERE id = ?", (row["id"],)).fetchone()
+                if current is None or current["purged_at"] or (current["last_referenced_at"] or current["created_at"]) >= mark_start:
+                    continue
+                purged_trees += 1
+                store.conn.execute("UPDATE trees SET purged_at = ?, entries_json = '' WHERE id = ?", (now, row["id"]))
+            store._tree_cache.clear()
+            store.create_event(
+                kind="store.gc",
+                actor=REAPER_ACTOR,
+                object_refs={"blobs": purged_blobs, "trees": purged_trees, "freed_bytes": freed, "retention_cutoff": computed["retention_cutoff"]},
+            )
+            store.conn.commit()
+        except BaseException:
+            store.conn.rollback()
+            raise
+        return {"blobs": purged_blobs, "trees": purged_trees, "freed_bytes": freed}
+    finally:
+        gc_lock.close()
+
+
+def active_lease_env_keys(store: Store) -> set[str]:
+    keys: set[str] = set()
+    for row in store.rows("SELECT env_keys_json FROM disk_leases WHERE status = 'active'"):
+        keys.update(loads(row["env_keys_json"], []))
+    for row in store.rows("SELECT env_keys_json FROM materialization_leases WHERE status NOT IN ('reaped', 'gone')"):
+        keys.update(loads(row["env_keys_json"], []) if row["env_keys_json"] else [])
+    return keys
+
+
+def active_overlay_lowers(store: Store) -> set[str]:
+    lowers: set[str] = set()
+    for row in store.rows("SELECT baseline_path FROM disk_leases WHERE status = 'active' AND backend = 'overlay'"):
+        try:
+            payload = json.loads(Path(row["baseline_path"]).read_text())
+            lowers.update(payload.get("overlay", {}).get("lowers", []))
+        except (OSError, ValueError, TypeError):
+            continue
+    return lowers
+
+
+def live_workspace_hashes(store: Store) -> set[str]:
+    hashes: set[str] = set()
+    snapshots = {row["snapshot_id"] for row in store.rows("SELECT snapshot_id FROM targets")}
+    for row in store.rows("SELECT base_snapshot_id, head_snapshot_id FROM workspaces WHERE status IN ('active', 'paused')"):
+        snapshots.update([row["base_snapshot_id"], row["head_snapshot_id"]])
+    for snapshot in snapshots:
+        try:
+            for entry in store.load_snapshot_tree(snapshot).values():
+                if entry.get("hash"):
+                    hashes.add(entry["hash"])
+        except TriError:
+            continue
+    return hashes
+
+
+def evict_caches(store: Store) -> dict[str, Any]:
+    """Keep derived caches (checkout cache, base dirs, env builds) within budgets,
+    never removing what a live lease depends on."""
+    report: dict[str, Any] = {"envs": [], "bases_removed": [], "checkout_cache_bytes_freed": 0}
+    # Environment builds: LRU beyond the byte budget.
+    env_budget = env_int("TRI_ENV_CACHE_MAX_BYTES", 10 * 1024**3)
+    grace = iso_before(env_int("TRI_ENV_EVICT_GRACE_SECONDS", 600))
+    protected = active_lease_env_keys(store)
+    ready = store.rows("SELECT * FROM env_builds WHERE status = 'ready' ORDER BY last_used_at, created_at")
+    total = sum(row["size_bytes"] or 0 for row in ready)
+    for row in ready:
+        if total <= env_budget:
+            break
+        if row["key"] in protected or row["last_used_at"] > grace:
+            continue
+        remove_tree(Path(row["path"]))
+        with store.conn:
+            store.conn.execute("UPDATE env_builds SET status = 'evicted' WHERE key = ?", (row["key"],))
+        total -= row["size_bytes"] or 0
+        report["envs"].append({"key": row["key"], "size_bytes": row["size_bytes"]})
+    # Base directories: keep the most recently used N.
+    bases_root = store.home / "bases"
+    if bases_root.exists():
+        keep = env_int("TRI_BASE_CACHE_MAX_COUNT", 8)
+        in_use = active_overlay_lowers(store)
+        stale_tmp = iso_before(3600)
+        candidates = []
+        for child in bases_root.iterdir():
+            if child.name.startswith("."):
+                modified = datetime.fromtimestamp(child.stat().st_mtime, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                if child.name.endswith(".tmp") and modified < stale_tmp:
+                    remove_tree(child)
+                continue
+            if str(child) in in_use:
+                continue
+            candidates.append(child)
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for child in candidates[keep:]:
+            remove_tree(child)
+            report["bases_removed"].append(child.name)
+    # Checkout cache: drop blobs no live workspace needs, then everything if still over.
+    cache = store.materializer.cache
+    budget = env_int("TRI_CHECKOUT_CACHE_MAX_BYTES", 2 * 1024**3)
+    size = cache.size_bytes()
+    if size > budget and cache.root.exists():
+        live = live_workspace_hashes(store)
+        freed = 0
+        files = [Path(dirpath) / name for dirpath, _, names in os.walk(cache.root) for name in names]
+        for keep_live in (True, False):
+            for path in files:
+                if not path.exists():
+                    continue
+                digest = path.name.removesuffix(".x")
+                if keep_live and digest in live:
+                    continue
+                try:
+                    freed += path.stat().st_size
+                    path.unlink()
+                except OSError:
+                    pass
+            if size - freed <= budget:
+                break
+        report["checkout_cache_bytes_freed"] = freed
+    return report
+
+
+def cmd_gc(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    retention = GC_RETENTION_DAYS if args.retention_days is None else args.retention_days
+    grace = GC_GRACE_SECONDS if args.grace_seconds is None else args.grace_seconds
+    if retention < 0 or grace < 0:
+        raise TriError("invalid_command", "Retention and grace must be non-negative.")
+    data: dict[str, Any] = {"applied": bool(args.apply), "reaped": None, "evicted": None, "purged": None}
+    if args.reap or args.apply:
+        data["reaped"] = reap_leases(store, actor=args.actor)
+        data["evicted"] = evict_caches(store)
+    data["plan"] = gc_plan_summary(store, gc_compute(store, retention_days=retention, grace_seconds=grace))
+    if args.apply:
+        data["purged"] = gc_apply(store, retention_days=retention, grace_seconds=grace)
+    return envelope("tri.gc", command, actor=args.actor, start=start, data=data)
 
 
 def cmd_workspace_update(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -6139,11 +7963,33 @@ def cmd_workspace_sync(store: Store, args: argparse.Namespace, command: list[str
     before = ws["head_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
     ignored_paths = loads(lease["ignored_paths_json"], [])
-    synced_entries = filter_ignored_entries(build_entries_from_dir(store, root, allow_symlinks=True), ignored_paths)
-    after_entries = {path: entry for path, entry in before_entries.items() if path_matches_hidden(path, ignored_paths)}
-    after_entries.update(synced_entries)
+    if root.is_symlink():
+        raise TriError("path_escaped_mount", "Materialized workspace path cannot be a symlink.", object=str(root))
+    baseline_file = Path(row_value(lease, "baseline_path") or "") if row_value(lease, "baseline_path") else None
+    materialization: Materialization | None = None
+    observed: dict[str, list[int]] = {}
+    scanned_deleted: list[str] = []
+    if baseline_file is not None and baseline_file.exists():
+        materialization = load_materialization(root, baseline_file)
+        rules = import_rules(store, ws["project_id"], before_entries)
+        scanned_changed, scanned_deleted = materialization.scan(before_entries, ignore=rules)
+        scanned_changed = [path for path in scanned_changed if not path_matches_hidden(path, ignored_paths)]
+        scanned_deleted = [path for path in scanned_deleted if not path_matches_hidden(path, ignored_paths)]
+        after_entries = entries_after_scan(store, root, before_entries, scanned_changed, scanned_deleted, observed)
+    else:
+        synced_entries = filter_ignored_entries(build_entries_from_dir(store, root, allow_symlinks=True), ignored_paths)
+        after_entries = {path: entry for path, entry in before_entries.items() if path_matches_hidden(path, ignored_paths)}
+        after_entries.update(synced_entries)
     paths = changed_paths(before_entries, after_entries)
+
+    def record_sync_baseline() -> None:
+        if materialization is not None and baseline_file is not None:
+            materialization.update_baseline(observed, scanned_deleted)
+            materialization.save_baseline(baseline_file)
+        renew_mount_lease(store, lease["id"])
+
     if not paths:
+        record_sync_baseline()
         return envelope("tri.workspace.sync", command, actor=args.actor, start=start, data={"workspace": ws["id"], "lease": lease["id"], "operation": None, "snapshot": before, "paths": []})
     with store.conn:
         snapshot = store.create_snapshot(ws["project_id"], after_entries, parents=[before], source="workspace", actor=args.actor, metadata={"workspace": ws["id"], "operation": "materialization_sync"})
@@ -6178,6 +8024,7 @@ def cmd_workspace_sync(store: Store, args: argparse.Namespace, command: list[str
             input_fingerprints={"snapshot": before, "lease": lease["last_sync_snapshot_id"]},
             output_fingerprints={"snapshot": snapshot["id"]},
         )
+    record_sync_baseline()
     return envelope("tri.workspace.sync", command, actor=args.actor, start=start, events=[evt], data={"workspace": ws["id"], "lease": lease["id"], "operation": op_id, "snapshot": snapshot["id"], "paths": paths})
 
 
@@ -7898,6 +9745,48 @@ def run_check_for_workspace(
     secret_lease_ids: list[str] | None = None,
     assumptions: list[str] | None = None,
     import_changes: bool = True,
+    use_env: bool = True,
+) -> dict[str, Any]:
+    check_id = new_id("check")
+    run_lease = RunLease(store, kind="run", key=check_id, workspace_id=ws["id"], before_snapshot=ws["head_snapshot_id"])
+    failed = True
+    try:
+        result = _run_check_for_workspace(
+            store,
+            ws,
+            cmd,
+            check_id=check_id,
+            run_lease=run_lease,
+            actor=actor,
+            command=command,
+            start=start,
+            rerun_of=rerun_of,
+            secret_lease_ids=secret_lease_ids,
+            assumptions=assumptions,
+            import_changes=import_changes,
+            use_env=use_env,
+        )
+        failed = False
+        return result
+    finally:
+        run_lease.finish(failed)
+
+
+def _run_check_for_workspace(
+    store: Store,
+    ws: sqlite3.Row,
+    cmd: list[str],
+    *,
+    check_id: str,
+    run_lease: RunLease,
+    actor: str,
+    command: list[str],
+    start: float,
+    rerun_of: str | None = None,
+    secret_lease_ids: list[str] | None = None,
+    assumptions: list[str] | None = None,
+    import_changes: bool = True,
+    use_env: bool = True,
 ) -> dict[str, Any]:
     if ws["status"] != "active":
         raise TriError("policy_denied", "Only active workspaces can run checks.", object=ws["id"])
@@ -7906,11 +9795,11 @@ def run_check_for_workspace(
         raise TriError("path_not_found", "No command supplied for tri run.")
     before = ws["head_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
+    env_plan = plan_environments(store, ws["project_id"], before_entries, actor=actor, workspace=ws, purpose="run") if use_env else EnvPlan()
     secret_leases, secret_env, redactions = active_secret_leases(store, ws["id"], secret_lease_ids or [], actor=actor)
     generated_configs = generated_config_records_for_run(store, ws["id"], actor=actor)
     task_run = latest_workspace_task_run(store, ws["id"])
     normalized_assumptions = normalize_assumptions(assumptions)
-    check_id = new_id("check")
     work = store.runs / check_id / "work"
     env = os.environ.copy()
     env.update(secret_env)
@@ -7949,13 +9838,29 @@ def run_check_for_workspace(
             policy_result=policy_decision,
         )
     events: list[str] = [policy_event, started_evt] if phase_evt is None else [phase_evt, policy_event, started_evt]
-    materialize_tree(store, before_entries, work)
-    materialize_generated_configs_for_run(store, work, generated_configs)
+    materialization = materialize_for_run(
+        store,
+        before_entries,
+        run_lease,
+        base_snapshot=ws["base_snapshot_id"],
+        attachments=env_plan.attachments,
+        allow_overlay=not env_plan.private,
+    )
+    env_plan.finalize(materialization)
+    run_lease.record_envs(env_plan)
+    run_lease.record_materialization(materialization)
+    env_plan.install_private(work, env)
+    materialize_generated_configs_for_run(store, materialization.writable_root, generated_configs)
     started = time.time()
-    proc = subprocess.run(cmd, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False, env=env)
+    run_cwd = run_lease.dir if isinstance(materialization, OverlayMaterialization) else work
+    proc = subprocess.run(materialization.wrap(cmd), cwd=run_cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False, env=env)
+    run_lease.command_finished = import_changes
     duration_ms = int((time.time() - started) * 1000)
     if import_changes:
-        after_entries = filter_generated_config_entries(before_entries, build_entries_from_dir(store, work, allow_symlinks=True), generated_configs)
+        rules = import_rules(store, ws["project_id"], before_entries)
+        scanned_changed, scanned_deleted = materialization.scan(before_entries, ignore=rules)
+        scanned_entries = entries_after_scan(store, materialization.content_root, before_entries, scanned_changed, scanned_deleted)
+        after_entries = filter_generated_config_entries(before_entries, scanned_entries, generated_configs)
         paths = changed_paths(before_entries, after_entries)
     else:
         after_entries = before_entries
@@ -8015,7 +9920,9 @@ def run_check_for_workspace(
         before_entries=before_entries,
         after_entries=after_entries,
         mode="ephemeral_workspace_check",
+        materialization=materialization,
     )
+    materialized_directory["environments"] = env_plan.records
     environment_policy = check_environment_policy(secret_leases, secret_env)
     environment_policy["generated_configs"] = generated_configs
     environment_policy["generated_config_paths"] = [config["path"] for config in generated_configs]
@@ -8080,7 +9987,6 @@ def run_check_for_workspace(
             policy_result=policy_decision,
         )
         events.append(evt)
-    shutil.rmtree(store.runs / check_id, ignore_errors=True)
     return envelope("tri.check.inspect", command, actor=actor, start=start, ok=stale_diagnostic is None, events=events, diagnostics=[stale_diagnostic] if stale_diagnostic else [], data=check_view(store, check_id, actor=actor))
 
 
@@ -8090,9 +9996,14 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
     lease_ids = list(args.with_lease or [])
     assumptions = list(args.assumption or [])
     import_changes = not args.no_import_changes
-    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes"):
+    use_env = not args.no_env
+    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env"):
         if cmd[0] == "--no-import-changes":
             import_changes = False
+            cmd = cmd[1:]
+            continue
+        if cmd[0] == "--no-env":
+            use_env = False
             cmd = cmd[1:]
             continue
         if len(cmd) < 2:
@@ -8114,6 +10025,7 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
         secret_lease_ids=lease_ids,
         assumptions=assumptions,
         import_changes=import_changes,
+        use_env=use_env,
     )
 
 
@@ -9173,14 +11085,35 @@ def run_check_for_changeset_head(
     rerun_of: str | None = None,
     assumptions: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
+    check_id = new_id("check")
+    run_lease = RunLease(store, kind="revalidation", key=check_id, workspace_id=cs["workspace_id"], before_snapshot=cs["head_snapshot_id"])
+    try:
+        return _run_check_for_changeset_head(store, cs, cmd, check_id=check_id, run_lease=run_lease, actor=actor, command=command, start=start, rerun_of=rerun_of, assumptions=assumptions)
+    finally:
+        run_lease.release()
+
+
+def _run_check_for_changeset_head(
+    store: Store,
+    cs: sqlite3.Row,
+    cmd: list[str],
+    *,
+    check_id: str,
+    run_lease: RunLease,
+    actor: str,
+    command: list[str],
+    start: float,
+    rerun_of: str | None = None,
+    assumptions: list[str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
     if not cmd:
         raise TriError("invalid_command", "Changeset revalidation command cannot be empty.", object=cs["id"])
     before = cs["head_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
     normalized_assumptions = normalize_assumptions(assumptions)
-    check_id = new_id("check")
     work = store.runs / check_id / "work"
-    materialize_tree(store, before_entries, work)
+    materialization = materialize_for_run(store, before_entries, run_lease, base_snapshot=cs["base_snapshot_id"])
+    run_lease.record_materialization(materialization)
     with store.conn:
         started_evt = store.create_event(
             kind="check.revalidation_started",
@@ -9191,9 +11124,12 @@ def run_check_for_changeset_head(
             input_fingerprints={"changeset_head": before},
         )
     started = time.time()
-    proc = subprocess.run(cmd, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False, env=os.environ.copy())
+    run_cwd = run_lease.dir if isinstance(materialization, OverlayMaterialization) else work
+    proc = subprocess.run(materialization.wrap(cmd), cwd=run_cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False, env=os.environ.copy())
     duration_ms = int((time.time() - started) * 1000)
-    after_entries = build_entries_from_dir(store, work, allow_symlinks=True)
+    rules = import_rules(store, cs["project_id"], before_entries)
+    scanned_changed, scanned_deleted = materialization.scan(before_entries, ignore=rules)
+    after_entries = entries_after_scan(store, materialization.content_root, before_entries, scanned_changed, scanned_deleted)
     paths = changed_paths(before_entries, after_entries)
     cost = local_check_cost(cmd, duration_ms, proc.stdout, proc.stderr)
     stdout_artifact = write_artifact(store, "stdout", f"{check_id}-stdout.txt", proc.stdout, labels=[])
@@ -9206,6 +11142,7 @@ def run_check_for_changeset_head(
         before_entries=before_entries,
         after_entries=after_entries,
         mode="ephemeral_changeset_revalidation",
+        materialization=materialization,
     )
     environment_policy = check_environment_policy([], {})
     with store.conn:
@@ -9254,7 +11191,6 @@ def run_check_for_changeset_head(
             input_fingerprints={"changeset_head": before},
             output_fingerprints={"changeset_head": before},
         )
-    shutil.rmtree(store.runs / check_id, ignore_errors=True)
     return check_data(store, check_id), [started_evt, evt]
 
 
@@ -11623,6 +13559,16 @@ def cmd_doctor(store: Store, args: argparse.Namespace, command: list[str], start
     warnings = []
     if shutil.which("git") is None:
         warnings.append({"code": "git_missing", "severity": "warning", "message": "Git is not available; import/export commands will fail.", "retryable": False})
+    materialization = materialization_status(store)
+    if materialization["store_volume"]["backend"] == "copy":
+        warnings.append(
+            {
+                "code": "materialization_degraded",
+                "severity": "warning",
+                "message": "This volume cannot share file blocks, so run and mount directories are full copies. Disk use is still bounded by live leases.",
+                "retryable": False,
+            }
+        )
     data = {
         "home": str(store.home),
         "db": str(store.db_path),
@@ -11630,8 +13576,72 @@ def cmd_doctor(store: Store, args: argparse.Namespace, command: list[str], start
         "counts": counts,
         "git_available": shutil.which("git") is not None,
         "command_count": len(COMMAND_CONTRACTS),
+        "materialization": materialization,
     }
     return envelope("tri.doctor", command, actor=args.actor, start=start, data=data, warnings=warnings)
+
+
+def directory_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for child in path.iterdir() if not child.name.startswith("."))
+
+
+def materialization_status(store: Store) -> dict[str, Any]:
+    store.checkout.mkdir(parents=True, exist_ok=True)
+    method = probe_clone(store.checkout)
+    override = os.environ.get("TRI_MATERIALIZE_BACKEND") or None
+    return {
+        "store_volume": {
+            "backend": "clone" if method else "copy",
+            "clone_method": method,
+            "dir_clone": bool(method) and clone_dir_supported(),
+            "overlay": probe_overlay(store.runs),
+        },
+        "backend_override": override,
+        "caches": {
+            "checkout_cache_bytes": store.materializer.cache.size_bytes(),
+            "base_dirs": directory_count(store.home / "bases"),
+        },
+        "leases": lease_status_summary(store),
+    }
+
+
+def cmd_ignore_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    project = store.get_project(args.project)
+    return envelope("tri.ignore.list", command, actor=args.actor, start=start, data={"project": project["id"], "patterns": project_ignore_patterns(store, project["id"])})
+
+
+def _require_ignore_maintainer(args: argparse.Namespace) -> None:
+    if "role:maintainer" not in actor_selectors(args.actor):
+        raise TriError("policy_denied", "Only maintainers can change project ignore patterns.", object=args.project, action="project.ignore", required_grant="role:maintainer")
+
+
+def cmd_ignore_add(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    _require_ignore_maintainer(args)
+    project = store.get_project(args.project)
+    patterns = sorted({pattern.strip() for pattern in args.patterns if pattern.strip()})
+    if not patterns:
+        raise TriError("invalid_command", "At least one non-empty ignore pattern is required.", object=args.project)
+    with store.conn:
+        for pattern in patterns:
+            store.conn.execute(
+                "INSERT OR IGNORE INTO project_ignores (project_id, pattern, created_by, created_at) VALUES (?, ?, ?, ?)",
+                (project["id"], pattern, args.actor, utcnow()),
+            )
+        evt = store.create_event(kind="project.ignore_added", actor=args.actor, project_id=project["id"], object_refs={"patterns": patterns})
+    return envelope("tri.ignore.list", command, actor=args.actor, start=start, events=[evt], data={"project": project["id"], "patterns": project_ignore_patterns(store, project["id"])})
+
+
+def cmd_ignore_remove(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    _require_ignore_maintainer(args)
+    project = store.get_project(args.project)
+    patterns = sorted({pattern.strip() for pattern in args.patterns if pattern.strip()})
+    with store.conn:
+        for pattern in patterns:
+            store.conn.execute("DELETE FROM project_ignores WHERE project_id = ? AND pattern = ?", (project["id"], pattern))
+        evt = store.create_event(kind="project.ignore_removed", actor=args.actor, project_id=project["id"], object_refs={"patterns": patterns})
+    return envelope("tri.ignore.list", command, actor=args.actor, start=start, events=[evt], data={"project": project["id"], "patterns": project_ignore_patterns(store, project["id"])})
 
 
 def cmd_objects_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -12439,11 +14449,14 @@ def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start:
     if not args.quiet:
         print_json(envelope("tri.api.server", command, actor=args.actor, start=start, data=data))
         sys.stdout.flush()
+    reaper_stop = start_reaper_thread() if os.environ.get("TRI_AUTO_REAP", "1") != "0" else None
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if reaper_stop is not None:
+            reaper_stop.set()
         server.server_close()
     return envelope("tri.api.server", command, actor=args.actor, start=start, data=data)
 
@@ -12468,6 +14481,50 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("gc")
+    p.add_argument("--reap", action="store_true")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--retention-days", type=float)
+    p.add_argument("--grace-seconds", type=float)
+    p.set_defaults(func=cmd_gc)
+
+    p = sub.add_parser("env")
+    env_sub = p.add_subparsers(dest="env_cmd", required=True)
+    p_env = env_sub.add_parser("define")
+    p_env.add_argument("project")
+    p_env.add_argument("name")
+    p_env.add_argument("--key-file", action="append")
+    p_env.add_argument("--key-command", action="append")
+    p_env.add_argument("--install", required=True)
+    p_env.add_argument("--output", action="append")
+    p_env.add_argument("--mode", default="auto")
+    p_env.set_defaults(func=cmd_env_define)
+    p_env = env_sub.add_parser("list")
+    p_env.add_argument("project")
+    p_env.set_defaults(func=cmd_env_list)
+    p_env = env_sub.add_parser("inspect")
+    p_env.add_argument("project")
+    p_env.add_argument("name")
+    p_env.set_defaults(func=cmd_env_inspect)
+    p_env = env_sub.add_parser("remove")
+    p_env.add_argument("project")
+    p_env.add_argument("name")
+    p_env.set_defaults(func=cmd_env_remove)
+
+    p = sub.add_parser("ignore")
+    ignore_sub = p.add_subparsers(dest="ignore_cmd", required=True)
+    p_ignore = ignore_sub.add_parser("add")
+    p_ignore.add_argument("project")
+    p_ignore.add_argument("patterns", nargs="+")
+    p_ignore.set_defaults(func=cmd_ignore_add)
+    p_ignore = ignore_sub.add_parser("remove")
+    p_ignore.add_argument("project")
+    p_ignore.add_argument("patterns", nargs="+")
+    p_ignore.set_defaults(func=cmd_ignore_remove)
+    p_ignore = ignore_sub.add_parser("list")
+    p_ignore.add_argument("project")
+    p_ignore.set_defaults(func=cmd_ignore_list)
 
     p = sub.add_parser("objects")
     objects_sub = p.add_subparsers(dest="objects_cmd", required=True)
@@ -12633,6 +14690,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_mount.add_argument("workspace")
     p_mount.add_argument("path")
     p_mount.add_argument("--ttl-seconds", type=int)
+    p_mount.add_argument("--no-ttl", action="store_true")
+    p_mount.add_argument("--no-env", action="store_true")
+    p_mount.add_argument("--env-link", action="store_true")
     p_mount.add_argument("--ignore-path", action="append")
     p_mount.set_defaults(func=cmd_workspace_mount)
     p_sync = workspace_sub.add_parser("sync")
@@ -12654,6 +14714,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect = leases_sub.add_parser("inspect")
     p_inspect.add_argument("lease")
     p_inspect.set_defaults(func=cmd_leases_inspect)
+    p_lease_list = leases_sub.add_parser("list")
+    p_lease_list.add_argument("--workspace")
+    p_lease_list.add_argument("--status")
+    p_lease_list.set_defaults(func=cmd_leases_list)
+    p_lease_renew = leases_sub.add_parser("renew")
+    p_lease_renew.add_argument("lease")
+    p_lease_renew.add_argument("--ttl-seconds", type=int)
+    p_lease_renew.set_defaults(func=cmd_leases_renew)
+    p_lease_reap = leases_sub.add_parser("reap")
+    p_lease_reap.add_argument("lease", nargs="?")
+    p_lease_reap.add_argument("--force", action="store_true")
+    p_lease_reap.set_defaults(func=cmd_leases_reap)
+
+    p = sub.add_parser("salvage")
+    salvage_sub = p.add_subparsers(dest="salvage_cmd", required=True)
+    p_salvage = salvage_sub.add_parser("list")
+    p_salvage.add_argument("workspace")
+    p_salvage.set_defaults(func=cmd_salvage_list)
+    p_salvage = salvage_sub.add_parser("adopt")
+    p_salvage.add_argument("salvage")
+    p_salvage.add_argument("--expect-head")
+    p_salvage.set_defaults(func=cmd_salvage_adopt)
 
     p_pause = workspace_sub.add_parser("pause")
     p_pause.add_argument("workspace")
@@ -12754,6 +14836,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--with-lease", action="append")
     p.add_argument("--assumption", action="append")
     p.add_argument("--no-import-changes", action="store_true")
+    p.add_argument("--no-env", action="store_true")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
 
@@ -13177,6 +15260,10 @@ def execute_argv(
         )
     finally:
         if store is None:
+            try:
+                maybe_auto_reap(active_store)
+            except Exception:
+                pass
             active_store.close()
 
 
