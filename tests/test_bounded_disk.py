@@ -1376,6 +1376,36 @@ class ServeAndDoctorTests(TriHarness):
         self.assertIn("materialization_degraded", SCHEMA_CATALOG["tri.diagnostic"]["codes"])
 
 
+class StoreOpenConcurrencyTests(unittest.TestCase):
+    def test_opening_a_packed_store_never_waits_for_long_lived_stores(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, TRI_HOME=home, TRI_AUTO_REAP="0")
+            open_close = "from tri.cli import Store; Store().close()"
+            subprocess.run([sys.executable, "-c", open_close], cwd=ROOT, env=env, check=True)
+            self.assertTrue((Path(home) / "tri.sqlite3.tri").exists(), "fixture: database starts packed")
+            # The holder unpacks slowly (patched here, in the test's subprocess), so the
+            # openers below always arrive while the database is still packed; it then
+            # stays open for a long time, like a long `tri run`.
+            holder_code = (
+                "import time; from tri.cli import Store\n"
+                "original = Store.unpack_db\n"
+                "def slow(self):\n    time.sleep(1.0)\n    original(self)\n"
+                "Store.unpack_db = slow\n"
+                "s = Store(); time.sleep(6); s.close()\n"
+            )
+            holder = subprocess.Popen([sys.executable, "-c", holder_code], cwd=ROOT, env=env)
+            time.sleep(0.5)
+            openers = [subprocess.Popen([sys.executable, "-c", open_close], cwd=ROOT, env=env) for _ in range(4)]
+            started = time.time()
+            for opener in openers:
+                opener.wait(timeout=30)
+            elapsed = time.time() - started
+            holder.wait(timeout=30)
+            self.assertLess(elapsed, 3.5, "an opener waited for another store's whole lifetime")
+
+
 class CoarseTimestampTests(unittest.TestCase):
     def test_update_baseline_skips_racily_clean_entries(self) -> None:
         from tri.materialize import Materialization
