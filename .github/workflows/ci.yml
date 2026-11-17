@@ -62,10 +62,12 @@ jobs:
           git config --global user.name "Tri CI"
       - name: Probe overlay support
         run: python -c "from pathlib import Path; import tempfile; from tri.overlay import probe_overlay; print(probe_overlay(Path(tempfile.mkdtemp())))"
-      - name: Bounded-disk tests on the overlay backend
+      - name: Full suite with automatic backend selection (overlay wherever runs are ephemeral)
+        run: python -m unittest discover -s tests -v
+      - name: Overlay-specific tests with the backend forced
         env:
           TRI_MATERIALIZE_BACKEND: overlay
-        run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
+        run: python -m unittest discover -s tests -p "test_bounded_disk.py" -k Overlay -v
 
   linux-reflink:
     name: linux reflink clones (${{ matrix.fs }})
