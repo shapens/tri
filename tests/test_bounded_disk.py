@@ -252,6 +252,18 @@ class MaterializerTests(unittest.TestCase):
         mat.release()
         self.assertFalse(dest.exists())
 
+    def test_remove_tree_handles_unreadable_directories(self) -> None:
+        from tri.materialize import remove_tree
+
+        root = self.root / "ovl"
+        locked = root / "work" / "work"
+        locked.mkdir(parents=True)
+        (locked / "f").write_text("x")
+        locked.chmod(0o000)
+        (root / "work").chmod(0o000)
+        remove_tree(root)
+        self.assertFalse(root.exists())
+
     def test_symlink_escape_rejected(self) -> None:
         from tri.materialize import MaterializeError
 
@@ -315,7 +327,7 @@ class TriHarness(unittest.TestCase):
         os.environ.pop("TRI_MATERIALIZE_BACKEND", None)
         os.environ["TRI_AUTO_REAP"] = "0"
         run = lambda *a: subprocess.run(a, cwd=self.repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        run("git", "init")
+        run("git", "init", "-b", "main")
         run("git", "config", "user.email", "tri@example.com")
         run("git", "config", "user.name", "Tri Test")
         for path, text in self.files.items():
