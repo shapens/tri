@@ -44,6 +44,26 @@ class FanoutBenchmarkTests(unittest.TestCase):
             self.assertEqual(by_target["tri-copy"]["backends"], ["copy"])
             self.assertEqual(results["parameters"]["parallel"], 3)
 
+    def test_fanout_real_repo_mode(self) -> None:
+        from benchmarks.fanout import main, make_fixture
+
+        with tempfile.TemporaryDirectory(prefix="tri-fanout-test-") as tmp:
+            repo = Path(tmp) / "project"
+            make_fixture(repo, source_files=10, file_size=64, dep_files=20, dep_file_size=64)
+            out = Path(tmp) / "out"
+            main([
+                "--repo", str(repo), "--attempts", "2", "--volume", "none", "--targets", "tri,git",
+                "--install", f"{sys.executable} tools/install.py", "--check", f"{sys.executable} tools/check.py",
+                "--key-file", "deps.lock", "--env-output", "node_modules", "--edit-file", "src/attempt.txt",
+                "--output", str(out),
+            ])
+            results = json.loads((out / "results.json").read_text())
+            for item in results["results"]:
+                self.assertEqual(item["status"], "ok", item)
+                self.assertEqual(item["checks_passed"], 2)
+                self.assertEqual(len(item["attempt_seconds"]), 2)
+            self.assertEqual(results["parameters"]["repo"], str(repo))
+
 
 if __name__ == "__main__":
     unittest.main()
