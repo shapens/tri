@@ -1,0 +1,54 @@
+{
+  "schema": "tri.benchmark.fanout.v1",
+  "created_at": "2026-11-17T05:14:30Z",
+  "platform": "Darwin 25.3.0 arm64",
+  "parameters": {
+    "attempts": 10,
+    "source_files": 2000,
+    "file_size": 1024,
+    "dep_files": 5000,
+    "dep_file_size": 2048,
+    "volume": "auto"
+  },
+  "results": [
+    {
+      "target": "tri",
+      "status": "ok",
+      "measure": "volume-used",
+      "wall_s": 64.056,
+      "end_allocated_bytes": 63500288,
+      "peak_allocated_bytes": 66785280,
+      "per_attempt_bytes": 6350028,
+      "backends": [
+        "clone"
+      ],
+      "checks_passed": 10
+    },
+    {
+      "target": "tri-mount",
+      "status": "ok",
+      "measure": "volume-used",
+      "wall_s": 43.854,
+      "end_allocated_bytes": 87212032,
+      "peak_allocated_bytes": 90480640,
+      "per_attempt_bytes": 8721203,
+      "backends": [
+        "clone"
+      ],
+      "checks_passed": 10
+    },
+    {
+      "target": "git",
+      "status": "ok",
+      "measure": "volume-used",
+      "wall_s": 25.524,
+      "end_allocated_bytes": 341303296,
+      "peak_allocated_bytes": 341860352,
+      "per_attempt_bytes": 34130329,
+      "backends": [
+        "worktree"
+      ],
+      "checks_passed": 10
+    }
+  ]
+}
