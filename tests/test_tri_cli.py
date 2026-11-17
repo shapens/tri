@@ -2340,6 +2340,7 @@ class TriCliTests(unittest.TestCase):
         imported = self.import_project()
         workspace = self.tri("workspace", "create", "app", "--from", imported["data"]["target"]["name"])["data"]["id"]
         before = self.tri("workspace", "inspect", workspace)["data"]["head_snapshot"]
+        release = self.root / "release-run"
         proc = subprocess.Popen(
             [
                 "python3",
@@ -2350,7 +2351,8 @@ class TriCliTests(unittest.TestCase):
                 "--",
                 "python3",
                 "-c",
-                "import time; from pathlib import Path; time.sleep(0.5); Path('src/app.txt').write_text('run edit\\n')",
+                # Wait for the test to finish its concurrent write instead of racing a fixed sleep.
+                f"import time; from pathlib import Path; deadline = time.time() + 30\nwhile not Path({str(release)!r}).exists() and time.time() < deadline: time.sleep(0.02)\nPath('src/app.txt').write_text('run edit\\n')",
             ],
             cwd=ROOT,
             env=self.env,
@@ -2373,7 +2375,8 @@ class TriCliTests(unittest.TestCase):
             self.fail(f"tri run did not create check.started\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
 
         concurrent = self.tri("files", "write", workspace, "README.md", "--text", "concurrent\n")
-        stdout, stderr = proc.communicate(timeout=10)
+        release.write_text("go")
+        stdout, stderr = proc.communicate(timeout=30)
         self.assertNotEqual(proc.returncode, 0, stdout)
         result = json.loads(stdout)
         self.assertFalse(result["ok"])
