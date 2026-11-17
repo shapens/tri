@@ -38,7 +38,9 @@ from tri.materialize import (
     MaterializeError,
     Materializer,
     clone_dir_supported,
+    clone_file,
     load_materialization,
+    make_tree_writable,
     probe_clone,
     remove_tree,
     stat_key,
@@ -2805,6 +2807,37 @@ def load_any_materialization(path: Path, baseline_file: Path) -> Materialization
     return load_materialization(path, baseline_file)
 
 
+def writable_env_layer(env_root: Path) -> Path:
+    """A writable-mode twin of a frozen env, built once per env, for use as an
+    overlay lower layer: commands run as the caller there, so read-only modes
+    would block the copy-up of any file they write. Uses clones where the volume
+    supports them."""
+    env_root = Path(env_root)
+    twin = env_root.with_name(env_root.name + ".layer")
+    if twin.is_dir():
+        return twin
+    staging = env_root.with_name(f".{env_root.name}.layer.{uuid.uuid4().hex}.tmp")
+    method = probe_clone(env_root.parent)
+
+    def copy_one(src: str, dst: str) -> None:
+        if method is not None:
+            try:
+                clone_file(Path(src), Path(dst), method)
+                shutil.copystat(src, dst)
+                return
+            except OSError:
+                pass
+        shutil.copy2(src, dst)
+
+    shutil.copytree(env_root, staging, symlinks=True, copy_function=copy_one)
+    make_tree_writable(staging)
+    try:
+        os.rename(staging, twin)
+    except OSError:
+        remove_tree(staging)
+    return twin
+
+
 def materialize_for_run(
     store: Store,
     entries: dict[str, dict[str, Any]],
@@ -2827,6 +2860,12 @@ def materialize_for_run(
             base = (base_row["root_tree_id"], store.load_tree(base_row["root_tree_id"])) if base_row else None
             if base is None:
                 base = (f"head_{entries_fingerprint(entries)[7:23]}", entries)
+            layer_attachments = []
+            for attachment in attachments:
+                env_root = Path(attachment.source)
+                for _ in attachment.rel.split("/"):
+                    env_root = env_root.parent
+                layer_attachments.append(Attachment(attachment.rel, writable_env_layer(env_root) / attachment.rel, attachment.mode))
             try:
                 return prepare_overlay_run(
                     run_root=run_lease.dir,
@@ -2835,7 +2874,7 @@ def materialize_for_run(
                     read_blob=store.read_blob,
                     entries=entries,
                     base=base,
-                    attachments=attachments,
+                    attachments=layer_attachments,
                     info=info,
                 )
             except MaterializeError as exc:
@@ -7790,6 +7829,7 @@ def evict_caches(store: Store, *, clear: bool = False) -> dict[str, Any]:
         if not claim_env_for_eviction(store, row):
             continue
         remove_tree(Path(row["path"]))
+        remove_tree(Path(row["path"] + ".layer"))
         with store.conn:
             store.conn.execute("UPDATE env_builds SET status = 'evicted' WHERE key = ?", (row["key"],))
         total -= row["size_bytes"] or 0

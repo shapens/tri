@@ -783,6 +783,19 @@ class EnvCacheTests(TriHarness):
         statuses = sorted(result["data"]["materialized_directory"]["environments"][0]["status"] for result in results)
         self.assertEqual(statuses, ["built", "reused"])
 
+    def test_overlay_env_layer_is_a_writable_copy(self) -> None:
+        from tri.cli import writable_env_layer
+
+        self.define()
+        self.run_cmd(self.workspace(), "true")
+        build = self.tri("env", "inspect", "app", "deps")["data"]["builds"][0]
+        frozen = Path(build["path"]) / "deps" / "pkg" / "lib.txt"
+        layer = writable_env_layer(Path(build["path"]))
+        self.assertNotEqual(layer, Path(build["path"]))
+        self.assertTrue((layer / "deps" / "pkg" / "lib.txt").stat().st_mode & 0o200, "overlay layers must be writable by the caller")
+        self.assertFalse(frozen.stat().st_mode & 0o222, "the shared env stays frozen for symlinked use")
+        self.assertEqual(writable_env_layer(Path(build["path"])), layer, "built once per env")
+
     def test_env_attached_to_mount(self) -> None:
         from tri.materialize import probe_clone
 
@@ -1246,7 +1259,14 @@ class CleanupGapTests(TriHarness):
         import hashlib
 
         digest = hashlib.sha256(text.encode()).hexdigest()
-        cached = self.home() / "checkout" / digest[:2] / digest
+        from tri.cli import Store
+
+        store = Store()
+        try:  # make sure the cache holds it whatever backend this host uses
+            blob_id = store.row("SELECT id FROM blobs WHERE hash = ?", (digest,))["id"]
+            cached = store.materializer.cache.path_for(digest, blob_id, False)
+        finally:
+            store.close()
         self.assertTrue(cached.exists())
         self.tri("workspace", "discard", ws)
         self.tri("gc", "--apply", "--retention-days", "0", "--grace-seconds", "0", "--unsafe-no-grace")

@@ -210,6 +210,10 @@ def probe_clone(directory: Path) -> str | None:
 # Helpers
 
 
+def make_tree_writable(root: Path) -> None:
+    _force_writable(root)
+
+
 def _force_writable(root: Path) -> None:
     if not root.exists() or root.is_symlink():
         return
