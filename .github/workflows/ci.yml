@@ -28,11 +28,8 @@ jobs:
           python -m tri doctor | python -c "import json,sys; d=json.load(sys.stdin)['data']['materialization']; print(json.dumps(d['store_volume'], indent=2))"
 
   windows:
-    # The Windows port (store lock, ReFS clone, symlink fallbacks) has not been
-    # verified yet; keep the job informational until it is green.
-    name: test (windows-latest, informational)
+    name: test (windows-latest)
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -98,4 +95,39 @@ jobs:
       - name: Probe clone support
         run: python -c "from pathlib import Path; from tri.materialize import probe_clone; m = probe_clone(Path('/mnt/vol')); print(m); assert m == 'ficlone', m"
       - name: Bounded-disk tests on reflink clones
+        run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
+
+  windows-refs:
+    name: windows ReFS block clones
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Format a ReFS virtual disk for temp directories
+        shell: pwsh
+        run: |
+          $vhd = Join-Path $env:RUNNER_TEMP "refs.vhdx"
+          $script = Join-Path $env:RUNNER_TEMP "diskpart.txt"
+          @(
+            "create vdisk file=$vhd maximum=8192 type=expandable",
+            "attach vdisk",
+            "create partition primary",
+            "format fs=refs quick label=TriRefs",
+            "assign letter=R"
+          ) | Out-File -Encoding ascii $script
+          diskpart /s $script
+          New-Item -ItemType Directory -Force R:\tmp | Out-Null
+          Get-Volume -DriveLetter R | Format-List FileSystem, Size
+          "TMP=R:\tmp" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "TEMP=R:\tmp" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Probe clone support
+        run: python -c "from pathlib import Path; from tri.materialize import probe_clone; m = probe_clone(Path(r'R:\tmp')); print(m); assert m == 'refs', m"
+      - name: Bounded-disk tests on ReFS block clones
+        shell: bash
         run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
