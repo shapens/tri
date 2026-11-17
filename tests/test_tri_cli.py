@@ -23,6 +23,11 @@ if str(ROOT) not in sys.path:
 from tri.cli import SCHEMA_CATALOG, SCHEMA_VERSION, Store, TriError, cmd_conflicts_resolve, cmd_workspace_snapshot, cmd_workspace_update, utcnow
 
 
+def lf(text: str) -> str:
+    """Programs print \r\n on Windows; compare text by content, not line endings."""
+    return text.replace("\r\n", "\n")
+
+
 class TriCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="tri-test-")
@@ -1037,7 +1042,7 @@ class TriCliTests(unittest.TestCase):
             self.assertTrue(artifact_view["data"]["fingerprint"].startswith("sha256:"))
             self.assertEqual(artifact_view["data"]["storage"]["content_route"], f"/v0/artifacts/{stdout_artifact}/content")
             artifact_content = self.api_get(port, f"/v0/artifacts/{stdout_artifact}/content", actor="agent:api")
-            self.assertEqual(artifact_content["data"]["text"], "api ok\n")
+            self.assertEqual(lf(artifact_content["data"]["text"]), "api ok\n")
             self.assertIsNone(artifact_content["data"]["path"])
             self.assertEqual(artifact_content["data"]["fingerprint"], artifact_view["data"]["fingerprint"])
             workspace_events = self.api_get(port, f"/v0/workspaces/{workspace}/events?limit=5", actor="agent:api")
@@ -1482,7 +1487,7 @@ class TriCliTests(unittest.TestCase):
         self.assertTrue(refreshed_summary["data"]["check_summary"]["required_satisfied"])
 
         streamed = self.tri("checks", "stream", new_check["id"], "--log", "stdout")["data"]
-        self.assertEqual(streamed["text"], "ok\n")
+        self.assertEqual(lf(streamed["text"]), "ok\n")
         self.tri("review", "approve", review)
         self.assertTrue(self.tri("policy", "evaluate", "export", changeset["id"])["data"]["allowed"])
 
@@ -2074,7 +2079,7 @@ class TriCliTests(unittest.TestCase):
         self.assertNotIn(workspace, public_check_event["refs"].get("workspaces", []))
 
         streamed = self.tri("--actor", "agent:b", "checks", "stream", check["id"], "--log", "stdout")
-        self.assertEqual(streamed["data"]["text"], "review-evidence\n")
+        self.assertEqual(lf(streamed["data"]["text"]), "review-evidence\n")
         artifacts = self.tri("--actor", "agent:b", "checks", "artifacts", check["id"])
         self.assertEqual({item["id"] for item in artifacts["data"]["artifacts"]}, set(check["artifacts"]))
         stdout_artifact = self.tri("--actor", "agent:b", "artifacts", "read", check["logs"]["stdout"])
@@ -2881,7 +2886,7 @@ class TriCliTests(unittest.TestCase):
 
         artifact = self.tri("artifacts", "read", stdout_artifact)
         self.assert_schema_required_keys("tri.artifacts.read", artifact["data"])
-        self.assertEqual(artifact["data"]["text"], "agent-log\n")
+        self.assertEqual(lf(artifact["data"]["text"]), "agent-log\n")
         self.assertIsNone(artifact["data"]["path"])
         self.assertTrue(artifact["data"]["fingerprint"].startswith("sha256:"))
         self.assertEqual(artifact["data"]["storage"]["content_command"], ["artifacts", "read", stdout_artifact])
@@ -3153,7 +3158,7 @@ class TriCliTests(unittest.TestCase):
         self.assertEqual(sync["data"]["lease"], lease)
 
         read = self.tri("files", "read", workspace, "src/app.txt")
-        self.assertEqual(read["data"]["text"], "mounted edit\n")
+        self.assertEqual(lf(read["data"]["text"]), "mounted edit\n")
         files = {item["path"] for item in self.tri("files", "list", workspace)["data"]["files"]}
         self.assertNotIn("tmp/ignored.txt", files)
 
@@ -3183,7 +3188,7 @@ class TriCliTests(unittest.TestCase):
         sync_a = self.tri("--actor", "agent:a", "workspace", "sync", workspace)
         self.assertEqual(sync_a["data"]["lease"], lease_a)
         self.assertEqual(sync_a["data"]["paths"], ["src/app.txt"])
-        self.assertEqual(self.tri("--actor", "agent:a", "files", "read", workspace, "src/app.txt")["data"]["text"], "agent a mount edit\n")
+        self.assertEqual(lf(self.tri("--actor", "agent:a", "files", "read", workspace, "src/app.txt")["data"]["text"]), "agent a mount edit\n")
 
         ambiguous = self.tri("workspace", "sync", workspace, ok=False)
         self.assertEqual(ambiguous["diagnostics"][0]["code"], "stale_materialization")
@@ -3928,7 +3933,7 @@ class TriCliTests(unittest.TestCase):
         self.assertFalse(first_chunk["eof"])
 
         second_chunk = self.tri("checks", "stream", check_id, "--log", "stdout", "--offset", str(first_chunk["next_offset"]), "--limit", "1024")["data"]
-        self.assertEqual(second_chunk["text"], "able\n")
+        self.assertEqual(lf(second_chunk["text"]), "able\n")
         self.assertTrue(second_chunk["eof"])
 
         stderr_chunk = self.tri("checks", "stream", check_id, "--log", "stderr")["data"]

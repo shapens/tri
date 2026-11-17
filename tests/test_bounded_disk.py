@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
 
 from tri.locking import FileLock
 
+POSIX = os.name != "nt"
+
 
 class FileLockTests(unittest.TestCase):
     def test_file_lock_shared_then_exclusive_nonblocking(self) -> None:
@@ -136,13 +138,16 @@ class MaterializerTests(unittest.TestCase):
 
         for path, entry in entries.items():
             target = root / path
+            if entry["mode"] == "120000" and not POSIX and not target.is_symlink():
+                continue  # Windows without symlink privilege leaves symlinks unmaterialized
             if entry["mode"] == "120000":
                 self.assertTrue(target.is_symlink(), path)
                 self.assertEqual(os.readlink(target), entry["symlink_target"])
                 continue
             self.assertEqual(target.read_bytes(), self.blobs.read(entry["blob"]), path)
             st = target.stat()
-            self.assertEqual(bool(st.st_mode & 0o100), entry["mode"] == "100755", path)
+            if POSIX:
+                self.assertEqual(bool(st.st_mode & 0o100), entry["mode"] == "100755", path)
             self.assertTrue(st.st_mode & 0o200, f"{path} must be writable")
             self.assertEqual(int(st.st_mtime), FIXED_MTIME, path)
 
@@ -185,7 +190,7 @@ class MaterializerTests(unittest.TestCase):
         (dest / "src/new.txt").write_text("new\n")
         (dest / "src/app/main.py").chmod(0o755)
         changed, deleted = mat.scan(self.entries)
-        self.assertEqual(changed, ["src/app/main.py", "src/new.txt"])
+        self.assertEqual(changed, ["src/app/main.py", "src/new.txt"] if POSIX else ["src/new.txt"])
         self.assertEqual(deleted, ["README.md"])
 
     def test_scan_unchanged_tree_reports_nothing(self) -> None:
@@ -223,6 +228,7 @@ class MaterializerTests(unittest.TestCase):
         self.assertEqual(mat.scan(self.entries), ([], []))
         self.assertEqual(env.joinpath("pkg/index.js").read_text(), "module.exports = 1\n", "attachment source must not change")
 
+    @unittest.skipUnless(POSIX, "symlinks need Developer Mode on Windows (copy fallback is tested separately)")
     def test_link_attachment_points_at_shared_source(self) -> None:
         from tri.materialize import Attachment
 
@@ -487,6 +493,7 @@ class LeaseLifecycleTests(TriHarness):
         self.assertEqual(runs[0]["status"], "released")
         self.assertFalse(Path(runs[0]["path"]).exists())
 
+    @unittest.skipUnless(POSIX, "uses kill -9 to crash the run")
     def test_orphaned_run_dir_is_salvaged_and_removed(self) -> None:
         import subprocess
 
@@ -1059,6 +1066,7 @@ class ReviewFixTests(TriHarness):
             store.close()
 
     # C2 -----------------------------------------------------------------
+    @unittest.skipUnless(POSIX, "uses ln -s to make an escaping symlink")
     def test_failed_import_keeps_run_dir_for_salvage(self) -> None:
         ws = self.workspace()
         failed = self.tri("run", ws, "--", "sh", "-c", "echo work > a.txt && ln -s /usr/bin/true esc", ok=False)
@@ -1154,6 +1162,7 @@ class ReviewFixTests(TriHarness):
             store.close()
 
     # I4 -----------------------------------------------------------------
+    @unittest.skipUnless(POSIX, "Windows st_ctime is creation time, so cp -p rewrites are not detectable there")
     def test_same_size_copy_preserving_mtime_is_imported(self) -> None:
         ws = self.workspace()
         check = self.run_cmd(ws, "cp -p config.example.json config.json")

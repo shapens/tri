@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+@unittest.skipIf(os.name == "nt", "the fan-out benchmark drives POSIX tools (sh, printf)")
 class FanoutBenchmarkTests(unittest.TestCase):
     def test_fanout_scenario_small_runs(self) -> None:
         from benchmarks.fanout import main

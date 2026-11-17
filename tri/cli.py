@@ -6512,8 +6512,10 @@ class RunLease:
         # sees the lock drop can never mistake a cleanup in progress for a crash.
         with self.store.conn:
             self.store.conn.execute("UPDATE disk_leases SET status = 'released', released_at = ? WHERE id = ? AND status = 'active'", (utcnow(), self.id))
-        remove_tree(self.dir)
+        # The reaper only claims 'active' leases, so the lock can drop now; it must
+        # close before removal because Windows cannot delete an open file.
         self.holder.close()
+        remove_tree(self.dir)
 
     def abandon(self) -> None:
         """Keep the directory for the reaper to salvage (the command ran but its
@@ -7253,7 +7255,9 @@ _ENV_KEY_COMMAND_CACHE: dict[str, str] = {}
 
 
 def split_command(command_text: str) -> list[str]:
-    return shlex.split(command_text, posix=os.name != "nt")
+    """Recipe commands use POSIX shell-style quoting on every platform and run
+    without a shell (use ``sh -c``/``cmd /c`` for shell features)."""
+    return shlex.split(command_text, posix=True)
 
 
 def env_platform_tag() -> str:
@@ -13207,7 +13211,7 @@ def cmd_export_patch(store: Store, args: argparse.Namespace, command: list[str],
         if args.output:
             out = Path(args.output)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(patch)
+            out.write_text(patch, newline="\n")
             artifact_id = write_artifact(store, "git_patch", f"{export_id}.patch", patch.encode(), labels=[])
             data: dict[str, Any] = {"export": export_id, "changeset": cs["id"], "output": str(out), "artifact": artifact_id}
         else:
@@ -13263,7 +13267,7 @@ def cmd_export_commit(store: Store, args: argparse.Namespace, command: list[str]
             patch = patch_for_snapshots(store, cs["base_snapshot_id"], cs["head_snapshot_id"], effective_hidden_patterns(store, cs["project_id"], loads(cs["hidden_paths_json"], []), actor=args.actor))
             artifact_id = write_artifact(store, "git_patch", f"{export_id}.patch", patch.encode(), labels=[])
             patch_path = store.artifacts / f"{export_id}-apply.patch"
-            patch_path.write_text(patch)
+            patch_path.write_text(patch, newline="\n")
             run_git(repo, ["apply", "--check", str(patch_path)], text=True)
             run_git(repo, ["apply", str(patch_path)], text=True)
             run_git(repo, ["add", "-A"], text=True)
@@ -13351,7 +13355,7 @@ def cmd_export_github_pr(store: Store, args: argparse.Namespace, command: list[s
                 patch = patch_for_snapshots(store, cs["base_snapshot_id"], cs["head_snapshot_id"], effective_hidden_patterns(store, cs["project_id"], loads(cs["hidden_paths_json"], []), actor=args.actor))
                 patch_artifact = write_artifact(store, "git_patch", f"{export_id}.patch", patch.encode(), labels=[])
                 patch_path = store.artifacts / f"{export_id}-apply.patch"
-                patch_path.write_text(patch)
+                patch_path.write_text(patch, newline="\n")
                 run_git(repo, ["apply", "--check", str(patch_path)], text=True)
                 run_git(repo, ["apply", str(patch_path)], text=True)
                 run_git(repo, ["add", "-A"], text=True)
