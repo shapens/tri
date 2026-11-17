@@ -783,6 +783,15 @@ class EnvCacheTests(TriHarness):
         statuses = sorted(result["data"]["materialized_directory"]["environments"][0]["status"] for result in results)
         self.assertEqual(statuses, ["built", "reused"])
 
+    def test_copy_backend_runs_can_write_into_env_outputs(self) -> None:
+        self.define()
+        os.environ["TRI_MATERIALIZE_BACKEND"] = "copy"
+        check = self.run_cmd(self.workspace(), "echo mutated > deps/pkg/lib.txt && echo y > app.out")
+        self.assertEqual(check["status"], "passed", "tools write into dependency/build dirs (cargo target/, node_modules/.cache)")
+        self.assertEqual(self.changed(check), ["app.out"])
+        build = self.tri("env", "inspect", "app", "deps")["data"]["builds"][0]
+        self.assertEqual((Path(build["path"]) / "deps" / "pkg" / "lib.txt").read_text(), "v1\n")
+
     def test_overlay_env_layer_is_a_writable_copy(self) -> None:
         from tri.cli import writable_env_layer
 
@@ -1343,6 +1352,28 @@ class ClearCachesTests(TriHarness):
         self.tri("gc", "--clear-caches")
         shutil.rmtree(home)  # a cleared store deletes with plain tools (no read-only leftovers)
         self.assertFalse(home.exists())
+
+
+class ServeAndDoctorTests(TriHarness):
+    def test_server_bind_skips_reverse_dns(self) -> None:
+        import socket
+        from tri.cli import TriAPIHandler, TriHTTPServer
+
+        original = socket.getfqdn
+        socket.getfqdn = lambda *a, **k: (_ for _ in ()).throw(AssertionError("reverse DNS lookup during bind"))
+        try:
+            server = TriHTTPServer(("127.0.0.1", 0), TriAPIHandler)
+            server.server_close()
+        finally:
+            socket.getfqdn = original
+
+    def test_doctor_degraded_warning_is_advertised(self) -> None:
+        from tri.cli import SCHEMA_CATALOG
+
+        os.environ["TRI_MATERIALIZE_BACKEND"] = "copy"
+        warnings = self.tri("doctor")["warnings"]
+        self.assertIn("materialization_degraded", [w["code"] for w in warnings])
+        self.assertIn("materialization_degraded", SCHEMA_CATALOG["tri.diagnostic"]["codes"])
 
 
 class CoarseTimestampTests(unittest.TestCase):
