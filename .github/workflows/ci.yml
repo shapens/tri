@@ -115,6 +115,34 @@ jobs:
           TRI_MATERIALIZE_BACKEND: overlay
         run: python -m unittest discover -s tests -p "test_bounded_disk.py" -k Overlay -v
 
+  linux-fuse:
+    name: linux FUSE virtual checkouts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install fuse3 (setuid fusermount3 for unprivileged mounts)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fuse3 && ls -l /dev/fuse "$(command -v fusermount3)"
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Probe a real unprivileged FUSE mount
+        run: python -c "from tri.fuse import probe; p = probe(deep=True); print(p); assert p['available'], p"
+      - name: Doctor reports the FUSE backend
+        run: |
+          python -m tri doctor | python -c "import json,sys; d=json.load(sys.stdin)['data']['virtual_checkouts']; print(d); assert d['available'] and d['backend'] == 'fuse', d"
+      - name: Virtual checkout tests (fail instead of skip when FUSE is missing)
+        env:
+          TRI_REQUIRE_FUSE: "1"
+        run: python -m unittest discover -s tests -p "test_virtual_checkout.py" -v
+      - name: Full suite with FUSE available
+        run: python -m unittest discover -s tests -v
+      - name: Virtual checkout benchmark smoke run (2,000 files)
+        run: python -m benchmarks.virtual --files 2000 --packages 20 --output-dir "$RUNNER_TEMP/bench-virtual"
+
   linux-reflink:
     name: linux reflink clones (${{ matrix.fs }})
     runs-on: ubuntu-24.04

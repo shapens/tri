@@ -247,6 +247,10 @@ def remote_sync(client: RemoteClient, argv: list[str], workspace: str, dest: Pat
     if state_file is None or not state_file.exists():
         return error_envelope(argv, "path_not_found", "No remote mount of this workspace on this machine.", object=workspace)
     state = state or json.loads(state_file.read_text())
+    if state.get("virtual"):
+        from tri import virtual
+
+        return virtual.remote_sync(client, argv, state_file, state)
     root = Path(state["path"])
     entries: dict[str, Any] = state["entries"]
     writes: dict[str, tuple[bytes, str]] = {}
@@ -541,6 +545,10 @@ def dispatch(argv: list[str], url: str) -> dict[str, Any]:
         index = positional.index("mount")
         if len(positional) < index + 3:
             return error_envelope(argv, "invalid_command", "usage: tri workspace mount <workspace> <path> [--paths <glob>]")
+        if "--virtual" in argv:
+            from tri import virtual
+
+            return virtual.remote_mount(client, argv, positional[index + 1], Path(positional[index + 2]), foreground="--foreground" in argv)
         return remote_mount(client, argv, positional[index + 1], Path(positional[index + 2]), _flag_values(argv, "--paths"))
     if words[:2] == ["workspace", "sync"]:
         positional = [part for part in _without_flag(argv, "--path") if not part.startswith("--")]
@@ -549,6 +557,15 @@ def dispatch(argv: list[str], url: str) -> dict[str, Any]:
             return error_envelope(argv, "invalid_command", "usage: tri workspace sync <workspace> [--path <dir>]")
         paths = _flag_values(argv, "--path")
         return remote_sync(client, argv, positional[index + 1], Path(paths[0]) if paths else None)
+    if words[:2] == ["workspace", "unmount"]:
+        from tri import virtual
+
+        positional = [part for part in _without_flag(_without_flag(argv, "--path"), "--lease") if not part.startswith("--")]
+        index = positional.index("unmount")
+        if len(positional) < index + 2:
+            return error_envelope(argv, "invalid_command", "usage: tri workspace unmount <workspace> [--path <dir>] [--force]")
+        paths = _flag_values(argv, "--path")
+        return virtual.remote_unmount(client, argv, positional[index + 1], Path(paths[0]) if paths else None, force="--force" in argv)
     if words[:2] == ["runner", "work"]:
         from tri.cli import envelope
 

@@ -1,6 +1,6 @@
 # Tri Benchmarks
 
-Tri keeps several benchmark families because they answer different questions: the workflow benchmark, the contention benchmark (below), the fan-out disk benchmark (`tri-bench-fanout`, see the top-level README), and the task benchmark.
+Tri keeps several benchmark families because they answer different questions: the workflow benchmark, the contention benchmark (below), the fan-out disk benchmark (`tri-bench-fanout`, see the top-level README), the virtual checkout benchmark (below), and the task benchmark.
 
 ## Workflow Benchmark
 
@@ -169,3 +169,8 @@ The task benchmark records:
 - verifier artifacts
 
 Use `--keep-workdir` with either runner when debugging generated repositories or task workdirs.
+
+## Virtual Checkout Benchmark
+
+`tri-bench-virtual` (`benchmarks/virtual.py`) measures time to first read and bytes fetched for a full checkout, a `--paths` partial checkout of one package, and a `--virtual` FUSE view (Linux only), through the local store and through a loopback `tri serve` with an empty per-machine cache. Defaults: `--files 50000` x `--file-size 1024` in `--packages 200`; `--modes full,paths,virtual`, `--transports local,remote`. For the view it also times a walk of one whole package and reports how many bytes that fetched. Results go to `benchmark-results/virtual-<timestamp>/` (`--output-dir` to choose); the recorded 50,000-file run is `benchmark-results/virtual-50k/`.
+
