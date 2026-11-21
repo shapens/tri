@@ -28,7 +28,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri import gitmirror
-from tri import sandbox
+from tri import autoscale, runner_secrets, sandbox
 from tri.auth import TokenAuthority, issue_token, load_token_file, public_record, revoke_tokens
 from tri.ignore import IgnoreRules
 from tri.textmerge import merge_three_way
@@ -162,7 +162,10 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "runner-fetch", "usage": "tri runner fetch <job> --path <path> [--path <path>] [--hashes-only]", "schema": "tri.files.fetch", "description": "Runner service: read files of a claimed job (only paths the requester can see)."},
     {"name": "runner-complete", "usage": "tri runner complete <job> --result <json>", "schema": "tri.check.inspect", "description": "Runner service: report exit status, output, and file changes; the server records the check run."},
     {"name": "runner-jobs", "usage": "tri runner jobs [--status queued|claimed|completed|failed] [--limit <n>]", "schema": "tri.run_job.list", "description": "Runner service: list run jobs."},
-    {"name": "runner-work", "usage": "tri runner work [--once] [--max-jobs <n>] [--interval <seconds>] [--sandbox off|auto|required]", "schema": "tri.runner.work", "description": "Run queued jobs from TRI_REMOTE on this machine, each in a sandbox, until stopped."},
+    {"name": "runner-work", "usage": "tri runner work [--once] [--max-jobs <n>] [--interval <seconds>] [--sandbox off|auto|required] [--control-dir <dir>]", "schema": "tri.runner.work", "description": "Run queued jobs from TRI_REMOTE on this machine, each in a sandbox, until stopped. Jobs that carry secret leases fetch their values with tri runner secrets and redact them from output. --control-dir writes status.json (idle or busy) there and drains (finishes the current job, then exits) when a file named drain appears."},
+    {"name": "runner-secrets", "usage": "tri runner secrets <job>", "schema": "tri.runner.secrets", "description": "Runner service: the values of a claimed job's secret leases, for the claim holder only while the claim is live. Policy and lease expiry are re-checked, and each delivery is audited."},
+    {"name": "runner-metrics", "usage": "tri runner metrics [--format json|prometheus]", "schema": "tri.runner.metrics", "description": "Runner service: queue depth, claims, lease expiry, and throughput for autoscalers (also GET /v0/runners/metrics, ?format=prometheus for text exposition)."},
+    {"name": "runner-autoscale", "usage": "tri runner autoscale [--min <n>] [--max <n>] [--jobs-per-runner <n>] [--idle-seconds <s>] [--interval <s>] [--poll <s>] [--sandbox off|auto|required] [--duration <s>] [--exit-when-idle]", "schema": "tri.runner.autoscale", "description": "Supervise local tri runner work processes against TRI_REMOTE: start workers as queue depth grows (up to --max), drain workers idle for --idle-seconds (down to --min)."},
     {"name": "verify-run", "usage": "tri verify run <project> [--limit <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.verification.run", "description": "Run queued post-merge verifications in merge order; a failure reverts the changeset on the current target."},
     {"name": "verify-list", "usage": "tri verify list <project> [--status pending|running|verified|reverted|revert_conflict]", "schema": "tri.verification.list", "description": "List post-merge verifications."},
     {"name": "verify-inspect", "usage": "tri verify inspect <verification>", "schema": "tri.verification.inspect", "description": "Inspect one post-merge verification."},
@@ -260,6 +263,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
             "remote_unreachable",
             "content_mismatch",
             "sandbox_unavailable",
+            "secret_in_output",
             "mirror_conflict",
             "mirror_diverged",
             "mirror_push_rejected",
@@ -390,6 +394,9 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.run_job.inspect": {"required": ["id", "workspace", "status", "command", "snapshot"]},
     "tri.run_job.list": {"required": ["jobs"]},
     "tri.runner.work": {"required": ["jobs", "count"]},
+    "tri.runner.secrets": {"required": ["job", "env", "leases", "expires_at"]},
+    "tri.runner.metrics": {"required": ["queued", "claimed", "completed", "failed", "oldest_queued_age_seconds", "claims", "leases", "secret_grants", "generated_at"]},
+    "tri.runner.autoscale": {"required": ["min", "max", "decisions", "peak_workers", "started", "drained", "workers", "stopped_because"]},
     "tri.files.fetch": {"required": ["snapshot", "files", "missing", "deferred", "bytes"]},
     "tri.remote.mount": {"required": ["workspace", "path", "snapshot", "remote", "files", "fetched_bytes", "cache_hits"]},
     "tri.remote.sync": {"required": ["workspace", "path", "snapshot", "remote", "written", "deleted"]},
@@ -9316,6 +9323,8 @@ def run_job_data(row: sqlite3.Row, *, include_manifest: bool = False, store: Sto
         "created_at": row["created_at"],
         "completed_at": row["completed_at"],
     }
+    if store is not None:
+        data["secret_leases"] = runner_secrets.grant_summaries(store, row["id"])
     if include_manifest and store is not None:
         data["files"] = [{"path": path, "hash": entry["hash"], "mode": entry.get("mode", "100644"), "size": entry.get("size")} for path, entry in run_job_entries(store, row).items()]
     return data
@@ -9342,24 +9351,31 @@ def require_job_claim(job: sqlite3.Row, actor: str) -> None:
         raise TriError("policy_denied", "This run job is not claimed by this runner.", object=job["id"], status=job["status"])
 
 
-def enqueue_run_job(store: Store, ws: sqlite3.Row, cmd: list[str], *, actor: str, sparse: list[str], timeout: float | None) -> sqlite3.Row:
+def enqueue_run_job(store: Store, ws: sqlite3.Row, cmd: list[str], *, actor: str, sparse: list[str], timeout: float | None, secret_lease_ids: list[str] | None = None) -> sqlite3.Row:
     if ws["status"] != "active":
         raise TriError("policy_denied", "Only active workspaces can run checks.", object=ws["id"])
     require_object_access(store, ws["id"], actor=actor, action="workspace.write")
     if not cmd:
         raise TriError("path_not_found", "No command supplied for tri run.")
+    leases = runner_secrets.validate_grants(store, ws, secret_lease_ids or [], actor=actor)
     job_id = new_id("job")
+    runner_secrets.ensure_table(store)
     with store.conn:
         store.conn.execute(
             "INSERT INTO run_jobs (id, workspace_id, project_id, actor, command_json, sparse_paths_json, timeout_seconds, before_snapshot_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
             (job_id, ws["id"], ws["project_id"], actor, dumps(cmd), dumps(sparse), timeout, ws["head_snapshot_id"], utcnow()),
         )
-        store.create_event(kind="run_job.queued", actor=actor, project_id=ws["project_id"], workspace_id=ws["id"], object_refs={"job": job_id, "command": cmd})
+        store.create_event(kind="run_job.queued", actor=actor, project_id=ws["project_id"], workspace_id=ws["id"], object_refs={"job": job_id, "command": cmd, "secret_leases": [lease["id"] for lease in leases]})
+        runner_secrets.record_grants(store, job_id, ws, leases, actor=actor)
     return resolve_run_job(store, job_id)
 
 
 def requeue_expired_run_jobs(store: Store) -> int:
+    expiring = store.rows("SELECT * FROM run_jobs WHERE status = 'claimed' AND lease_expires_at < ?", (utcnow(),))
+    if not expiring:
+        return 0
     with store.conn:
+        runner_secrets.expire_claims(store, expiring)
         return store.conn.execute(
             "UPDATE run_jobs SET status = 'queued', runner_actor = NULL, claimed_at = NULL, lease_expires_at = NULL WHERE status = 'claimed' AND lease_expires_at < ?",
             (utcnow(),),
@@ -9375,14 +9391,14 @@ def wait_for_run_job(store: Store, job_id: str, wait_seconds: float) -> sqlite3.
         time.sleep(0.1)
 
 
-def run_via_queue(store: Store, ws: sqlite3.Row, cmd: list[str], *, actor: str, command: list[str], start: float, sparse: list[str], timeout: float | None, wait: float) -> dict[str, Any]:
-    job = enqueue_run_job(store, ws, cmd, actor=actor, sparse=sparse, timeout=timeout)
+def run_via_queue(store: Store, ws: sqlite3.Row, cmd: list[str], *, actor: str, command: list[str], start: float, sparse: list[str], timeout: float | None, wait: float, secret_lease_ids: list[str] | None = None) -> dict[str, Any]:
+    job = enqueue_run_job(store, ws, cmd, actor=actor, sparse=sparse, timeout=timeout, secret_lease_ids=secret_lease_ids)
     job = wait_for_run_job(store, job["id"], wait)
     if job["check_id"]:
         output = envelope("tri.check.inspect", command, actor=actor, start=start, ok=job["status"] == "completed", data=check_view(store, job["check_id"], actor=actor))
         output["data"]["job"] = job["id"]
         return output
-    return envelope("tri.run_job.inspect", command, actor=actor, start=start, data=run_job_data(job))
+    return envelope("tri.run_job.inspect", command, actor=actor, start=start, data=run_job_data(job, store=store))
 
 
 def cmd_runner_claim(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -9446,6 +9462,8 @@ def cmd_runner_complete(store: Store, args: argparse.Namespace, command: list[st
     before = job["before_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
     visible = run_job_entries(store, job)
+    redactions = runner_secrets.redactions(store, job["id"])
+    secret_writes = runner_secrets.written_secret_paths(result.get("written", []), redactions)
     after_entries = dict(before_entries)
     for path in result.get("deleted", []):
         path = normalize_path(path)
@@ -9457,16 +9475,19 @@ def cmd_runner_complete(store: Store, args: argparse.Namespace, command: list[st
             continue  # never overwrite content hidden from the requester
         if is_secret_like_path(path) and path not in before_entries:
             continue
+        if item["path"] in secret_writes:
+            continue  # a leased value never enters source history
         blob = store.put_blob(base64.b64decode(item["content"]))
         after_entries[path] = {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": item.get("mode", "100644")}
     after_entries = dict(sorted(after_entries.items()))
     paths = changed_paths(before_entries, after_entries)
-    stdout_bytes = base64.b64decode(result.get("stdout", ""))
-    stderr_bytes = base64.b64decode(result.get("stderr", ""))
+    stdout_bytes = runner_secrets.redact(base64.b64decode(result.get("stdout", "")), redactions)
+    stderr_bytes = runner_secrets.redact(base64.b64decode(result.get("stderr", "")), redactions)
     exit_status = int(result.get("exit_status", 1))
     duration_ms = int(result.get("duration_ms", 0))
     cmd = loads(job["command_json"], [])
     check_id = new_id("check")
+    grants = runner_secrets.grant_summaries(store, job["id"])
     after = before
     stale = None
     events: list[str] = []
@@ -9490,10 +9511,10 @@ def cmd_runner_complete(store: Store, args: argparse.Namespace, command: list[st
         status = "stale" if stale else ("passed" if exit_status == 0 else "failed")
         stdout_artifact = write_artifact(store, "stdout", f"{check_id}-stdout.txt", stdout_bytes, labels=[])
         stderr_artifact = write_artifact(store, "stderr", f"{check_id}-stderr.txt", stderr_bytes, labels=[])
-        environment_policy = check_environment_policy([], {})
+        environment_policy = check_environment_policy([{"id": grant["lease"]} for grant in grants], {grant["env"]: "" for grant in grants})
         environment_policy["sandbox"] = result.get("sandbox") or {"kind": "unknown", "isolated": False}
         environment_policy["runner"] = args.actor
-        materialized_directory = {"mode": "remote_runner", "runner": args.actor, "job": job["id"], "input_snapshot": before, "output_snapshot": after, "sparse_paths": loads(job["sparse_paths_json"], []), "materialized_files": len(visible)}
+        materialized_directory = {"mode": "remote_runner", "runner": args.actor, "job": job["id"], "input_snapshot": before, "output_snapshot": after, "sparse_paths": loads(job["sparse_paths_json"], []), "materialized_files": len(visible), "secret_bearing_writes_skipped": len(secret_writes)}
         store.conn.execute(
             """
             INSERT INTO check_runs (
@@ -9506,26 +9527,48 @@ def cmd_runner_complete(store: Store, args: argparse.Namespace, command: list[st
             (
                 check_id, ws["id"], None, None, None, job["actor"], status, f"remote:{args.actor}", dumps(cmd),
                 before, after, exit_status, duration_ms, dumps({"stdout": stdout_artifact, "stderr": stderr_artifact}),
-                dumps([stdout_artifact, stderr_artifact]), dumps([]), dumps(materialized_directory), dumps(environment_policy),
+                dumps([stdout_artifact, stderr_artifact]), dumps([grant["lease"] for grant in grants]), dumps(materialized_directory), dumps(environment_policy),
                 dumps(file_change_ops), dumps(local_check_cost(cmd, duration_ms, stdout_bytes, stderr_bytes)), dumps([]),
                 "not_imported_stale_workspace_head" if stale else "remote_replayable", utcnow(),
             ),
         )
         store.conn.execute("UPDATE run_jobs SET status = ?, check_id = ?, completed_at = ? WHERE id = ?", ("completed" if status == "passed" else "failed", check_id, utcnow(), job["id"]))
         events.append(store.create_event(kind="check.completed", actor=job["actor"], project_id=ws["project_id"], workspace_id=ws["id"], object_refs={"check": check_id, "status": status, "runner": args.actor, "job": job["id"]}, input_fingerprints={"snapshot": before}, output_fingerprints={"snapshot": after}))
-    return envelope("tri.check.inspect", command, actor=args.actor, start=start, ok=stale is None, events=events, diagnostics=[stale] if stale else [], data=check_view(store, check_id, actor=job["actor"]))
+        events += runner_secrets.release(store, job, actor=args.actor)
+    warnings = [{"code": "secret_in_output", "severity": "warning", "message": "The job wrote a leased secret value into files; those writes were not imported.", "retryable": False, "count": len(secret_writes)}] if secret_writes else []
+    return envelope("tri.check.inspect", command, actor=args.actor, start=start, ok=stale is None, events=events, diagnostics=[stale] if stale else [], warnings=warnings, data=check_view(store, check_id, actor=job["actor"]))
 
 
 def cmd_runner_jobs(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     require_runner(args.actor)
     requeue_expired_run_jobs(store)
     rows = store.rows("SELECT * FROM run_jobs WHERE (? IS NULL OR status = ?) ORDER BY rowid DESC LIMIT ?", (args.status, args.status, args.limit))
-    return envelope("tri.run_job.list", command, actor=args.actor, start=start, data={"jobs": [run_job_data(row) for row in rows]})
+    return envelope("tri.run_job.list", command, actor=args.actor, start=start, data={"jobs": [run_job_data(row, store=store) for row in rows]})
+
+
+def cmd_runner_secrets(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_runner(args.actor, args.job)
+    requeue_expired_run_jobs(store)
+    data, events = runner_secrets.deliver(store, resolve_run_job(store, args.job), actor=args.actor)
+    return envelope("tri.runner.secrets", command, actor=args.actor, start=start, events=events, data=data)
+
+
+def cmd_runner_metrics(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_runner(args.actor)
+    requeue_expired_run_jobs(store)
+    data = autoscale.queue_metrics(store)
+    if args.format == "prometheus":
+        data["prometheus"] = autoscale.prometheus_text(data)
+    return envelope("tri.runner.metrics", command, actor=args.actor, start=start, data=data)
 
 
 def cmd_runner_work(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     # With TRI_REMOTE set, tri.remote.dispatch runs the worker before any store opens.
     raise TriError("invalid_command", "tri runner work needs TRI_REMOTE (or --remote) pointing at the Tri service, and a runner token in TRI_TOKEN or TRI_TOKEN_FILE.")
+
+
+def cmd_runner_autoscale(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    raise TriError("invalid_command", "tri runner autoscale needs TRI_REMOTE (or --remote) pointing at the Tri service, and a runner token in TRI_TOKEN or TRI_TOKEN_FILE.")
 
 
 def cmd_files_write(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -11197,10 +11240,8 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
         cmd = cmd[1:]
     executor = (runner or os.environ.get("TRI_RUN_EXECUTOR") or "local").lower()
     if executor == "remote":
-        if lease_ids:
-            raise TriError("invalid_command", "Secret leases are not sent to remote runners yet; run with --runner local.", object=ws["id"])
         wait = wait_seconds if wait_seconds is not None else float(os.environ.get("TRI_RUN_WAIT", "600"))
-        return run_via_queue(store, ws, cmd, actor=args.actor, command=command, start=start, sparse=normalize_path_patterns(sparse_paths), timeout=timeout, wait=wait)
+        return run_via_queue(store, ws, cmd, actor=args.actor, command=command, start=start, sparse=normalize_path_patterns(sparse_paths), timeout=timeout, wait=wait, secret_lease_ids=lease_ids)
     return run_check_for_workspace(
         store,
         ws,
@@ -16185,6 +16226,7 @@ def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
         "events": f"{base}/v0/events?project=<project>&workspace=<workspace>&kind=<kind>&limit=50",
         "event": f"{base}/v0/events/<event>",
         "policy_decision": f"{base}/v0/policy/decisions/<decision>",
+        "runner_metrics": f"{base}/v0/runners/metrics?format=prometheus",
         "object": f"{base}/v0/<collection>/<id>",
     }
 
@@ -16283,6 +16325,24 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
         output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
         self.write_json(200, output)
         return True
+
+    def runner_metrics_get(self, start: float, parsed: Any) -> None:
+        """Queue metrics for autoscalers; ?format=prometheus serves text exposition."""
+        prometheus = parse_qs(parsed.query).get("format", ["json"])[-1] == "prometheus"
+        argv = ["runner", "metrics", *(["--format", "prometheus"] if prometheus else [])]
+        output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
+        if not prometheus:
+            self.write_json(200, output)
+            return
+        if not output["ok"]:
+            self.write_json(403, output)
+            return
+        body = output["data"]["prometheus"].encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def diff_get_argv(self, object_id: str, parsed: Any) -> list[str]:
         query = parse_qs(parsed.query)
@@ -16553,6 +16613,9 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             name = unquote(parsed.path.removeprefix("/v0/schema/"))
             output, _ = execute_argv(["schema", name], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
             self.write_json(200, output)
+            return
+        if parsed.path == "/v0/runners/metrics":
+            self.runner_metrics_get(start, parsed)
             return
         if self.route_object_get(start, parsed):
             return
@@ -17347,7 +17410,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_runner.add_argument("--max-jobs", type=int)
     p_runner.add_argument("--interval", type=float, default=5.0)
     p_runner.add_argument("--sandbox", choices=list(sandbox.MODES))
+    p_runner.add_argument("--control-dir")
     p_runner.set_defaults(func=cmd_runner_work)
+    p_runner = runner_sub.add_parser("secrets")
+    p_runner.add_argument("job")
+    p_runner.set_defaults(func=cmd_runner_secrets)
+    p_runner = runner_sub.add_parser("metrics")
+    p_runner.add_argument("--format", choices=["json", "prometheus"], default="json")
+    p_runner.set_defaults(func=cmd_runner_metrics)
+    p_runner = runner_sub.add_parser("autoscale")
+    p_runner.add_argument("--min", type=int, default=0)
+    p_runner.add_argument("--max", type=int, default=4)
+    p_runner.add_argument("--jobs-per-runner", type=int, default=1)
+    p_runner.add_argument("--idle-seconds", type=float, default=30.0)
+    p_runner.add_argument("--interval", type=float, default=2.0)
+    p_runner.add_argument("--poll", type=float, default=1.0)
+    p_runner.add_argument("--sandbox", choices=list(sandbox.MODES))
+    p_runner.add_argument("--duration", type=float)
+    p_runner.add_argument("--exit-when-idle", action="store_true")
+    p_runner.set_defaults(func=cmd_runner_autoscale)
 
     p = sub.add_parser("merge-rules")
     merge_rules_sub = p.add_subparsers(dest="merge_rules_cmd", required=True)

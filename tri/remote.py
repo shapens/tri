@@ -322,10 +322,20 @@ def execute_job(client: RemoteClient, job: dict[str, Any], *, sandbox_mode: str 
         if token_file:
             hidden.append(Path(token_file).expanduser())
         box = sandbox.build(mode, run_dir=root, hidden=hidden, limits=sandbox.Limits.from_env(timeout_seconds=job.get("timeout_seconds")))
-        env = sandbox.scrubbed_env(root)  # never hand the runner's token to the job, even unsandboxed
+        # Leased values live in this process's memory and the job's environment
+        # only; they are never written to the runner's disk.
+        secret_env: dict[str, str] = {}
+        if job.get("secret_leases"):
+            delivered = client.command(["runner", "secrets", job["id"]])
+            if not delivered.get("ok"):
+                raise RuntimeError(f"secret delivery refused: {(delivered.get('diagnostics') or [{}])[0].get('message')}")
+            secret_env = dict(delivered["data"]["env"])
+        env = sandbox.scrubbed_env(root, secret_env)  # never hand the runner's token to the job, even unsandboxed
         started = time.time()
         completed = sandbox.run(box, list(job["command"]), cwd=work, env=env)
         duration_ms = int((time.time() - started) * 1000)
+        stdout_bytes = redact_values(completed.stdout, secret_env)
+        stderr_bytes = redact_values(completed.stderr, secret_env)
         written: list[dict[str, Any]] = []
         seen: set[str] = set()
         for dirpath, dirnames, filenames in os.walk(work):
@@ -343,8 +353,8 @@ def execute_job(client: RemoteClient, job: dict[str, Any], *, sandbox_mode: str 
         deleted = sorted(path for path in manifest if path not in seen)
         return {
             "exit_status": completed.returncode,
-            "stdout": base64.b64encode(completed.stdout).decode(),
-            "stderr": base64.b64encode(completed.stderr).decode(),
+            "stdout": base64.b64encode(stdout_bytes).decode(),
+            "stderr": base64.b64encode(stderr_bytes).decode(),
             "duration_ms": duration_ms,
             "written": written,
             "deleted": deleted,
@@ -354,17 +364,37 @@ def execute_job(client: RemoteClient, job: dict[str, Any], *, sandbox_mode: str 
         shutil.rmtree(root, ignore_errors=True)
 
 
-def run_remote_jobs(client: RemoteClient, *, max_jobs: int | None = None, idle_exit: bool = False, poll_seconds: float = 5.0, sandbox_mode: str | None = None) -> dict[str, Any]:
+def redact_values(data: bytes, env: dict[str, str]) -> bytes:
+    """Runner-side redaction before output leaves the machine; the service redacts again."""
+    for name, value in env.items():
+        if value:
+            data = data.replace(value.encode(), f"[tri-secret-redacted:{name}]".encode())
+    return data
+
+
+def run_remote_jobs(client: RemoteClient, *, max_jobs: int | None = None, idle_exit: bool = False, poll_seconds: float = 5.0, sandbox_mode: str | None = None, control_dir: Path | None = None) -> dict[str, Any]:
+    from tri import autoscale
+
     jobs: list[dict[str, Any]] = []
+    state = None
     while True:
+        if autoscale.drain_requested(control_dir):
+            autoscale.write_status(control_dir, "drained")
+            return {"jobs": jobs, "count": len(jobs), "drained": True}
+        if state != "idle":  # keep the first idle time, so the supervisor can tell how long it idled
+            autoscale.write_status(control_dir, "idle")
+            state = "idle"
         claim = client.command(["runner", "claim", "--wait", str(poll_seconds)])
         if not claim.get("ok"):
+            autoscale.write_status(control_dir, "error")
             return {"jobs": jobs, "count": len(jobs), "error": (claim.get("diagnostics") or [{}])[0]}
         job = claim["data"]["job"]
         if job is None:
             if idle_exit:
                 break
             continue
+        autoscale.write_status(control_dir, "busy", job=job["id"])
+        state = "busy"
         try:
             result = execute_job(client, job, sandbox_mode=sandbox_mode)
         except Exception as exc:  # report the failure as a failed check instead of abandoning the claim
@@ -374,6 +404,48 @@ def run_remote_jobs(client: RemoteClient, *, max_jobs: int | None = None, idle_e
         if max_jobs and len(jobs) >= max_jobs:
             break
     return {"jobs": jobs, "count": len(jobs)}
+
+
+def remote_autoscale(client: RemoteClient, argv: list[str]) -> dict[str, Any]:
+    from tri import autoscale
+    from tri.cli import TriError, envelope
+
+    started = time.time()
+
+    def number(flag: str, default: float | None, kind: type = float) -> Any:
+        values = _flag_values(argv, flag)
+        if not values:
+            return default
+        try:
+            return kind(values[-1])
+        except ValueError:
+            raise TriError("invalid_command", f"{flag} takes a number.", value=values[-1]) from None
+
+    def metrics() -> dict[str, Any]:
+        output = client.command(["runner", "metrics"])
+        if not output.get("ok"):
+            return {"ok": False, "error": (output.get("diagnostics") or [{}])[0]}
+        return output["data"]
+
+    modes = _flag_values(argv, "--sandbox")
+    try:
+        summary = autoscale.supervise(
+            metrics,
+            minimum=number("--min", 0, int),
+            maximum=number("--max", 4, int),
+            jobs_per_runner=number("--jobs-per-runner", 1, int),
+            idle_seconds=number("--idle-seconds", 30.0),
+            interval=number("--interval", 2.0),
+            poll=number("--poll", 1.0),
+            sandbox_mode=modes[-1] if modes else None,
+            duration=number("--duration", None),
+            exit_when_idle="--exit-when-idle" in argv,
+        )
+    except TriError as exc:
+        return envelope("tri.error", ["tri", *argv], ok=False, start=started, diagnostics=[exc.diagnostic])
+    ok = summary["stopped_because"] != "metrics_unavailable"
+    diagnostics = [] if ok else [{"code": "remote_unreachable", "severity": "error", "message": "Runner metrics were unavailable five times in a row.", "retryable": True}]
+    return envelope("tri.runner.autoscale", ["tri", *argv], ok=ok, start=started, data=summary, diagnostics=diagnostics)
 
 
 # -- dispatch -------------------------------------------------------------------
@@ -449,9 +521,12 @@ def dispatch(argv: list[str], url: str) -> dict[str, Any]:
         max_jobs = _flag_values(argv, "--max-jobs")
         interval = _flag_values(argv, "--interval")
         modes = _flag_values(argv, "--sandbox")
-        summary = run_remote_jobs(client, max_jobs=int(max_jobs[0]) if max_jobs else None, idle_exit="--once" in argv, poll_seconds=float(interval[0]) if interval else 5.0, sandbox_mode=modes[0] if modes else None)
+        control = _flag_values(argv, "--control-dir")
+        summary = run_remote_jobs(client, max_jobs=int(max_jobs[0]) if max_jobs else None, idle_exit="--once" in argv, poll_seconds=float(interval[0]) if interval else 5.0, sandbox_mode=modes[0] if modes else None, control_dir=Path(control[0]) if control else None)
         ok = "error" not in summary
         return envelope("tri.runner.work", ["tri", *argv], ok=ok, start=started, data=summary, diagnostics=[summary["error"]] if not ok and summary["error"].get("code") else [])
+    if words[:2] == ["runner", "autoscale"]:
+        return remote_autoscale(client, argv)
     if words[:2] == ["files", "write"] and _flag_values(argv, "--body"):
         local = Path(_flag_values(argv, "--body")[0]).expanduser()
         try:
