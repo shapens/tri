@@ -96,6 +96,7 @@ claude mcp add tri -- env TRI_HOME=/tmp/tri-home tri --actor agent:claude mcp
 - history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
+- post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
 - sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS; no network, no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/wall-clock limits
 - partial checkouts for large trees (`tri run --paths <glob>`, `tri workspace mount --paths <glob>`), with run directories deleted in the background and new base directories derived from the previous base
 - two-way Git mirror (`tri mirror add|sync|inspect|list|remove`): Git pushes land as attributed snapshots, Tri merges land as Git commits titled by changeset, both-sides edits line-merge into a merge commit, and private packages and secret-like paths never leave Tri

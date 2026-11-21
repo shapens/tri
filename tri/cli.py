@@ -146,7 +146,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "checks-list", "usage": "tri checks list <workspace-or-changeset>", "schema": "tri.check.list", "description": "List check runs for a workspace or changeset."},
     {"name": "checks-inspect", "usage": "tri checks inspect <check>", "schema": "tri.check.inspect", "description": "Inspect one structured check run."},
     {"name": "checks-set-create", "usage": "tri checks set-create <project> <name> --required-check <cmd>", "schema": "tri.check_set.inspect", "description": "Create a reusable project required-check set."},
-    {"name": "merge-rules-add", "usage": "tri merge-rules add <project> <name> --path <glob> [--path <glob>] [--exclude <glob>] [--allow <selector>] [--max-files <n>]", "schema": "tri.merge_rule.inspect", "description": "Maintainer rule letting checked changesets that only touch matching paths merge without a human review."},
+    {"name": "merge-rules-add", "usage": "tri merge-rules add <project> <name> --path <glob> [--path <glob>] [--exclude <glob>] [--allow <selector>] [--max-files <n>] [--verify-after <check-set>]", "schema": "tri.merge_rule.inspect", "description": "Maintainer rule letting checked changesets that only touch matching paths merge without a human review. With --verify-after, matching changesets may merge before their checks run; the check set runs after merge and a failure reverts the change."},
     {"name": "merge-rules-list", "usage": "tri merge-rules list <project> [--all]", "schema": "tri.merge_rule.list", "description": "List project merge rules."},
     {"name": "merge-rules-inspect", "usage": "tri merge-rules inspect <project> <name-or-id>", "schema": "tri.merge_rule.inspect", "description": "Inspect one merge rule."},
     {"name": "mirror-add", "usage": "tri mirror add <project> --remote <url-or-path> [--target <target>] [--branch <branch>] [--audience <actor>] [--prefer git|tri] [--retry <n>] [--no-sync]", "schema": "tri.mirror.inspect", "description": "Maintainer two-way mirror between a Tri target and a Git branch; paths the audience cannot read and secret-like paths never leave Tri."},
@@ -154,6 +154,9 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "mirror-inspect", "usage": "tri mirror inspect <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Inspect one Git mirror and its last sync."},
     {"name": "mirror-sync", "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.mirror.sync", "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits."},
     {"name": "mirror-remove", "usage": "tri mirror remove <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Stop mirroring a target."},
+    {"name": "verify-run", "usage": "tri verify run <project> [--limit <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.verification.run", "description": "Run queued post-merge verifications in merge order; a failure reverts the changeset on the current target."},
+    {"name": "verify-list", "usage": "tri verify list <project> [--status pending|running|verified|reverted|revert_conflict]", "schema": "tri.verification.list", "description": "List post-merge verifications."},
+    {"name": "verify-inspect", "usage": "tri verify inspect <verification>", "schema": "tri.verification.inspect", "description": "Inspect one post-merge verification."},
     {"name": "merge-rules-remove", "usage": "tri merge-rules remove <project> <name-or-id>", "schema": "tri.merge_rule.inspect", "description": "Remove a merge rule; later merges need an approved review again."},
     {"name": "checks-set-list", "usage": "tri checks set-list <project>", "schema": "tri.check_set.list", "description": "List reusable required-check sets for a project."},
     {"name": "checks-set-inspect", "usage": "tri checks set-inspect <project> <name-or-id> | <check-set>", "schema": "tri.check_set.inspect", "description": "Inspect a reusable required-check set."},
@@ -368,6 +371,9 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.merge_rule.list": {"required": ["project", "merge_rules"]},
     "tri.mirror.inspect": {"required": ["id", "project", "target", "remote", "branch", "audience", "status", "synced_snapshot", "synced_git_commit", "in_sync", "last_result", "created_by", "created_at"]},
     "tri.mirror.list": {"required": ["mirrors"]},
+    "tri.verification.inspect": {"required": ["id", "project", "changeset", "target", "merged_snapshot", "pre_merge_snapshot", "check_set", "status", "checks", "created_at"]},
+    "tri.verification.list": {"required": ["project", "verifications"]},
+    "tri.verification.run": {"required": ["project", "processed", "pending", "cycles"]},
     "tri.mirror.sync": {"required": ["id", "project", "target", "remote", "branch", "synced_snapshot", "synced_git_commit", "in_sync", "sync", "cycles"]},
     "tri.review.create": {"required": ["id", "changeset", "status", "reviewers", "check_summary", "export_preview"]},
     "tri.review.inspect": {"required": ["id", "changeset", "redacted_changeset", "workspace", "redacted_workspace", "status", "reviewers", "approvals", "approved_reviewers", "pending_reviewers", "maintainer_override", "check_summary", "risk_summary", "export_preview", "changeset_summary", "task", "task_run", "actor_identity", "commands", "checks", "artifacts", "policy_findings", "attached_policy_findings", "attached_check_summaries", "visibility_impact", "comment_threads", "unresolved_risks", "actions", "created_at"]},
@@ -979,6 +985,23 @@ class Store:
               created_at TEXT NOT NULL,
               revoked_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS verifications (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              changeset_id TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              merged_snapshot_id TEXT NOT NULL,
+              pre_merge_snapshot_id TEXT NOT NULL,
+              check_set_id TEXT NOT NULL,
+              merge_rule_id TEXT,
+              status TEXT NOT NULL,
+              checks_json TEXT NOT NULL DEFAULT '[]',
+              revert_snapshot_id TEXT,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              completed_at TEXT
+            );
             CREATE TABLE IF NOT EXISTS mirrors (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
@@ -1103,6 +1126,9 @@ class Store:
             self.conn.execute("ALTER TABLE disk_leases ADD COLUMN env_keys_json TEXT NOT NULL DEFAULT '[]'")
         if "sparse_paths_json" not in disk_columns:
             self.conn.execute("ALTER TABLE disk_leases ADD COLUMN sparse_paths_json TEXT")
+        merge_rule_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(merge_rules)").fetchall()}
+        if "verify_check_set_id" not in merge_rule_columns:
+            self.conn.execute("ALTER TABLE merge_rules ADD COLUMN verify_check_set_id TEXT")
         lease_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(materialization_leases)").fetchall()}
         for column, ddl in (
             ("backend", "TEXT"),
@@ -10940,6 +10966,7 @@ def merge_rule_data(row: sqlite3.Row) -> dict[str, Any]:
         "exclude_globs": loads(row["exclude_globs_json"], []),
         "allow": loads(row["allow_json"], []),
         "max_files": row["max_files"],
+        "verify_after": row_value(row, "verify_check_set_id"),
         "status": row["status"],
         "created_by": row["created_by"],
         "created_at": row["created_at"],
@@ -11000,13 +11027,14 @@ def cmd_merge_rules_add(store: Store, args: argparse.Namespace, command: list[st
     if args.max_files is not None and args.max_files < 1:
         raise TriError("invalid_command", "--max-files must be at least 1.")
     allow = sorted(set(args.allow or DEFAULT_MERGE_RULE_ALLOW))
+    verify_check_set = resolve_check_set(store, project["id"], args.verify_after)["id"] if args.verify_after else None
     if store.row("SELECT id FROM merge_rules WHERE project_id = ? AND name = ? AND status = 'active'", (project["id"], args.name)):
         raise TriError("invalid_command", "An active merge rule with this name already exists.", object=args.name)
     rule_id = new_id("mrule")
     with store.conn:
         store.conn.execute(
-            "INSERT INTO merge_rules (id, project_id, name, path_globs_json, exclude_globs_json, allow_json, max_files, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-            (rule_id, project["id"], args.name, dumps(globs), dumps([normalize_path(glob) for glob in args.exclude or []]), dumps(allow), args.max_files, args.actor, utcnow()),
+            "INSERT INTO merge_rules (id, project_id, name, path_globs_json, exclude_globs_json, allow_json, max_files, verify_check_set_id, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+            (rule_id, project["id"], args.name, dumps(globs), dumps([normalize_path(glob) for glob in args.exclude or []]), dumps(allow), args.max_files, verify_check_set, args.actor, utcnow()),
         )
         evt = store.create_event(kind="merge_rule.created", actor=args.actor, project_id=project["id"], object_refs={"merge_rule": rule_id, "name": args.name})
     return envelope("tri.merge_rule.inspect", command, actor=args.actor, start=start, events=[evt], data=merge_rule_data(resolve_merge_rule(store, project["id"], rule_id)))
@@ -11034,6 +11062,219 @@ def cmd_merge_rules_remove(store: Store, args: argparse.Namespace, command: list
     return envelope("tri.merge_rule.inspect", command, actor=args.actor, start=start, events=[evt], data=merge_rule_data(resolve_merge_rule(store, project["id"], row["id"])))
 
 
+# --- Post-merge verification ---------------------------------------------------
+#
+# A merge rule with --verify-after lets a changeset merge before its checks
+# pass. The merge queues a verification; `tri verify run` runs the rule's check
+# set on the merged snapshot and, on failure, reverts the changeset's effect on
+# the current target with a three-way merge so later merges survive.
+
+VERIFY_ROLES = ("role:maintainer", "role:service")
+
+
+def verification_data(store: Store, row: sqlite3.Row) -> dict[str, Any]:
+    target = store.row("SELECT name FROM targets WHERE id = ?", (row["target_id"],))
+    return {
+        "id": row["id"],
+        "project": row["project_id"],
+        "changeset": row["changeset_id"],
+        "target": target["name"] if target else None,
+        "merged_snapshot": row["merged_snapshot_id"],
+        "pre_merge_snapshot": row["pre_merge_snapshot_id"],
+        "check_set": row["check_set_id"],
+        "merge_rule": row["merge_rule_id"],
+        "status": row["status"],
+        "checks": loads(row["checks_json"], []),
+        "revert_snapshot": row["revert_snapshot_id"],
+        "result": loads(row["result_json"], {}),
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def resolve_verification(store: Store, verification_id: str) -> sqlite3.Row:
+    row = store.row("SELECT * FROM verifications WHERE id = ?", (verification_id,))
+    if row is None:
+        raise TriError("path_not_found", "Verification not found.", object=verification_id)
+    return row
+
+
+def queue_post_merge_verification(store: Store, cs: sqlite3.Row, decision: dict[str, Any], *, target_id: str, merged_snapshot: str, pre_merge_snapshot: str, actor: str) -> str | None:
+    plan = decision.get("post_merge_verification")
+    if not plan:
+        return None
+    verification_id = new_id("verify")
+    store.conn.execute(
+        "INSERT INTO verifications (id, project_id, changeset_id, target_id, merged_snapshot_id, pre_merge_snapshot_id, check_set_id, merge_rule_id, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        (verification_id, cs["project_id"], cs["id"], target_id, merged_snapshot, pre_merge_snapshot, plan["check_set"], plan["merge_rule"], actor, utcnow()),
+    )
+    store.create_event(
+        kind="verification.queued",
+        actor=actor,
+        project_id=cs["project_id"],
+        object_refs={"verification": verification_id, "changeset": cs["id"], "snapshot": merged_snapshot, "check_set": plan["check_set"]},
+    )
+    return verification_id
+
+
+def snapshot_without(store: Store, project_id: str, snapshot_id: str, reverts: list[sqlite3.Row], *, actor: str) -> str:
+    """`snapshot_id` with earlier reverted changesets undone, so a later
+    verification is not blamed for a failure an earlier merge caused."""
+    if not reverts:
+        return snapshot_id
+    entries = store.load_snapshot_tree(snapshot_id)
+    for revert in reverts:
+        undone, conflicts, _ = merge_entries(store, store.load_snapshot_tree(revert["merged_snapshot_id"]), entries, store.load_snapshot_tree(revert["pre_merge_snapshot_id"]))
+        if not conflicts:
+            entries = undone
+    if entries == store.load_snapshot_tree(snapshot_id):
+        return snapshot_id
+    with store.conn:
+        snapshot = store.create_snapshot(project_id, entries, parents=[snapshot_id], source="merge", actor=actor, metadata={"operation": "verify_candidate", "without": [revert["changeset_id"] for revert in reverts]})
+    return snapshot["id"]
+
+
+def revert_on_target(store: Store, verification: sqlite3.Row, *, actor: str, retries: int = 5) -> tuple[str | None, list[dict[str, Any]]]:
+    for _attempt in range(retries + 1):
+        target = store.row("SELECT * FROM targets WHERE id = ?", (verification["target_id"],))
+        current = target["snapshot_id"]
+        reverted, conflicts, _ = merge_entries(
+            store,
+            store.load_snapshot_tree(verification["merged_snapshot_id"]),
+            store.load_snapshot_tree(current),
+            store.load_snapshot_tree(verification["pre_merge_snapshot_id"]),
+        )
+        if conflicts:
+            return None, conflicts
+        cs = store.get_changeset(verification["changeset_id"])
+        try:
+            snapshot = _commit_revert(store, verification, cs, target, current, reverted, actor=actor)
+        except _RetryRevert:
+            continue
+        return snapshot, []
+    raise TriError("stale_target_snapshot", "Target kept moving while reverting a failed verification.", object=verification["target_id"], retryable=True)
+
+
+def _commit_revert(store: Store, verification: sqlite3.Row, cs: sqlite3.Row, target: sqlite3.Row, current: str, reverted: dict[str, dict[str, Any]], *, actor: str) -> str:
+        with store.conn:
+            snapshot = store.create_snapshot(
+                verification["project_id"],
+                reverted,
+                parents=[current],
+                source="merge",
+                actor=actor,
+                metadata={"target": target["name"], "operation": "post_merge_revert", "reverts_changeset": cs["id"], "verification": verification["id"]},
+            )
+            updated = store.conn.execute("UPDATE targets SET snapshot_id = ? WHERE id = ? AND snapshot_id = ?", (snapshot["id"], target["id"], current))
+            if updated.rowcount != 1:
+                raise _RetryRevert()
+            store.conn.execute("UPDATE changesets SET status = 'reverted' WHERE id = ?", (cs["id"],))
+            if cs["workspace_id"]:
+                store.conn.execute("UPDATE workspaces SET status = 'active', updated_at = ? WHERE id = ? AND status = 'promoted'", (utcnow(), cs["workspace_id"]))
+            store.create_event(
+                kind="changeset.reverted",
+                actor=actor,
+                project_id=verification["project_id"],
+                workspace_id=cs["workspace_id"],
+                object_refs={"changeset": cs["id"], "target": target["id"], "target_name": target["name"], "snapshot": snapshot["id"], "previous_snapshot": current, "verification": verification["id"]},
+            )
+        return snapshot["id"]
+
+
+class _RetryRevert(Exception):
+    pass
+
+
+def run_one_verification(store: Store, verification: sqlite3.Row, *, actor: str, command: list[str], start: float) -> dict[str, Any]:
+    cs = store.get_changeset(verification["changeset_id"])
+    check_set = store.row("SELECT * FROM check_sets WHERE id = ?", (verification["check_set_id"],))
+    specs = loads(check_set["required_checks_json"], []) if check_set else []
+    reverts = store.rows(
+        "SELECT * FROM verifications WHERE target_id = ? AND status = 'reverted' AND created_at <= ? AND rowid < (SELECT rowid FROM verifications WHERE id = ?) ORDER BY rowid",
+        (verification["target_id"], verification["created_at"], verification["id"]),
+    )
+    candidate = snapshot_without(store, verification["project_id"], verification["merged_snapshot_id"], list(reverts), actor=actor)
+    checks: list[dict[str, Any]] = []
+    for spec in specs:
+        check, _events = run_check_for_changeset_head(store, cs, spec["command"], actor=actor, command=command, start=start, snapshot=candidate)
+        checks.append({"id": check["id"], "command": spec["command"], "status": check["status"]})
+        if check["status"] != "passed":
+            break
+    passed = bool(specs) and all(check["status"] == "passed" for check in checks)
+    result: dict[str, Any] = {"tested_snapshot": candidate, "without": [row["changeset_id"] for row in reverts]}
+    revert_snapshot = None
+    if passed:
+        status = "verified"
+    else:
+        try:
+            revert_snapshot, conflicts = revert_on_target(store, verification, actor=actor)
+        except _RetryRevert:
+            revert_snapshot, conflicts = None, []
+            result["error"] = TriError("stale_target_snapshot", "Target moved during revert.", retryable=True).diagnostic
+        if revert_snapshot:
+            status = "reverted"
+        else:
+            status = "revert_conflict"
+            result["conflicts"] = [{"kind": item["kind"], "path": item["path"]} for item in conflicts]
+    with store.conn:
+        store.conn.execute(
+            "UPDATE verifications SET status = ?, checks_json = ?, revert_snapshot_id = ?, result_json = ?, completed_at = ? WHERE id = ?",
+            (status, dumps(checks), revert_snapshot, dumps(result), utcnow(), verification["id"]),
+        )
+        store.create_event(
+            kind=f"verification.{status}",
+            actor=actor,
+            project_id=verification["project_id"],
+            object_refs={"verification": verification["id"], "changeset": cs["id"], "checks": [check["id"] for check in checks], "revert_snapshot": revert_snapshot},
+        )
+    return verification_data(store, resolve_verification(store, verification["id"]))
+
+
+def cmd_verify_run(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    if not set(VERIFY_ROLES) & set(actor_selectors(args.actor)):
+        raise TriError("policy_denied", "Only maintainers or services can run post-merge verification.", object=args.project, action="verification.run", required_grant="role:maintainer")
+    project = store.get_project(args.project)
+    processed: list[dict[str, Any]] = []
+    cycle = 0
+    while True:
+        cycle += 1
+        rows = store.rows("SELECT * FROM verifications WHERE project_id = ? AND status = 'pending' ORDER BY rowid LIMIT ?", (project["id"], max(args.limit, 1)))
+        for row in rows:
+            claimed = False
+            with store.conn:
+                claimed = store.conn.execute("UPDATE verifications SET status = 'running' WHERE id = ? AND status = 'pending'", (row["id"],)).rowcount == 1
+            if not claimed:
+                continue
+            try:
+                processed.append(run_one_verification(store, resolve_verification(store, row["id"]), actor=args.actor, command=command, start=start))
+            except Exception:
+                with store.conn:
+                    store.conn.execute("UPDATE verifications SET status = 'pending' WHERE id = ? AND status = 'running'", (row["id"],))
+                raise
+        if not args.watch or (args.max_cycles and cycle >= args.max_cycles):
+            break
+        time.sleep(max(args.interval, 0.05))
+    pending = count_row(store, "SELECT COUNT(*) AS count FROM verifications WHERE project_id = ? AND status = 'pending'", (project["id"],))
+    return envelope("tri.verification.run", command, actor=args.actor, start=start, data={"project": project["id"], "processed": processed, "pending": pending, "cycles": cycle})
+
+
+def cmd_verify_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    project = store.get_project(args.project)
+    if args.status:
+        rows = store.rows("SELECT * FROM verifications WHERE project_id = ? AND status = ? ORDER BY rowid", (project["id"], args.status))
+    else:
+        rows = store.rows("SELECT * FROM verifications WHERE project_id = ? ORDER BY rowid", (project["id"],))
+    visible = [row for row in rows if object_access_decision(store, row["changeset_id"], actor=args.actor, action="changeset.read")[0]["allowed"]]
+    return envelope("tri.verification.list", command, actor=args.actor, start=start, data={"project": project["id"], "verifications": [verification_data(store, row) for row in visible], "redacted": len(rows) - len(visible)})
+
+
+def cmd_verify_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    row = resolve_verification(store, args.verification)
+    require_object_access(store, row["changeset_id"], actor=args.actor, action="changeset.read")
+    return envelope("tri.verification.inspect", command, actor=args.actor, start=start, data=verification_data(store, row))
+
+
 # --- Two-way Git mirror -------------------------------------------------------
 #
 # A mirror pairs one Tri target with one Git branch. Each sync records a pair
@@ -11042,7 +11283,7 @@ def cmd_merge_rules_remove(store: Store, args: argparse.Namespace, command: list
 # are not mirrorable: Git never receives Tri's copy and Tri never takes Git's,
 # so each side keeps what the other cannot see.
 
-MIRROR_TARGET_EVENTS = ("changeset.merged", "target.refreshed")
+MIRROR_TARGET_EVENTS = ("changeset.merged", "target.refreshed", "changeset.reverted")
 DEFAULT_MIRROR_AUDIENCE = "service:git-mirror"
 
 
@@ -11199,6 +11440,8 @@ def mirror_tri_steps(store: Store, mirror: sqlite3.Row, target_id: str, target_s
         if refs.get("changeset"):
             cs = store.row("SELECT title FROM changesets WHERE id = ?", (refs["changeset"],))
             title = cs["title"] if cs else None
+        if row["kind"] == "changeset.reverted" and title:
+            title = f"Revert \"{title}\" (post-merge checks failed)"
         steps.append({"snapshot": refs["snapshot"], "actor": row["actor"], "at": row["created_at"], "changeset": refs.get("changeset"), "title": title, "kind": row["kind"]})
         cursor = int(row["rowid"])
         if refs["snapshot"] == target_snapshot:
@@ -12388,11 +12631,13 @@ def run_check_for_changeset_head(
     start: float,
     rerun_of: str | None = None,
     assumptions: list[str] | None = None,
+    snapshot: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
+    """Run a check against the changeset head, or against `snapshot` (post-merge verification)."""
     check_id = new_id("check")
-    run_lease = RunLease(store, kind="revalidation", key=check_id, workspace_id=cs["workspace_id"], before_snapshot=cs["head_snapshot_id"])
+    run_lease = RunLease(store, kind="revalidation", key=check_id, workspace_id=cs["workspace_id"], before_snapshot=snapshot or cs["head_snapshot_id"])
     try:
-        return _run_check_for_changeset_head(store, cs, cmd, check_id=check_id, run_lease=run_lease, actor=actor, command=command, start=start, rerun_of=rerun_of, assumptions=assumptions)
+        return _run_check_for_changeset_head(store, cs, cmd, check_id=check_id, run_lease=run_lease, actor=actor, command=command, start=start, rerun_of=rerun_of, assumptions=assumptions, snapshot=snapshot)
     finally:
         run_lease.release()
 
@@ -12409,14 +12654,15 @@ def _run_check_for_changeset_head(
     start: float,
     rerun_of: str | None = None,
     assumptions: list[str] | None = None,
+    snapshot: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     if not cmd:
         raise TriError("invalid_command", "Changeset revalidation command cannot be empty.", object=cs["id"])
-    before = cs["head_snapshot_id"]
+    before = snapshot or cs["head_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
     normalized_assumptions = normalize_assumptions(assumptions)
     work = store.runs / check_id / "work"
-    materialization = materialize_for_run(store, before_entries, run_lease, base_snapshot=cs["base_snapshot_id"])
+    materialization = materialize_for_run(store, before_entries, run_lease, base_snapshot=snapshot or cs["base_snapshot_id"])
     run_lease.record_materialization(materialization)
     with store.conn:
         started_evt = store.create_event(
@@ -12468,7 +12714,7 @@ def _run_check_for_changeset_head(
                 rerun_of,
                 actor,
                 status,
-                "local_changeset",
+                "post_merge" if snapshot else "local_changeset",
                 dumps(cmd),
                 before,
                 before,
@@ -12482,7 +12728,7 @@ def _run_check_for_changeset_head(
                 dumps(paths),
                 dumps(cost),
                 dumps(normalized_assumptions),
-                "changeset_head_replayable",
+                "post_merge_replayable" if snapshot else "changeset_head_replayable",
                 utcnow(),
             ),
         )
@@ -12693,13 +12939,14 @@ def changeset_merge_once(store: Store, args: argparse.Namespace, command: list[s
             output_fingerprints={"target_snapshot": merged_snapshot},
             policy_result=decision,
         )
+        verification = queue_post_merge_verification(store, cs, decision, target_id=target["id"], merged_snapshot=merged_snapshot, pre_merge_snapshot=previous_snapshot, actor=args.actor)
     return envelope(
         "tri.changeset.merge",
         command,
         actor=args.actor,
         start=start,
         events=[policy_event, evt],
-        data={"changeset": cs["id"], "target": target["name"], "status": "merged", "mode": mode, "previous_snapshot": previous_snapshot, "snapshot": merged_snapshot, "changed_paths": changed, "text_merged_paths": text_merged, "conflicts": [], "merge_rule": decision["review"]["merge_rule"]},
+        data={"changeset": cs["id"], "target": target["name"], "status": "merged", "mode": mode, "previous_snapshot": previous_snapshot, "snapshot": merged_snapshot, "changed_paths": changed, "text_merged_paths": text_merged, "conflicts": [], "merge_rule": decision["review"]["merge_rule"], "verification": verification},
     )
 
 
@@ -13200,21 +13447,21 @@ def required_check_diagnostics(store: Store, cs: sqlite3.Row) -> tuple[list[dict
             if check["snapshot_after"] != cs["head_snapshot_id"]:
                 stale.append(check["id"])
         if missing:
-            diagnostics.append(decision_denial("missing_required_check", "Task required checks are missing.", object=cs["id"], required_checks=missing))
+            diagnostics.append(decision_denial("missing_required_check", "Task required checks are missing.", object=cs["id"], required_checks=missing, reason="missing"))
         if failing:
-            diagnostics.append(decision_denial("missing_required_check", "Task required checks are not passing.", object=cs["id"], checks=failing))
+            diagnostics.append(decision_denial("missing_required_check", "Task required checks are not passing.", object=cs["id"], checks=failing, reason="failing"))
         if stale:
-            diagnostics.append(decision_denial("missing_required_check", "Task required checks are stale for the changeset head.", object=cs["id"], checks=stale))
+            diagnostics.append(decision_denial("missing_required_check", "Task required checks are stale for the changeset head.", object=cs["id"], checks=stale, reason="stale"))
         return diagnostics, latest_required, len(checks)
     if not latest_check_by_command:
-        diagnostics.append(decision_denial("missing_required_check", "At least one passing check is required before export.", object=cs["id"]))
+        diagnostics.append(decision_denial("missing_required_check", "At least one passing check is required before export.", object=cs["id"], reason="missing"))
     else:
         failing = [check["id"] for check in latest_check_by_command.values() if check["status"] != "passed"]
         stale = [check["id"] for check in latest_check_by_command.values() if check["snapshot_after"] != cs["head_snapshot_id"]]
         if failing:
-            diagnostics.append(decision_denial("missing_required_check", "Required checks are not passing.", object=cs["id"], checks=failing))
+            diagnostics.append(decision_denial("missing_required_check", "Required checks are not passing.", object=cs["id"], checks=failing, reason="failing"))
         if stale:
-            diagnostics.append(decision_denial("missing_required_check", "Required checks are stale for the changeset head.", object=cs["id"], checks=stale))
+            diagnostics.append(decision_denial("missing_required_check", "Required checks are stale for the changeset head.", object=cs["id"], checks=stale, reason="stale"))
     return diagnostics, list(latest_check_by_command.values()), len(checks)
 
 
@@ -13426,18 +13673,26 @@ def evaluate_export_policy(
         )
         denials.append("unsatisfied_changeset_dependency")
     check_diagnostics, latest_checks, total_checks = required_check_diagnostics(store, cs)
-    diagnostics.extend(check_diagnostics)
-    denials.extend(diagnostic["code"] for diagnostic in check_diagnostics)
     approved_reviews = []
     for review_id in loads(cs["reviews_json"], []):
         review = store.get_review(review_id)
         if review["status"] == "approved":
             approved_reviews.append(review_id)
+    rule = matching_merge_rule(store, cs, actor=actor, changed=changed) if action == "changeset.merge" else None
+    post_merge_verification = None
+    if rule is not None and rule.get("verify_after"):
+        deferred = [diagnostic for diagnostic in check_diagnostics if diagnostic.get("reason") in ("missing", "stale")]
+        if deferred and len(deferred) == len(check_diagnostics):
+            # Nothing has failed; the rule's check set runs after merge instead.
+            check_diagnostics = []
+            post_merge_verification = {"check_set": rule["verify_after"], "merge_rule": rule["id"], "deferred": [diagnostic["reason"] for diagnostic in deferred]}
+            grants.append(f"post_merge_verification:{rule['id']}")
+    diagnostics.extend(check_diagnostics)
+    denials.extend(diagnostic["code"] for diagnostic in check_diagnostics)
     merge_rule = None
-    if not approved_reviews and action == "changeset.merge":
-        merge_rule = matching_merge_rule(store, cs, actor=actor, changed=changed)
-        if merge_rule is not None:
-            grants.append(f"merge_rule:{merge_rule['id']}")
+    if not approved_reviews and rule is not None:
+        merge_rule = rule
+        grants.append(f"merge_rule:{merge_rule['id']}")
     if not approved_reviews and merge_rule is None:
         diagnostics.append(decision_denial("missing_review_approval", "An approved review is required before export.", object=cs["id"]))
         denials.append("missing_review_approval")
@@ -13470,6 +13725,7 @@ def evaluate_export_policy(
             "passed": sum(1 for check in latest_checks if check["status"] == "passed"),
         },
         "review": {"approved": bool(approved_reviews), "approved_reviews": approved_reviews, "merge_rule": merge_rule["id"] if merge_rule else None},
+        "post_merge_verification": post_merge_verification,
         "stack": visible_stack,
         "advisory": advisory_ref,
         "changeset_lifecycle": changeset_lifecycle,
@@ -16362,6 +16618,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rule.add_argument("--exclude", action="append")
     p_rule.add_argument("--allow", action="append")
     p_rule.add_argument("--max-files", type=int)
+    p_rule.add_argument("--verify-after")
     p_rule.set_defaults(func=cmd_merge_rules_add)
     p_rule = merge_rules_sub.add_parser("list")
     p_rule.add_argument("project")
@@ -16375,6 +16632,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_rule.add_argument("project")
     p_rule.add_argument("name")
     p_rule.set_defaults(func=cmd_merge_rules_remove)
+
+    p = sub.add_parser("verify")
+    verify_sub = p.add_subparsers(dest="verify_cmd", required=True)
+    p_verify = verify_sub.add_parser("run")
+    p_verify.add_argument("project")
+    p_verify.add_argument("--limit", type=int, default=50)
+    p_verify.add_argument("--watch", action="store_true")
+    p_verify.add_argument("--interval", type=float, default=10.0)
+    p_verify.add_argument("--max-cycles", type=int)
+    p_verify.set_defaults(func=cmd_verify_run)
+    p_verify = verify_sub.add_parser("list")
+    p_verify.add_argument("project")
+    p_verify.add_argument("--status")
+    p_verify.set_defaults(func=cmd_verify_list)
+    p_verify = verify_sub.add_parser("inspect")
+    p_verify.add_argument("verification")
+    p_verify.set_defaults(func=cmd_verify_inspect)
 
     p = sub.add_parser("mirror")
     mirror_sub = p.add_subparsers(dest="mirror_cmd", required=True)
