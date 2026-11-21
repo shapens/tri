@@ -891,6 +891,8 @@ class LeakSweepTests(unittest.TestCase):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate(timeout=5)
+        if os.name == "nt" and os.environ.get("TRI_CONFORMANCE_NATIVE"):
+            time.sleep(2)  # tri-server's workers exit on end of input after it is terminated
 
     def start_server(self, *extra: str) -> int:
         with socket.socket() as sock:

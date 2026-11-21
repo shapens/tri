@@ -247,6 +247,11 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(timeout=10)
+            if os.name == "nt" and native_binary():
+                # terminate() is TerminateProcess on Windows: tri-server cannot drain,
+                # and its workers exit on end of input a moment later. Give them that
+                # moment before the caller deletes the store they hold open.
+                time.sleep(2)
         if self.log is not None:
             try:
                 self.log.unlink()

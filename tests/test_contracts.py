@@ -30,6 +30,17 @@ class ContractFileTests(unittest.TestCase):
         diagnostic = json.loads((CONTRACTS / "diagnostic.json").read_bytes())
         self.assertEqual(diagnostic["properties"]["code"]["enum"], sorted(set(cli.SCHEMA_CATALOG["tri.diagnostic"]["codes"])))
 
+    def test_native_and_worker_diagnostic_codes_are_in_the_contract(self) -> None:
+        import re
+
+        codes = set(cli.SCHEMA_CATALOG["tri.diagnostic"]["codes"])
+        sources = [path for path in (ROOT / "native" / "tri-server").glob("*.go") if not path.name.endswith("_test.go")]
+        self.assertTrue(sources)
+        emitted = {match for path in sources for match in re.findall(r'NewDiagnostic\("([a-z_]+)"', path.read_text())}
+        emitted |= set(re.findall(r'TriError\("([a-z_]+)"', (ROOT / "tri" / "worker.py").read_text()))
+        self.assertGreaterEqual(emitted, {"unauthenticated", "server_busy", "request_timeout", "worker_failed"})
+        self.assertEqual(sorted(emitted - codes), [])
+
     def test_drift_is_detected(self) -> None:
         import tempfile
 

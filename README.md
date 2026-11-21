@@ -74,6 +74,41 @@ claude mcp add tri -- env TRI_REMOTE=https://tri.example.com TRI_TOKEN_FILE=~/.t
 
 Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name server paths (`files write --body`, `import <dir>`, `workspace mount <dir>`, ...) unless the caller is a maintainer.
 
+### Native front server (`tri-server`)
+
+`native/tri-server` is a Go front server for the same HTTP API, and the first slice of the production-runtime rewrite (see "Production Runtime Migration" in `tri.md`). It terminates HTTP, checks bearer tokens against the same token file, and sends each request to a pool of persistent Python workers (`tri worker --stdio`) that run the same request handler as `tri serve`, so routes, policy, and refusals are unchanged. It adds process-level concurrency, timeouts, body limits, graceful drain on SIGTERM, `/v0/ready`, and Prometheus `/metrics`.
+
+```sh
+cd native/tri-server && go build -o tri-server . && cd -          # Go 1.22+, standard library only
+TRI_HOME=/tmp/tri-home native/tri-server/tri-server --host 127.0.0.1 --port 8765 \
+  --auth-file /tmp/tri-tokens.json --workers 8 -- python3 -m tri worker --stdio
+curl -s http://127.0.0.1:8765/v0/ready                     # 503 while starting or draining
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/metrics
+```
+
+It takes the same flags as `tri serve` (`--host`, `--port`, `--quiet`, `--auth-file`, `--allow-unauthenticated`, `--run-sandbox`, `--allow-unsandboxed-runs`, `--run-executor`) and passes them to its workers, which apply the same refusals. Its own flags: `--workers`, `--max-workers`, `--queue-timeout` (503 `server_busy`), `--request-timeout` (504 `request_timeout`; the worker is killed and replaced), `--drain-timeout`, `--worker-max-requests`, `--maintain-interval`, `--max-body-bytes`, `--metrics-public`.
+
+### Contracts and conformance
+
+`contracts/v0/` holds JSON Schema files generated from the command and schema registries: `commands.json`, `api.json`, `envelope.json`, `envelope-summary.json`, `diagnostic.json`, and `schemas/<schema>.json` for every response's data. Regenerate after changing a registry; a test fails when they drift:
+
+```sh
+python -m tri.contracts --write
+python -m tri.contracts --check
+```
+
+`tests/conformance/` drives an implementation only through those contracts (CLI argv to JSON envelope, and the HTTP routes) and validates every response. By default it tests `python -m tri` and `tri serve`; point it at another implementation with environment variables:
+
+```sh
+python -m unittest discover -s tests/conformance -t tests -v                       # tri serve
+TRI_CONFORMANCE_NATIVE=$PWD/native/tri-server/tri-server \
+  python -m unittest discover -s tests/conformance -t tests -v                     # tri-server, plus a differential run against tri serve
+TRI_CONFORMANCE_NATIVE=$PWD/native/tri-server/tri-server \
+  python -m unittest discover -s tests -p test_leak_sweep.py -v                    # leak sweep through tri-server
+TRI_CONFORMANCE_BIN="/path/to/other-tri" TRI_CONFORMANCE_SERVER="/path/to/server --host {host} --port {port} {auth_args}" \
+  python -m unittest discover -s tests/conformance -t tests -v                     # any implementation
+```
+
 ## Implemented MVP Surface
 
 - machine-readable command discovery, schema catalog, response links for visible refs, generic typed-object inspection, derived actor identity inspection, actor-aware package boundary declaration/inspection, project discovery/inspection, and store doctor
@@ -198,6 +233,8 @@ What the real project showed:
 ```sh
 python3 -m py_compile tri/cli.py
 python3 -m unittest discover -s tests -v
+python3 -m tri.contracts --check
+(cd native/tri-server && go vet ./... && go test -race ./...)
 ```
 
 ## Benchmarks
@@ -244,6 +281,12 @@ Run the contention benchmark (N agents edit shared files and merge to main concu
 
 ```sh
 tri-bench-contention --agents 50 --parallel 8
+```
+
+Run the serving benchmark (requests per second and p50/p99 latency for files read, files write, workspace create, and changeset propose at 1, 8, and 32 concurrent clients; `tri serve` versus `tri-server`):
+
+```sh
+tri-bench-serving --native native/tri-server/tri-server --output benchmark-results/serving
 ```
 
 The task benchmark uses `benchmarks/tasks/<task-id>/` packages with `task.toml`, `instruction.md`, `environment/`, `tests/`, and `solution/`. These task verifiers complement the workflow benchmark by checking observable Tri behavior such as workspace isolation, hidden-path redaction, and conflict resolution. See [benchmarks/README.md](benchmarks/README.md).

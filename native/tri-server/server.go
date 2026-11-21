@@ -187,13 +187,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, start time.Time, 
 	worker, err := s.pool.Acquire(s.cfg.QueueTimeout)
 	s.metrics.ObserveQueue(time.Since(queued))
 	if err != nil {
-		code, message := "server_busy", "Every worker stayed busy for the queue timeout; retry later."
+		message := "Every worker stayed busy for the queue timeout; retry later."
 		if errors.Is(err, ErrPoolClosed) {
 			message = "The server is shutting down."
 		}
-		s.metrics.ServerError(code)
+		s.metrics.ServerError("server_busy")
 		w.Header().Set("Retry-After", "1")
-		s.writeJSON(w, http.StatusServiceUnavailable, ErrorEnvelope(s.schemaVersion(), s.errorActor(actor, r), NewDiagnostic(code, message, true), start))
+		s.writeJSON(w, http.StatusServiceUnavailable, ErrorEnvelope(s.schemaVersion(), s.errorActor(actor, r), NewDiagnostic("server_busy", message, true), start))
 		return
 	}
 	frame := FrameHeader{Type: "request", ID: s.pool.NextRequestID(), Method: r.Method, Path: r.URL.RequestURI(), Header: headers, Actor: actor}
