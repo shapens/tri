@@ -251,12 +251,14 @@ class RunnerSecretLeaseTests(RunnerPoolBase):
         self.assertEqual(stale["diagnostics"][0]["code"], "policy_denied")
 
     def expire_claim(self, job_id: str) -> None:
-        import sqlite3
-
-        conn = sqlite3.connect(self.root / "server-home" / "tri.sqlite3", timeout=30)
-        with conn:
-            conn.execute("UPDATE run_jobs SET lease_expires_at = '2000-01-01T00:00:00Z' WHERE id = ?", (job_id,))
-        conn.close()
+        # Through the server's store, whatever its metadata backend.
+        with mock.patch.dict(os.environ, {"TRI_HOME": str(self.root / "server-home")}):
+            store = cli.Store(pack_on_close=False)
+        try:
+            with store.conn:
+                store.conn.execute("UPDATE run_jobs SET lease_expires_at = '2000-01-01T00:00:00Z' WHERE id = ?", (job_id,))
+        finally:
+            store.close()
 
     def test_expired_secret_lease_is_refused_at_queue_and_at_delivery(self) -> None:
         short = self.tri("secrets", "request-lease", self.ws, "API_TOKEN", "--env", "API_TOKEN", "--ttl-seconds", "2")["data"]["id"]
