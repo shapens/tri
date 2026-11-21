@@ -11775,6 +11775,11 @@ def mirror_error(exc: gitmirror.GitMirrorError) -> TriError:
     return TriError(exc.code, exc.message, retryable=exc.retryable, **exc.fields)
 
 
+def redact_remote_url(remote: str) -> str:
+    """Never echo credentials embedded in a remote URL (https://token@host/...)."""
+    return re.sub(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@]+@", r"\1***@", remote)
+
+
 def mirror_data(store: Store, row: sqlite3.Row) -> dict[str, Any]:
     target = store.row("SELECT name, snapshot_id FROM targets WHERE id = ?", (row["target_id"],))
     return {
@@ -11782,7 +11787,7 @@ def mirror_data(store: Store, row: sqlite3.Row) -> dict[str, Any]:
         "project": row["project_id"],
         "target": target["name"] if target else None,
         "target_snapshot": target["snapshot_id"] if target else None,
-        "remote": row["remote"],
+        "remote": redact_remote_url(row["remote"]),
         "branch": row["branch"],
         "audience": row["audience"],
         "prefer": row["prefer"],
@@ -12208,7 +12213,7 @@ def cmd_mirror_add(store: Store, args: argparse.Namespace, command: list[str], s
             "INSERT INTO mirrors (id, project_id, target_id, remote, branch, audience, prefer, status, event_cursor, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?)",
             (mirror_id, project["id"], target["id"], remote, args.branch or target["name"], args.audience or DEFAULT_MIRROR_AUDIENCE, args.prefer, args.actor, utcnow()),
         )
-        evt = store.create_event(kind="mirror.created", actor=args.actor, project_id=project["id"], object_refs={"mirror": mirror_id, "target": target["id"], "remote": remote})
+        evt = store.create_event(kind="mirror.created", actor=args.actor, project_id=project["id"], object_refs={"mirror": mirror_id, "target": target["id"], "remote": redact_remote_url(remote)})
     events = [evt]
     diagnostics: list[dict[str, Any]] = []
     if not args.no_sync:

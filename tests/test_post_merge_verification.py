@@ -133,6 +133,14 @@ class PostMergeVerificationTests(unittest.TestCase):
         self.assertEqual(denied["diagnostics"][0]["code"], "policy_denied")
         self.assertEqual(len(self.tri("--actor", "service:ci", "verify", "run", "app")["data"]["processed"]), 1)
 
+    def test_verifications_of_private_changesets_stay_private(self) -> None:
+        merged = self.merge_unchecked("src/a.txt", "a5\n")
+        listed = self.tri("--actor", "agent:outsider", "verify", "list", "app")["data"]
+        self.assertEqual(listed["verifications"], [])
+        self.assertEqual(listed["redacted"], 1)
+        denied = self.tri("--actor", "agent:outsider", "verify", "inspect", merged["data"]["verification"], ok=False)
+        self.assertEqual(denied["diagnostics"][0]["code"], "policy_denied")
+
     def test_mirror_titles_the_revert_commit(self) -> None:
         steps_kind = cli.MIRROR_TARGET_EVENTS
         self.assertIn("changeset.reverted", steps_kind)

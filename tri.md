@@ -294,7 +294,7 @@ Tri is the best agent-native source control only when it wins these measurements
 
 | Measurement | Bar | Status |
 | --- | --- | --- |
-| Parallel attempts from one base | 100 or more agents with isolated files and checks, no shared working directory | fan-out benchmark covers 50 |
+| Parallel attempts from one base | 100 or more agents with isolated files and checks, no shared working directory | fan-out benchmark at 100 attempts, 8 at a time (2,000 source files, 5,000 dependency files): 100 of 100 checks passed; Tri ended at 63 MiB of disk versus 3.0 GiB for Git worktrees, with the same wall time (150 s versus 158 s); `benchmark-results/fanout-100/` |
 | Time to first edit on a large repository | seconds, independent of history size | about 1 s on a 50,000-file tree (workspace create plus first write); partial runs about 1.9 s; first full run after a merge 3.1 s on APFS |
 | Merges per hour under contention | no global lock; same-file disjoint edits merge without a person | contention benchmark, 50 agents 8 at a time on 20 shared files: 24,805 merges/hour, 48 of 50 merged with no review and no lost lines (p95 merge 0.20 s), versus 4,386 for Git pull-rebase-push (19 agents ran out of retries) |
 | Conflict rate per 1,000 merges | lower than path-level merging on the same workload | 40 per 1,000 with line merges versus 420 with path-level merging on the same workload; every line-merge conflict was a deliberate same-line overlap |

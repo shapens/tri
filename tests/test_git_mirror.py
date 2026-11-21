@@ -234,6 +234,11 @@ class GitMirrorTests(unittest.TestCase):
         listed = self.tri("mirror", "list")["data"]["mirrors"]
         self.assertEqual(len(listed), 1)
 
+    def test_remote_credentials_are_never_echoed(self) -> None:
+        self.assertEqual(cli.redact_remote_url("https://x-access-token:ghp_secret@github.com/o/r.git"), "https://***@github.com/o/r.git")
+        self.assertEqual(cli.redact_remote_url("/srv/repo.git"), "/srv/repo.git")
+        self.assertEqual(cli.redact_remote_url("git@github.com:o/r.git"), "git@github.com:o/r.git")
+
     def test_watch_runs_bounded_cycles(self) -> None:
         self.add_mirror()
         self.git_push("src.txt", "watched\n")

@@ -125,6 +125,8 @@ READ_VERBS = (
     "doctor",
     "commands",
     "schema",
+    "fetch",
+    "jobs",
 )
 
 # Read-shaped commands the sweep does not run, and why.
@@ -462,6 +464,14 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
         ["ignore", "list", "app"],
         ["checks", "set-list", "app"],
         ["checks", "set-inspect", "app", "smoke"],
+        ["mirror", "list"],
+        ["mirror", "list", "app", "--all"],
+        ["mirror", "inspect", "app"],
+        ["verify", "list", "app"],
+        ["verify", "list", "app", "--status", "pending"],
+        ["verify", "inspect", "verify_missing"],
+        ["runner", "jobs"],
+        ["runner", "fetch", "job_missing", "--path", "src/app.txt"],
         ["merge-rules", "list", "app"],
         ["merge-rules", "list", "app", "--all"],
         ["merge-rules", "inspect", "app", "docs"],
@@ -512,6 +522,9 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
             argvs.append(["files", "read", ref, path])
             argvs.append(["files", "log", ref, path])
             argvs.append(["files", "blame", ref, path])
+        argvs.append(["files", "fetch", ref, *sum((["--path", path] for path in PROBE_PATHS), [])])
+        argvs.append(["files", "fetch", ref, "--path", HIDDEN_PATH, "--hashes-only"])
+        argvs.append(["files", "fetch", ref, "--path", "src/app.txt", "--hashes-only"])
         argvs.append(["files", "read", ref, HIDDEN_PATH, "--offset", "1", "--limit", "4"])
         argvs.append(["files", "log", ref, "src/app.txt", "--limit", "1"])
     for snapshot in ids["snapshots"]:
