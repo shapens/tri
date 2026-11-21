@@ -27,7 +27,9 @@ from socketserver import ThreadingMixIn
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from tri.auth import TokenAuthority, issue_token, load_token_file, public_record, revoke_tokens
 from tri.ignore import IgnoreRules
+from tri.textmerge import merge_three_way
 from tri.locking import FileLock
 from tri.trees import build_tree_nodes, decode_node, flatten as flatten_tree, is_hierarchical
 from tri.overlay import OverlayMaterialization, overlay_from_payload, prepare_overlay_run, probe_overlay
@@ -63,7 +65,11 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "schema", "usage": "tri schema [name]", "schema": "tri.schema", "description": "Show first JSON schemas used by agent clients."},
     {"name": "batch", "usage": "tri batch <plan.json> [--continue-on-error]", "schema": "tri.batch", "description": "Run a dependent JSON command batch in one local agent round trip."},
     {"name": "doctor", "usage": "tri doctor", "schema": "tri.doctor", "description": "Inspect local Tri store health and command availability."},
-    {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet]", "schema": "tri.api.server", "description": "Run a local JSON HTTP API for agent clients."},
+    {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated]", "schema": "tri.api.server", "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor."},
+    {"name": "auth-issue", "usage": "tri auth issue <actor> --file <tokens.json> [--label <text>]", "schema": "tri.auth.token", "description": "Issue a bearer token bound to one actor; the token is shown once and only its hash is stored."},
+    {"name": "auth-list", "usage": "tri auth list --file <tokens.json>", "schema": "tri.auth.list", "description": "List issued tokens without their secrets."},
+    {"name": "auth-revoke", "usage": "tri auth revoke <token-id-or-actor> --file <tokens.json>", "schema": "tri.auth.list", "description": "Revoke tokens; a running server stops accepting them on its next request."},
+    {"name": "mcp", "usage": "tri mcp", "schema": "tri.mcp.server", "description": "Serve Tri to agent harnesses over the Model Context Protocol (stdio); every call runs as the startup actor."},
     {"name": "objects-inspect", "usage": "tri objects inspect <object>", "schema": "tri.object.inspect", "description": "Inspect any supported typed Tri object id through its policy-aware command."},
     {"name": "actors-inspect", "usage": "tri actors inspect <actor>", "schema": "tri.actor.inspect", "description": "Inspect an actor identity, derived roles, and policy selectors."},
     {"name": "import", "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]", "schema": "tri.import", "description": "Import a Git repo or directory into Tri snapshots."},
@@ -84,6 +90,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "targets-inspect", "usage": "tri targets inspect <project> <target-or-id> | <target>", "schema": "tri.targets.inspect", "description": "Inspect one project target pointer."},
     {"name": "targets-refresh", "usage": "tri targets refresh <project> <target> [--ref <ref>] [--expect-snapshot <snapshot>]", "schema": "tri.targets.refresh", "description": "Refresh a target from the imported project root."},
     {"name": "snapshots-list", "usage": "tri snapshots list <project>", "schema": "tri.snapshot.list", "description": "List policy-readable snapshots for a project."},
+    {"name": "snapshots-merge-base", "usage": "tri snapshots merge-base <ref> <ref>", "schema": "tri.snapshot.merge_base", "description": "Nearest common ancestor snapshot of two workspaces, changesets, targets, or snapshots."},
     {"name": "snapshots-inspect", "usage": "tri snapshots inspect <snapshot>", "schema": "tri.snapshot.inspect", "description": "Inspect immutable snapshot provenance."},
     {"name": "trees-inspect", "usage": "tri trees inspect <tree>", "schema": "tri.tree.inspect", "description": "Inspect a policy-visible content tree and its readable file entries."},
     {"name": "blobs-inspect", "usage": "tri blobs inspect <blob>", "schema": "tri.blob.inspect", "description": "Inspect a policy-visible content blob without reading raw bytes by id."},
@@ -126,6 +133,8 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "files-write", "usage": "tri files write <workspace> <path> (--text <text> | --body <file>) [--expect-head <snapshot>]", "schema": "tri.files.write", "description": "Write a file through the Tri file API."},
     {"name": "files-delete", "usage": "tri files delete <workspace> <path> [--expect-head <snapshot>]", "schema": "tri.files.delete", "description": "Delete a file through the Tri file API."},
     {"name": "files-move", "usage": "tri files move <workspace> <src> <dest> [--expect-head <snapshot>]", "schema": "tri.files.move", "description": "Move a file through the Tri file API."},
+    {"name": "files-log", "usage": "tri files log <ref> <path> [--limit <n>]", "schema": "tri.files.log", "description": "Path history along the first-parent snapshot chain, with change provenance and no checkout."},
+    {"name": "files-blame", "usage": "tri files blame <ref> <path>", "schema": "tri.files.blame", "description": "Attribute each line of a text file to the snapshot, actor, and changeset that introduced it, with no checkout."},
     {"name": "files-search", "usage": "tri files search <workspace-or-snapshot> <query> [--glob <glob>] [--limit <n>] [--case-sensitive]", "schema": "tri.files.search", "description": "Search visible text files through the Tri file API."},
     {"name": "operations-list", "usage": "tri operations list <workspace-or-changeset>", "schema": "tri.operation.list", "description": "List policy-readable workspace mutation operations."},
     {"name": "operations-inspect", "usage": "tri operations inspect <operation>", "schema": "tri.operation.inspect", "description": "Inspect one policy-gated operation provenance record."},
@@ -135,6 +144,10 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "checks-list", "usage": "tri checks list <workspace-or-changeset>", "schema": "tri.check.list", "description": "List check runs for a workspace or changeset."},
     {"name": "checks-inspect", "usage": "tri checks inspect <check>", "schema": "tri.check.inspect", "description": "Inspect one structured check run."},
     {"name": "checks-set-create", "usage": "tri checks set-create <project> <name> --required-check <cmd>", "schema": "tri.check_set.inspect", "description": "Create a reusable project required-check set."},
+    {"name": "merge-rules-add", "usage": "tri merge-rules add <project> <name> --path <glob> [--path <glob>] [--exclude <glob>] [--allow <selector>] [--max-files <n>]", "schema": "tri.merge_rule.inspect", "description": "Maintainer rule letting checked changesets that only touch matching paths merge without a human review."},
+    {"name": "merge-rules-list", "usage": "tri merge-rules list <project> [--all]", "schema": "tri.merge_rule.list", "description": "List project merge rules."},
+    {"name": "merge-rules-inspect", "usage": "tri merge-rules inspect <project> <name-or-id>", "schema": "tri.merge_rule.inspect", "description": "Inspect one merge rule."},
+    {"name": "merge-rules-remove", "usage": "tri merge-rules remove <project> <name-or-id>", "schema": "tri.merge_rule.inspect", "description": "Remove a merge rule; later merges need an approved review again."},
     {"name": "checks-set-list", "usage": "tri checks set-list <project>", "schema": "tri.check_set.list", "description": "List reusable required-check sets for a project."},
     {"name": "checks-set-inspect", "usage": "tri checks set-inspect <project> <name-or-id> | <check-set>", "schema": "tri.check_set.inspect", "description": "Inspect a reusable required-check set."},
     {"name": "checks-artifacts", "usage": "tri checks artifacts <check>", "schema": "tri.check.artifacts", "description": "List artifacts produced by a check run."},
@@ -149,7 +162,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "changeset-ready", "usage": "tri changeset ready <changeset> [--reason <text>]", "schema": "tri.changeset.lifecycle", "description": "Move a draft or changes-requested changeset back to ready for review."},
     {"name": "changeset-discard", "usage": "tri changeset discard <changeset> [--reason <text>]", "schema": "tri.changeset.lifecycle", "description": "Discard a draft or ready changeset while keeping it readable for audit."},
     {"name": "changeset-supersede", "usage": "tri changeset supersede <changeset> --by <replacement> [--reason <text>]", "schema": "tri.changeset.lifecycle", "description": "Mark a ready or reviewing changeset as superseded by a replacement changeset."},
-    {"name": "changeset-merge", "usage": "tri changeset merge <changeset> --target <target>", "schema": "tri.changeset.merge", "description": "Policy-gated merge of an approved changeset into a Tri target."},
+    {"name": "changeset-merge", "usage": "tri changeset merge <changeset> --target <target> [--retry <n>]", "schema": "tri.changeset.merge", "description": "Policy-gated merge of an approved changeset into a Tri target."},
     {"name": "changeset-compare", "usage": "tri changeset compare <changeset...>", "schema": "tri.changeset.compare", "description": "Compare multiple agent attempts as changesets."},
     {"name": "review-create", "usage": "tri review create <changeset> [--reviewers <principal>]", "schema": "tri.review.create", "description": "Create a review object for a changeset."},
     {"name": "review-inspect", "usage": "tri review inspect <review>", "schema": "tri.review.inspect", "description": "Inspect review decision surface."},
@@ -257,6 +270,8 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
             "redacted_changeset",
             "unresolved_conflict",
             "invalid_command",
+            "unauthenticated",
+            "actor_mismatch",
         ],
     },
     "tri.commands": {"required": ["schema_version", "commands"]},
@@ -329,6 +344,14 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.check.compare": {"required": ["checks"]},
     "tri.check_set.inspect": {"required": ["id", "project", "name", "required_checks", "created_by", "created_at"]},
     "tri.check_set.list": {"required": ["project", "check_sets"]},
+    "tri.auth.token": {"required": ["id", "actor", "token", "file", "shown_once"]},
+    "tri.auth.list": {"required": ["file", "tokens"]},
+    "tri.mcp.server": {"required": ["protocol_version", "tools", "actor"]},
+    "tri.files.log": {"required": ["ref", "snapshot", "path", "entries", "walked", "truncated"]},
+    "tri.files.blame": {"required": ["ref", "snapshot", "path", "line_count", "ranges", "boundary", "walked", "truncated"]},
+    "tri.snapshot.merge_base": {"required": ["left", "right", "merge_base", "redacted"]},
+    "tri.merge_rule.inspect": {"required": ["id", "project", "name", "path_globs", "exclude_globs", "allow", "max_files", "status", "created_by", "created_at"]},
+    "tri.merge_rule.list": {"required": ["project", "merge_rules"]},
     "tri.review.create": {"required": ["id", "changeset", "status", "reviewers", "check_summary", "export_preview"]},
     "tri.review.inspect": {"required": ["id", "changeset", "redacted_changeset", "workspace", "redacted_workspace", "status", "reviewers", "approvals", "approved_reviewers", "pending_reviewers", "maintainer_override", "check_summary", "risk_summary", "export_preview", "changeset_summary", "task", "task_run", "actor_identity", "commands", "checks", "artifacts", "policy_findings", "attached_policy_findings", "attached_check_summaries", "visibility_impact", "comment_threads", "unresolved_risks", "actions", "created_at"]},
     "tri.review_action.inspect": {"required": ["id", "review", "actor", "kind", "body", "metadata", "created_at"]},
@@ -938,6 +961,19 @@ class Store:
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS merge_rules (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              path_globs_json TEXT NOT NULL,
+              exclude_globs_json TEXT NOT NULL DEFAULT '[]',
+              allow_json TEXT NOT NULL,
+              max_files INTEGER,
+              status TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              removed_at TEXT
             );
             CREATE TABLE IF NOT EXISTS advisories (
               id TEXT PRIMARY KEY,
@@ -2386,6 +2422,7 @@ def run_batch_payload(
     *,
     default_actor: str,
     start: float | None = None,
+    pinned_actor: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     commands = payload.get("commands")
     if commands is None:
@@ -2414,8 +2451,8 @@ def run_batch_payload(
         argv = [resolve_batch_arg(part, bindings) for part in raw_argv]
         if argv and argv[0] == "tri":
             argv = argv[1:]
-        if argv and argv[0] == "serve":
-            raise TriError("invalid_command", "Batch commands cannot start a server.", index=index)
+        if argv and argv[0] in API_BLOCKED_COMMANDS:
+            raise TriError("invalid_command", "This command is not available in a batch.", object=argv[0], index=index)
         if argv and argv[0] == "batch":
             raise TriError("invalid_command", "Nested batch commands are not supported.", index=index)
 
@@ -2429,8 +2466,10 @@ def run_batch_payload(
         item_actor = item.get("actor", payload.get("actor", default_actor))
         if item_actor is not None and not isinstance(item_actor, str):
             raise TriError("invalid_command", "Batch actor must be a string.", index=index)
+        if pinned_actor is not None and item_actor and item_actor != pinned_actor:
+            raise_actor_mismatch(item_actor, pinned_actor)
         command_started = time.perf_counter()
-        output, status = execute_argv(argv, actor=item_actor or default_actor, start=time.time(), store=store)
+        output, status = execute_argv(argv, actor=item_actor or default_actor, start=time.time(), store=store, pinned_actor=pinned_actor)
         wall_ms = round((time.perf_counter() - command_started) * 1000, 3)
         alias = item.get("as")
         if alias is not None and not isinstance(alias, str):
@@ -5768,6 +5807,7 @@ def merge_entries(
     base: dict[str, dict[str, Any]],
     head: dict[str, dict[str, Any]],
     target: dict[str, dict[str, Any]],
+    text_merged: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[str]]:
     merged: dict[str, dict[str, Any]] = {}
     conflicts: list[dict[str, Any]] = []
@@ -5776,12 +5816,17 @@ def merge_entries(
         base_entry = base.get(path)
         head_entry = head.get(path)
         target_entry = target.get(path)
+        line_merged = None
         if head_entry == target_entry:
             chosen = head_entry
         elif head_entry == base_entry:
             chosen = target_entry
         elif target_entry == base_entry:
             chosen = head_entry
+        elif (line_merged := line_merge_entry(store, base_entry, head_entry, target_entry)) is not None:
+            chosen = line_merged
+            if text_merged is not None:
+                text_merged.append(path)
         else:
             conflicts.append(
                 {
@@ -5798,6 +5843,34 @@ def merge_entries(
         if chosen != head_entry:
             changed.append(path)
     return dict(sorted(merged.items())), conflicts, changed
+
+
+def line_merge_entry(
+    store: Store,
+    base_entry: dict[str, Any] | None,
+    head_entry: dict[str, Any] | None,
+    target_entry: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Merge disjoint line edits to one text file; None means a real conflict."""
+    if base_entry is None or head_entry is None or target_entry is None:
+        return None
+    modes = {entry.get("mode") for entry in (base_entry, head_entry, target_entry)}
+    if not modes <= {"100644", "100755"}:
+        return None
+    if head_entry.get("mode") == base_entry.get("mode"):
+        mode = target_entry.get("mode")
+    elif target_entry.get("mode") == base_entry.get("mode") or target_entry.get("mode") == head_entry.get("mode"):
+        mode = head_entry.get("mode")
+    else:
+        return None
+    try:
+        merged = merge_three_way(store.read_blob(base_entry["blob"]), store.read_blob(head_entry["blob"]), store.read_blob(target_entry["blob"]))
+    except TriError:
+        return None
+    if merged is None:
+        return None
+    blob = store.put_blob(merged)
+    return {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": mode}
 
 
 def conflict_object_for_entry(entry: dict[str, Any] | None) -> dict[str, Any]:
@@ -7946,7 +8019,8 @@ def cmd_workspace_update(store: Store, args: argparse.Namespace, command: list[s
     base_entries = store.load_snapshot_tree(ws["base_snapshot_id"])
     head_entries = store.load_snapshot_tree(ws["head_snapshot_id"])
     target_entries = store.load_snapshot_tree(target_snapshot)
-    merged_entries, conflicts, changed = merge_entries(store, base_entries, head_entries, target_entries)
+    text_merged: list[str] = []
+    merged_entries, conflicts, changed = merge_entries(store, base_entries, head_entries, target_entries, text_merged)
     if conflicts:
         conflict_id, evt = create_workspace_conflict(store, ws, target_ref=args.from_ref, target_snapshot=target_snapshot, conflicts=conflicts, actor=args.actor)
         conflict_view = workspace_conflict_data(store, store.get_workspace_conflict(conflict_id))["conflicts"]
@@ -7993,7 +8067,7 @@ def cmd_workspace_update(store: Store, args: argparse.Namespace, command: list[s
             project_id=ws["project_id"],
             workspace_id=ws["id"],
             task_id=ws["task_id"],
-            object_refs={"operation": op_id, "snapshot": snapshot["id"], "target_snapshot": target_snapshot, "paths": changed},
+            object_refs={"operation": op_id, "snapshot": snapshot["id"], "target_snapshot": target_snapshot, "paths": changed, "text_merged_paths": text_merged},
             input_fingerprints={"base_snapshot": ws["base_snapshot_id"], "head_snapshot": ws["head_snapshot_id"]},
             output_fingerprints={"base_snapshot": target_snapshot, "head_snapshot": snapshot["id"]},
         )
@@ -8003,7 +8077,7 @@ def cmd_workspace_update(store: Store, args: argparse.Namespace, command: list[s
         actor=args.actor,
         start=start,
         events=[evt],
-        data={"workspace": ws["id"], "operation": op_id, "base_snapshot": target_snapshot, "head_snapshot": snapshot["id"], "changed_paths": changed, "conflicts": []},
+        data={"workspace": ws["id"], "operation": op_id, "base_snapshot": target_snapshot, "head_snapshot": snapshot["id"], "changed_paths": changed, "text_merged_paths": text_merged, "conflicts": []},
     )
 
 
@@ -8575,6 +8649,211 @@ def cmd_files_stat(store: Store, args: argparse.Namespace, command: list[str], s
     snapshot, hidden_patterns = resolve_ref_context(store, args.ref, actor=args.actor, action="workspace.read")
     path = normalize_path(args.path)
     return envelope("tri.files.stat", command, actor=args.actor, start=start, data=file_stat_data(store, snapshot, path, hidden_patterns))
+
+
+HISTORY_MAX_WALK = 5000
+
+
+def resolve_history_ref(store: Store, ref: str, *, actor: str) -> tuple[str, list[str]]:
+    if ref.startswith("target_"):
+        row = store.row("SELECT * FROM targets WHERE id = ?", (ref,))
+        if row is None:
+            raise TriError("path_not_found", "Target not found.", object=ref)
+        require_snapshot_access(store, row["snapshot_id"], actor=actor, action="snapshot.read")
+        return row["snapshot_id"], hidden_patterns_for_snapshot(store, row["snapshot_id"], actor=actor)
+    return resolve_ref_context(store, ref, actor=actor, action="workspace.read")
+
+
+def snapshot_parents(store: Store, snapshot: str) -> list[str]:
+    return loads(snapshot_row(store, snapshot)["parent_ids_json"], [])
+
+
+def snapshot_readable(store: Store, snapshot: str, *, actor: str) -> bool:
+    try:
+        require_snapshot_access(store, snapshot, actor=actor, action="snapshot.read")
+    except TriError:
+        return False
+    return True
+
+
+def history_provenance(store: Store, snapshot: str) -> dict[str, Any]:
+    row = snapshot_row(store, snapshot)
+    metadata = loads(row["metadata_json"], {})
+    data = {
+        "snapshot": row["id"],
+        "parents": loads(row["parent_ids_json"], []),
+        "source": row["source"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+    }
+    for key in ("changeset", "workspace", "operation", "target", "git_commit"):
+        if metadata.get(key):
+            data[key] = metadata[key]
+    return data
+
+
+def first_parent_history(store: Store, snapshot: str, *, actor: str) -> tuple[list[str], dict[str, Any] | None]:
+    """Snapshots along the first-parent chain, stopping at the first one the actor cannot read."""
+    chain = [snapshot]
+    truncated = None
+    current = snapshot
+    while len(chain) < HISTORY_MAX_WALK:
+        parents = snapshot_parents(store, current)
+        if not parents:
+            return chain, None
+        parent = parents[0]
+        if not snapshot_readable(store, parent, actor=actor):
+            return chain, {"reason": "policy_denied", "at": "redacted_snapshot"}
+        chain.append(parent)
+        current = parent
+    if snapshot_parents(store, current):
+        truncated = {"reason": "walk_limit", "limit": HISTORY_MAX_WALK}
+    return chain, truncated
+
+
+def require_visible_history_path(path: str, hidden_patterns: list[str]) -> None:
+    visible, reason = path_visibility(path, hidden_patterns)
+    if not visible:
+        raise TriError("policy_denied", "Path is hidden by policy.", object=path, reason=reason)
+
+
+def cmd_files_log(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    snapshot, hidden_patterns = resolve_history_ref(store, args.ref, actor=args.actor)
+    path = normalize_path(args.path)
+    require_visible_history_path(path, hidden_patterns)
+    limit = max(1, args.limit)
+    chain, truncated = first_parent_history(store, snapshot, actor=args.actor)
+    entries: list[dict[str, Any]] = []
+    for index, current in enumerate(chain):
+        entry = store.load_snapshot_tree(current).get(path)
+        parent_snapshot = chain[index + 1] if index + 1 < len(chain) else None
+        if parent_snapshot is None and truncated is None:
+            parent_entry = None
+        elif parent_snapshot is None:
+            break
+        else:
+            parent_entry = store.load_snapshot_tree(parent_snapshot).get(path)
+        if entry == parent_entry:
+            continue
+        change = "added" if parent_entry is None else "deleted" if entry is None else "modified"
+        entries.append({**history_provenance(store, current), "change": change, "blob": entry["blob"] if entry else None, "size": entry["size"] if entry else None})
+        if len(entries) >= limit:
+            break
+    return envelope(
+        "tri.files.log",
+        command,
+        actor=args.actor,
+        start=start,
+        data={"ref": args.ref, "snapshot": snapshot, "path": path, "entries": entries, "walked": len(chain), "truncated": truncated},
+    )
+
+
+def blob_lines(store: Store, entry: dict[str, Any] | None) -> list[bytes]:
+    if entry is None:
+        return []
+    return store.read_blob(entry["blob"]).splitlines(keepends=True)
+
+
+def cmd_files_blame(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    snapshot, hidden_patterns = resolve_history_ref(store, args.ref, actor=args.actor)
+    path = normalize_path(args.path)
+    require_visible_history_path(path, hidden_patterns)
+    head_entry = store.load_snapshot_tree(snapshot).get(path)
+    if head_entry is None:
+        raise TriError("path_not_found", "Path not found.", object=path)
+    if blob_is_binary(store, head_entry["blob"]):
+        raise TriError("invalid_command", "Blame needs a text file.", object=path)
+    chain, truncated = first_parent_history(store, snapshot, actor=args.actor)
+    head_lines = blob_lines(store, head_entry)
+    owner: list[str | None] = [None] * len(head_lines)
+    # pending maps a head line index to its index in the version being examined.
+    pending = {index: index for index in range(len(head_lines))}
+    current_entry = head_entry
+    current_lines = head_lines
+    boundary = None
+    for index, current in enumerate(chain):
+        if not pending:
+            break
+        if index + 1 >= len(chain):
+            # Lines that survive to the root were introduced there. When the walk
+            # stopped at an unreadable snapshot, their origin stays redacted.
+            if truncated is None:
+                boundary = current
+                for line in pending:
+                    owner[line] = current
+            pending = {}
+            break
+        parent_entry = store.load_snapshot_tree(chain[index + 1]).get(path)
+        if parent_entry == current_entry:
+            continue
+        parent_lines = blob_lines(store, parent_entry)
+        mapping: dict[int, int] = {}
+        matcher = difflib.SequenceMatcher(None, parent_lines, current_lines, autojunk=False)
+        for block in matcher.get_matching_blocks():
+            for offset in range(block.size):
+                mapping[block.b + offset] = block.a + offset
+        still_pending = {}
+        for line, position in pending.items():
+            if position in mapping:
+                still_pending[line] = mapping[position]
+            else:
+                owner[line] = current
+        pending = still_pending
+        current_entry = parent_entry
+        current_lines = parent_lines
+    ranges: list[dict[str, Any]] = []
+    provenance: dict[str, dict[str, Any]] = {}
+    for line, snap in enumerate(owner, start=1):
+        if ranges and ranges[-1]["snapshot"] == snap and ranges[-1]["end"] == line - 1:
+            ranges[-1]["end"] = line
+            continue
+        ranges.append({"start": line, "end": line, "snapshot": snap})
+        if snap is not None and snap not in provenance:
+            provenance[snap] = history_provenance(store, snap)
+    for item in ranges:
+        if item["snapshot"] is not None:
+            details = provenance[item["snapshot"]]
+            item.update({key: details[key] for key in ("created_by", "created_at", "source", "changeset", "git_commit") if key in details})
+        else:
+            item["redacted"] = True
+    return envelope(
+        "tri.files.blame",
+        command,
+        actor=args.actor,
+        start=start,
+        data={"ref": args.ref, "snapshot": snapshot, "path": path, "line_count": len(head_lines), "ranges": ranges, "boundary": boundary, "walked": len(chain), "truncated": truncated},
+    )
+
+
+def snapshot_ancestor_distances(store: Store, snapshot: str) -> dict[str, int]:
+    distances = {snapshot: 0}
+    frontier = [snapshot]
+    while frontier and len(distances) < HISTORY_MAX_WALK * 4:
+        next_frontier = []
+        for current in frontier:
+            for parent in snapshot_parents(store, current):
+                if parent not in distances:
+                    distances[parent] = distances[current] + 1
+                    next_frontier.append(parent)
+        frontier = next_frontier
+    return distances
+
+
+def cmd_snapshots_merge_base(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    left, _ = resolve_history_ref(store, args.left, actor=args.actor)
+    right, _ = resolve_history_ref(store, args.right, actor=args.actor)
+    left_distances = snapshot_ancestor_distances(store, left)
+    right_distances = snapshot_ancestor_distances(store, right)
+    common = [snap for snap in left_distances if snap in right_distances]
+    base = min(common, key=lambda snap: (left_distances[snap] + right_distances[snap], left_distances[snap]), default=None)
+    redacted = False
+    if base is not None and not snapshot_readable(store, base, actor=args.actor):
+        base = None
+        redacted = True
+    data: dict[str, Any] = {"left": left, "right": right, "merge_base": base, "redacted": redacted}
+    if base is not None:
+        data.update({"left_distance": left_distances[base], "right_distance": right_distances[base], "provenance": history_provenance(store, base)})
+    return envelope("tri.snapshot.merge_base", command, actor=args.actor, start=start, data=data)
 
 
 def cmd_files_read(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -10435,6 +10714,112 @@ def cmd_checks_compare(store: Store, args: argparse.Namespace, command: list[str
     )
 
 
+DEFAULT_MERGE_RULE_ALLOW = ["role:agent", "role:human", "role:service", "role:maintainer"]
+
+
+def merge_rule_data(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "project": row["project_id"],
+        "name": row["name"],
+        "path_globs": loads(row["path_globs_json"], []),
+        "exclude_globs": loads(row["exclude_globs_json"], []),
+        "allow": loads(row["allow_json"], []),
+        "max_files": row["max_files"],
+        "status": row["status"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "removed_at": row["removed_at"],
+    }
+
+
+def resolve_merge_rule(store: Store, project_id: str, name_or_id: str) -> sqlite3.Row:
+    row = store.row(
+        "SELECT * FROM merge_rules WHERE project_id = ? AND (id = ? OR name = ?) ORDER BY status = 'active' DESC, created_at DESC",
+        (project_id, name_or_id, name_or_id),
+    )
+    if row is None:
+        raise TriError("path_not_found", "Merge rule not found.", object=name_or_id)
+    return row
+
+
+def merge_rule_matches(rule: dict[str, Any], *, selectors: set[str], changed: list[str]) -> bool:
+    if not changed or not selectors & set(rule["allow"]):
+        return False
+    if rule["max_files"] is not None and len(changed) > rule["max_files"]:
+        return False
+    for path in changed:
+        if is_secret_like_path(path):
+            return False
+        if not path_matches_hidden(path, rule["path_globs"]) or path_matches_hidden(path, rule["exclude_globs"]):
+            return False
+    return True
+
+
+def matching_merge_rule(store: Store, cs: sqlite3.Row, *, actor: str, changed: list[str]) -> dict[str, Any] | None:
+    """A merge rule replaces human review for small changes in declared paths.
+
+    Every other merge gate (checks, conflicts, secrets, hidden paths, stacks)
+    still applies; advisory-linked changesets never merge through a rule.
+    """
+    if cs["advisory_id"] or not changed:
+        return None
+    selectors = set(actor_selectors(actor))
+    for row in store.rows("SELECT * FROM merge_rules WHERE project_id = ? AND status = 'active' ORDER BY created_at, rowid", (cs["project_id"],)):
+        rule = merge_rule_data(row)
+        if merge_rule_matches(rule, selectors=selectors, changed=changed):
+            return rule
+    return None
+
+
+def require_maintainer(actor: str, *, action: str, object_id: str, message: str) -> None:
+    if "role:maintainer" not in actor_selectors(actor):
+        raise TriError("policy_denied", message, object=object_id, action=action, required_grant="role:maintainer")
+
+
+def cmd_merge_rules_add(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="merge_rule.create", object_id=args.project, message="Only maintainers can create merge rules.")
+    project = store.get_project(args.project)
+    globs = [normalize_path(glob) for glob in args.path or []]
+    if not globs:
+        raise TriError("invalid_command", "A merge rule requires at least one --path glob.")
+    if args.max_files is not None and args.max_files < 1:
+        raise TriError("invalid_command", "--max-files must be at least 1.")
+    allow = sorted(set(args.allow or DEFAULT_MERGE_RULE_ALLOW))
+    if store.row("SELECT id FROM merge_rules WHERE project_id = ? AND name = ? AND status = 'active'", (project["id"], args.name)):
+        raise TriError("invalid_command", "An active merge rule with this name already exists.", object=args.name)
+    rule_id = new_id("mrule")
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO merge_rules (id, project_id, name, path_globs_json, exclude_globs_json, allow_json, max_files, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+            (rule_id, project["id"], args.name, dumps(globs), dumps([normalize_path(glob) for glob in args.exclude or []]), dumps(allow), args.max_files, args.actor, utcnow()),
+        )
+        evt = store.create_event(kind="merge_rule.created", actor=args.actor, project_id=project["id"], object_refs={"merge_rule": rule_id, "name": args.name})
+    return envelope("tri.merge_rule.inspect", command, actor=args.actor, start=start, events=[evt], data=merge_rule_data(resolve_merge_rule(store, project["id"], rule_id)))
+
+
+def cmd_merge_rules_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    project = store.get_project(args.project)
+    rows = store.rows("SELECT * FROM merge_rules WHERE project_id = ? ORDER BY created_at, rowid", (project["id"],))
+    rules = [merge_rule_data(row) for row in rows if args.all or row["status"] == "active"]
+    return envelope("tri.merge_rule.list", command, actor=args.actor, start=start, data={"project": project["id"], "merge_rules": rules})
+
+
+def cmd_merge_rules_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    project = store.get_project(args.project)
+    return envelope("tri.merge_rule.inspect", command, actor=args.actor, start=start, data=merge_rule_data(resolve_merge_rule(store, project["id"], args.name)))
+
+
+def cmd_merge_rules_remove(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="merge_rule.remove", object_id=args.project, message="Only maintainers can remove merge rules.")
+    project = store.get_project(args.project)
+    row = resolve_merge_rule(store, project["id"], args.name)
+    with store.conn:
+        store.conn.execute("UPDATE merge_rules SET status = 'removed', removed_at = ? WHERE id = ?", (utcnow(), row["id"]))
+        evt = store.create_event(kind="merge_rule.removed", actor=args.actor, project_id=project["id"], object_refs={"merge_rule": row["id"], "name": row["name"]})
+    return envelope("tri.merge_rule.inspect", command, actor=args.actor, start=start, events=[evt], data=merge_rule_data(resolve_merge_rule(store, project["id"], row["id"])))
+
+
 def cmd_check_set_create(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     if "role:maintainer" not in actor_selectors(args.actor):
         raise TriError("policy_denied", "Only maintainers can create project check sets.", object=args.project, action="check_set.create", required_grant="role:maintainer")
@@ -11432,6 +11817,24 @@ def cmd_changeset_revalidate(store: Store, args: argparse.Namespace, command: li
 
 
 def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    # Concurrent merges race on one compare-and-swap of the target row. A loser
+    # recomputes against the new target instead of failing back to the agent.
+    retries = max(0, getattr(args, "retry", 0) or 0)
+    attempt = 0
+    while True:
+        try:
+            output = changeset_merge_once(store, args, command, start)
+        except TriError as exc:
+            if exc.diagnostic["code"] != "stale_target_snapshot" or attempt >= retries:
+                raise
+            attempt += 1
+            time.sleep(min(0.05 * attempt, 0.5))
+            continue
+        output["data"]["merge_attempts"] = attempt + 1
+        return output
+
+
+def changeset_merge_once(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     cs = store.get_changeset(args.changeset)
     target = resolve_target_row(store, cs["project_id"], args.target)
     decision, diagnostics = evaluate_export_policy(store, cs, actor=args.actor, action="changeset.merge")
@@ -11459,6 +11862,7 @@ def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[st
     previous_snapshot = target["snapshot_id"]
     base_snapshot = cs["base_snapshot_id"]
     head_snapshot = cs["head_snapshot_id"]
+    text_merged: list[str] = []
     if previous_snapshot == head_snapshot:
         with store.conn:
             store.conn.execute("UPDATE changesets SET status = ? WHERE id = ?", ("merged", cs["id"]))
@@ -11489,7 +11893,7 @@ def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[st
         base_entries = store.load_snapshot_tree(base_snapshot)
         head_entries = store.load_snapshot_tree(head_snapshot)
         target_entries = store.load_snapshot_tree(previous_snapshot)
-        merged_entries, conflicts, _ = merge_entries(store, base_entries, head_entries, target_entries)
+        merged_entries, conflicts, _ = merge_entries(store, base_entries, head_entries, target_entries, text_merged)
         if conflicts:
             diagnostic = TriError(
                 "conflict_required",
@@ -11526,7 +11930,7 @@ def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[st
                 parents=[previous_snapshot, head_snapshot],
                 source="merge",
                 actor=args.actor,
-                metadata={"changeset": cs["id"], "target": target["name"], "operation": "changeset_merge"},
+                metadata={"changeset": cs["id"], "target": target["name"], "operation": "changeset_merge", "text_merged_paths": text_merged},
             )
         merged_snapshot = snapshot["id"]
         mode = "merge"
@@ -11549,7 +11953,7 @@ def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[st
             actor=args.actor,
             project_id=cs["project_id"],
             workspace_id=cs["workspace_id"],
-            object_refs={"changeset": cs["id"], "target": target["id"], "target_name": target["name"], "snapshot": merged_snapshot, "previous_snapshot": previous_snapshot, "paths": changed, "mode": mode},
+            object_refs={"changeset": cs["id"], "target": target["id"], "target_name": target["name"], "snapshot": merged_snapshot, "previous_snapshot": previous_snapshot, "paths": changed, "text_merged_paths": text_merged, "mode": mode},
             input_fingerprints={"target_snapshot": previous_snapshot, "changeset_head": head_snapshot},
             output_fingerprints={"target_snapshot": merged_snapshot},
             policy_result=decision,
@@ -11560,7 +11964,7 @@ def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[st
         actor=args.actor,
         start=start,
         events=[policy_event, evt],
-        data={"changeset": cs["id"], "target": target["name"], "status": "merged", "mode": mode, "previous_snapshot": previous_snapshot, "snapshot": merged_snapshot, "changed_paths": changed, "conflicts": []},
+        data={"changeset": cs["id"], "target": target["name"], "status": "merged", "mode": mode, "previous_snapshot": previous_snapshot, "snapshot": merged_snapshot, "changed_paths": changed, "text_merged_paths": text_merged, "conflicts": [], "merge_rule": decision["review"]["merge_rule"]},
     )
 
 
@@ -12294,7 +12698,12 @@ def evaluate_export_policy(
         review = store.get_review(review_id)
         if review["status"] == "approved":
             approved_reviews.append(review_id)
-    if not approved_reviews:
+    merge_rule = None
+    if not approved_reviews and action == "changeset.merge":
+        merge_rule = matching_merge_rule(store, cs, actor=actor, changed=changed)
+        if merge_rule is not None:
+            grants.append(f"merge_rule:{merge_rule['id']}")
+    if not approved_reviews and merge_rule is None:
         diagnostics.append(decision_denial("missing_review_approval", "An approved review is required before export.", object=cs["id"]))
         denials.append("missing_review_approval")
     overrideable = [diagnostic for diagnostic in diagnostics if diagnostic["code"] in ("missing_required_check", "missing_review_approval")]
@@ -12325,7 +12734,7 @@ def evaluate_export_policy(
             "latest_required": [check["id"] for check in latest_checks],
             "passed": sum(1 for check in latest_checks if check["status"] == "passed"),
         },
-        "review": {"approved": bool(approved_reviews), "approved_reviews": approved_reviews},
+        "review": {"approved": bool(approved_reviews), "approved_reviews": approved_reviews, "merge_rule": merge_rule["id"] if merge_rule else None},
         "stack": visible_stack,
         "advisory": advisory_ref,
         "changeset_lifecycle": changeset_lifecycle,
@@ -14162,6 +14571,7 @@ def cmd_changeset_compare(store: Store, args: argparse.Namespace, command: list[
 
 class TriHTTPServer(ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    authority: TokenAuthority | None = None
 
     def server_bind(self) -> None:
         # HTTPServer.server_bind resolves socket.getfqdn(host), a reverse DNS
@@ -14281,14 +14691,60 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             raise TriError("invalid_command", f"Invalid JSON body: {exc.msg}")
 
+    pinned_actor: str | None = None
+
+    def authenticate(self, start: float) -> bool:
+        """With a token file, bind the request to the token's actor or refuse it."""
+        self.pinned_actor = None
+        authority = getattr(self.server, "authority", None)
+        if authority is None:
+            return True
+        header = self.headers.get("Authorization", "")
+        token = header[7:].strip() if header[:7].lower() == "bearer " else None
+        actor = authority.actor_for(token)
+        if actor is None:
+            self.write_json(
+                401,
+                envelope(
+                    "tri.error",
+                    ["tri", "serve", "request"],
+                    ok=False,
+                    actor="actor_local",
+                    start=start,
+                    diagnostics=[TriError("unauthenticated", "A valid bearer token is required.").diagnostic],
+                ),
+            )
+            return False
+        claimed = self.headers.get("X-Tri-Actor")
+        if claimed and claimed != actor:
+            self.write_json(
+                403,
+                envelope(
+                    "tri.error",
+                    ["tri", "serve", "request"],
+                    ok=False,
+                    actor=actor,
+                    start=start,
+                    diagnostics=[TriError("actor_mismatch", "This client is authenticated as a different actor.", object=claimed, authenticated_actor=actor).diagnostic],
+                ),
+            )
+            return False
+        self.pinned_actor = actor
+        return True
+
     def actor_from_request(self, payload: dict[str, Any] | None = None) -> str | None:
-        if payload and isinstance(payload.get("actor"), str):
-            return payload["actor"]
+        claimed = payload["actor"] if payload and isinstance(payload.get("actor"), str) else None
+        if self.pinned_actor is not None:
+            if claimed and claimed != self.pinned_actor:
+                raise_actor_mismatch(claimed, self.pinned_actor)
+            return self.pinned_actor
+        if claimed:
+            return claimed
         header = self.headers.get("X-Tri-Actor")
         return header if header else None
 
     def run_get_command(self, start: float, argv: list[str]) -> bool:
-        output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False)
+        output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
         self.write_json(200, output)
         return True
 
@@ -14526,6 +14982,8 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         start = time.time()
         parsed = urlparse(self.path)
+        if parsed.path not in ("/health", "/v0/health") and not self.authenticate(start):
+            return
         if parsed.path in ("/v0", "/v0/"):
             host, port = self.server.server_address
             self.write_json(
@@ -14542,22 +15000,22 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path in ("/health", "/v0/health"):
             store = Store(pack_on_close=False)
             try:
-                data = {"status": "ok", "home": str(store.home), "schema_version": SCHEMA_VERSION}
+                data = {"status": "ok", "home": None if self.server.authority else str(store.home), "schema_version": SCHEMA_VERSION, "auth": "bearer" if self.server.authority else "none"}
             finally:
                 store.close()
             self.write_json(200, envelope("tri.api.health", ["tri", "serve", "health"], actor=self.actor_from_request() or "actor_local", start=start, data=data))
             return
         if parsed.path == "/v0/commands":
-            output, _ = execute_argv(["commands"], actor=self.actor_from_request(), start=start, pack_on_close=False)
+            output, _ = execute_argv(["commands"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
             self.write_json(200, output)
             return
         if parsed.path == "/v0/schema":
-            output, _ = execute_argv(["schema"], actor=self.actor_from_request(), start=start, pack_on_close=False)
+            output, _ = execute_argv(["schema"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
             self.write_json(200, output)
             return
         if parsed.path.startswith("/v0/schema/"):
             name = unquote(parsed.path.removeprefix("/v0/schema/"))
-            output, _ = execute_argv(["schema", name], actor=self.actor_from_request(), start=start, pack_on_close=False)
+            output, _ = execute_argv(["schema", name], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
             self.write_json(200, output)
             return
         if self.route_object_get(start, parsed):
@@ -14577,6 +15035,8 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         start = time.time()
         parsed = urlparse(self.path)
+        if not self.authenticate(start):
+            return
         if parsed.path not in ("/v0/command", "/v0/batch"):
             self.write_json(
                 404,
@@ -14598,7 +15058,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 store = Store(pack_on_close=False)
                 try:
                     actor = self.actor_from_request(payload) or "actor_local"
-                    data, ok = run_batch_payload(store, payload, default_actor=actor, start=start)
+                    data, ok = run_batch_payload(store, payload, default_actor=actor, start=start, pinned_actor=self.pinned_actor)
                 finally:
                     store.close()
                 self.write_json(
@@ -14620,9 +15080,9 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 raise TriError("invalid_command", "Command request requires argv as a list of strings.")
             if argv and argv[0] == "tri":
                 argv = argv[1:]
-            if argv and argv[0] == "serve":
-                raise TriError("invalid_command", "The API server cannot start another server.")
-            output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, pack_on_close=False)
+            if argv and argv[0] in API_BLOCKED_COMMANDS:
+                raise TriError("invalid_command", "This command is not available through the API.", object=argv[0])
+            output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
             self.write_json(200, output)
         except TriError as exc:
             self.write_json(
@@ -14638,10 +15098,76 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             )
 
 
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def cmd_mcp(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    from tri.mcp import SUPPORTED_PROTOCOL_VERSIONS, TriMCPServer, serve_stdio, tool_definitions
+
+    actor = args.actor
+    require_known_actor(actor)
+
+    def execute(argv: list[str]) -> dict[str, Any]:
+        if argv and argv[0] in API_BLOCKED_COMMANDS:
+            return envelope("tri.error", ["tri", *argv], ok=False, actor=actor, start=time.time(), diagnostics=[TriError("invalid_command", "This command is not available through MCP.", object=argv[0]).diagnostic])
+        output, _ = execute_argv(argv, start=time.time(), pinned_actor=actor)
+        return output
+
+    def batch(payload: dict[str, Any]) -> dict[str, Any]:
+        batch_start = time.time()
+        batch_store = Store()
+        try:
+            data, ok = run_batch_payload(batch_store, payload, default_actor=actor, start=batch_start, pinned_actor=actor)
+            return envelope("tri.batch", ["tri", "batch"], actor=actor, start=batch_start, ok=ok, data=data)
+        except TriError as exc:
+            return envelope("tri.error", ["tri", "batch"], ok=False, actor=actor, start=batch_start, diagnostics=[exc.diagnostic])
+        finally:
+            batch_store.close()
+
+    serve_stdio(TriMCPServer(actor=actor, execute=execute, batch=batch))
+    return envelope(
+        "tri.mcp.server",
+        command,
+        actor=actor,
+        start=start,
+        data={"protocol_version": SUPPORTED_PROTOCOL_VERSIONS[0], "tools": [tool["name"] for tool in tool_definitions(actor)], "actor": actor},
+    )
+
+
+def cmd_auth_issue(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="auth.issue", object_id=args.identity, message="Only maintainers can issue API tokens.")
+    require_known_actor(args.identity)
+    token, record = issue_token(Path(args.file).resolve(), args.identity, label=args.label)
+    return envelope("tri.auth.token", command, actor=args.actor, start=start, data={**public_record(record), "token": token, "file": str(Path(args.file).resolve()), "shown_once": True})
+
+
+def cmd_auth_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="auth.list", object_id=args.file, message="Only maintainers can list API tokens.")
+    tokens = [public_record(item) for item in load_token_file(Path(args.file).resolve())]
+    return envelope("tri.auth.list", command, actor=args.actor, start=start, data={"file": str(Path(args.file).resolve()), "tokens": tokens})
+
+
+def cmd_auth_revoke(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="auth.revoke", object_id=args.selector, message="Only maintainers can revoke API tokens.")
+    removed = revoke_tokens(Path(args.file).resolve(), args.selector)
+    if not removed:
+        raise TriError("path_not_found", "No token matches that id or actor.", object=args.selector)
+    return envelope("tri.auth.list", command, actor=args.actor, start=start, data={"file": str(Path(args.file).resolve()), "tokens": [public_record(item) for item in removed]})
+
+
 def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    auth_file = args.auth_file or os.environ.get("TRI_SERVE_AUTH_FILE")
+    if not auth_file and args.host not in LOOPBACK_HOSTS and not args.allow_unauthenticated:
+        raise TriError(
+            "unauthenticated",
+            "Refusing to serve beyond loopback without --auth-file: any client could act as any actor.",
+            object=args.host,
+            required_flag="--auth-file",
+        )
     server = TriHTTPServer((args.host, args.port), TriAPIHandler)
+    server.authority = TokenAuthority(Path(auth_file).resolve()) if auth_file else None
     host, port = server.server_address
-    data = api_server_data(str(host), int(port))
+    data = {**api_server_data(str(host), int(port)), "auth": "bearer" if auth_file else "none"}
     if not args.quiet:
         print_json(envelope("tri.api.server", command, actor=args.actor, start=start, data=data))
         sys.stdout.flush()
@@ -14740,7 +15266,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--auth-file")
+    p.add_argument("--allow-unauthenticated", action="store_true")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("mcp")
+    p.set_defaults(func=cmd_mcp)
+
+    p = sub.add_parser("auth")
+    auth_sub = p.add_subparsers(dest="auth_cmd", required=True)
+    p_auth = auth_sub.add_parser("issue")
+    p_auth.add_argument("identity")
+    p_auth.add_argument("--file", required=True)
+    p_auth.add_argument("--label")
+    p_auth.set_defaults(func=cmd_auth_issue)
+    p_auth = auth_sub.add_parser("list")
+    p_auth.add_argument("--file", required=True)
+    p_auth.set_defaults(func=cmd_auth_list)
+    p_auth = auth_sub.add_parser("revoke")
+    p_auth.add_argument("selector")
+    p_auth.add_argument("--file", required=True)
+    p_auth.set_defaults(func=cmd_auth_revoke)
 
     p = sub.add_parser("import")
     p.add_argument("repo")
@@ -14798,6 +15344,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect = snapshot_sub.add_parser("inspect")
     p_inspect.add_argument("snapshot")
     p_inspect.set_defaults(func=cmd_snapshots_inspect)
+    p_base = snapshot_sub.add_parser("merge-base")
+    p_base.add_argument("left")
+    p_base.add_argument("right")
+    p_base.set_defaults(func=cmd_snapshots_merge_base)
 
     p = sub.add_parser("trees")
     trees_sub = p.add_subparsers(dest="trees_cmd", required=True)
@@ -14995,6 +15545,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_move.add_argument("dest")
     p_move.add_argument("--expect-head")
     p_move.set_defaults(func=cmd_files_move)
+    p_log = files_sub.add_parser("log")
+    p_log.add_argument("ref")
+    p_log.add_argument("path")
+    p_log.add_argument("--limit", type=int, default=50)
+    p_log.set_defaults(func=cmd_files_log)
+    p_blame = files_sub.add_parser("blame")
+    p_blame.add_argument("ref")
+    p_blame.add_argument("path")
+    p_blame.set_defaults(func=cmd_files_blame)
     p_search = files_sub.add_parser("search")
     p_search.add_argument("ref")
     p_search.add_argument("query")
@@ -15037,6 +15596,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-env", action="store_true")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("merge-rules")
+    merge_rules_sub = p.add_subparsers(dest="merge_rules_cmd", required=True)
+    p_rule = merge_rules_sub.add_parser("add")
+    p_rule.add_argument("project")
+    p_rule.add_argument("name")
+    p_rule.add_argument("--path", action="append")
+    p_rule.add_argument("--exclude", action="append")
+    p_rule.add_argument("--allow", action="append")
+    p_rule.add_argument("--max-files", type=int)
+    p_rule.set_defaults(func=cmd_merge_rules_add)
+    p_rule = merge_rules_sub.add_parser("list")
+    p_rule.add_argument("project")
+    p_rule.add_argument("--all", action="store_true")
+    p_rule.set_defaults(func=cmd_merge_rules_list)
+    p_rule = merge_rules_sub.add_parser("inspect")
+    p_rule.add_argument("project")
+    p_rule.add_argument("name")
+    p_rule.set_defaults(func=cmd_merge_rules_inspect)
+    p_rule = merge_rules_sub.add_parser("remove")
+    p_rule.add_argument("project")
+    p_rule.add_argument("name")
+    p_rule.set_defaults(func=cmd_merge_rules_remove)
 
     p = sub.add_parser("checks")
     checks_sub = p.add_subparsers(dest="checks_cmd", required=True)
@@ -15119,6 +15701,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_merge = cs_sub.add_parser("merge")
     p_merge.add_argument("changeset")
     p_merge.add_argument("--target", required=True)
+    p_merge.add_argument("--retry", type=int, default=5)
     p_merge.set_defaults(func=cmd_changeset_merge)
     p_compare = cs_sub.add_parser("compare")
     p_compare.add_argument("changesets", nargs="+")
@@ -15370,6 +15953,19 @@ def get_parser() -> argparse.ArgumentParser:
     return PARSER_CACHE
 
 
+# Commands that start servers or manage credentials never run on behalf of a remote client.
+API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth"})
+
+
+def raise_actor_mismatch(claimed: str | None, authenticated: str) -> None:
+    raise TriError(
+        "actor_mismatch",
+        "This client is authenticated as a different actor.",
+        object=claimed,
+        authenticated_actor=authenticated,
+    )
+
+
 def normalize_actor_argv(argv: list[str], *, actor: str | None = None) -> tuple[list[str], str | None]:
     normalized: list[str] = []
     selected_actor = actor
@@ -15405,12 +16001,19 @@ def execute_argv(
     start: float | None = None,
     store: Store | None = None,
     pack_on_close: bool | None = None,
+    pinned_actor: str | None = None,
 ) -> tuple[dict[str, Any], int]:
+    """Run one Tri command. pinned_actor is an authenticated identity: the command
+    runs as that actor and any other --actor in argv is refused."""
     start = time.time() if start is None else start
     argv = list(argv)
+    if pinned_actor is not None:
+        actor = pinned_actor
     default_actor = actor or os.environ.get("TRI_ACTOR", "actor_local")
     try:
         parse_argv, parsed_actor = normalize_actor_argv(argv, actor=actor)
+        if pinned_actor is not None and parsed_actor != pinned_actor:
+            raise_actor_mismatch(parsed_actor, pinned_actor)
         effective_actor = parsed_actor or default_actor
         require_known_actor(effective_actor)
     except TriError as exc:
@@ -15467,7 +16070,7 @@ def execute_argv(
 
 def main(argv: list[str] | None = None) -> None:
     output, status = execute_argv(list(sys.argv[1:] if argv is None else argv), start=time.time())
-    if output["schema"] != "tri.api.server":
+    if output["schema"] not in ("tri.api.server", "tri.mcp.server"):
         print_json(output)
     if status:
         raise SystemExit(status)

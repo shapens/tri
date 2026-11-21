@@ -1,6 +1,8 @@
 # Tri
 
-Tri is agent-native source control.
+Tri is agent-native source control. The goal is to be the best one.
+
+"Best" is measured, not claimed. Tri has to beat Git forges on the work agents actually do, and it has to beat Anthropic's Scion, the one system that has already replaced Git for an agent-scale monorepo, on everything except raw scale on day one. The scorecard is in [Agent-Scale Scorecard](#agent-scale-scorecard).
 
 It gives humans and agents durable workspaces, automatic snapshots, reviewable changesets, structured checks, scoped secrets, object-level visibility, and provenance without making Git branches, Git worktrees, or GitHub pull requests the center of the workflow.
 
@@ -70,9 +72,54 @@ Also not acceptable:
 
 ## Competitive Baseline
 
-Tri should learn from Entire and GitButler instead of pretending they do not exist.
+Tri should learn from the field instead of pretending it does not exist.
 
-Research refreshed: 2026-05-28. The competitive claim should be revised whenever either product moves its source-control primitive away from Git commits, branches, or pull requests. Current public docs still describe Entire as commit-linked checkpoint/session capture and GitButler as branch, commit, and PR orchestration, including agent hooks and MCP automation. The honest claim is not that Tri is broadly better. It is that Tri can be marginally better for agents only when the live source-control primitive is the workspace and changeset, not a Git commit, branch, or pull request.
+Research refreshed: 2026-11-20. The field split in two during 2026.
+
+1. **Faster Git forges with agent review.** Entire, Cursor Origin, GitHub, and GitLab all host Git repositories and attach agent context or agent scores to commits and pull requests. GitButler is a Git client. Devin, Codex, Copilot, and Claude Code on the web finish by pushing a branch and opening a pull request on one of them. None of them changes the live record: a clone can still read every blob, and the pull request is still the decision surface.
+2. **Server-side source control for one giant repository.** Anthropic's Scion replaced Git for Anthropic's monorepo. It is internal, and its prior art is Google's Piper and Meta's Sapling/Mononoke. It proves the live model can leave Git, but it optimizes for scale, not for policy.
+
+Nobody makes the workspace, the changeset, and the policy decision the source of truth with Git only as an export. That is Tri's lane. The adoption risk is that teams decide a faster Git forge is enough.
+
+| Product | What it is now | Still Git? | What Tri takes from it |
+| --- | --- | --- | --- |
+| [Scion](https://www.anthropic.com/research/redesigning-source-control) | Anthropic's internal replacement for Git, live since October 2026 | No | Server-authoritative storage, no full clones, server-side queries, no global merge lock |
+| [Entire](https://entire.io/) | Forge from the former GitHub CEO, opened 26 October 2026; Trails replace the pull request with agent scores on each push | Yes | Agent context belongs next to the change, not in a separate tool |
+| [Cursor Origin](https://cursor.com/docs/origin) | Cursor's forge, early beta since 17 August 2026, with GitHub sync | Yes | Two-way GitHub sync is the adoption path |
+| GitHub, GitLab | The default destination; Copilot cloud agent, Agent HQ, Duo agents | Yes | Everyone already lives here; export must stay boring |
+| GitButler | Local client for parallel and stacked branches, with `but mcp` | Yes | MCP is how agents reach source control |
+| Zed DeltaDB | Stores every edit and agent message between commits; teammates without Delta see plain Git | Partly | Keep a normal Git view for people who never install Tri |
+
+The honest claim is still narrow: Tri wins for agents only when the live source-control primitive is the workspace, the changeset, and the policy decision, not a Git commit, branch, or pull request.
+
+### Scion
+
+Source: <https://www.anthropic.com/research/redesigning-source-control> (13 October 2026, updated 15 October). No code, protocol, or client is public. Anthropic says it is "by no means a suitable replacement for git for general use."
+
+Why Anthropic left Git: merges grew from about 2,500 a day in May 2026 to more than 30,000 in September. Main-branch history is almost 100 GB and CI did on the order of 25 million checkouts a day. Offline, complete clones were the part that hurt; nearly every client was an always-online agent or job.
+
+How Scion works:
+
+- the unit of work is a changeset: a write-ahead-log entry with the files changed against its first parent and content-addressed pointers to their contents
+- changesets are created on the server and visible everywhere at once; there is nothing to push
+- blame, path history, and the commit graph are derived data the server computes and can re-index without client changes
+- there is no packfile and no fully materialized copy, even on the server; Spanner and cloud storage hold the truth and servers are caches
+- the `scn` client keeps a bounded object cache and lays out sparse or virtualized checkouts; jobs reach `scion-server` through `scion-daemon` and a regional `scion-cache`, each tier serving the same RPCs
+- moving a ref is a compare-and-swap on one row, separate from creating the changeset
+- many CI jobs never check out files; they ask the server for a diff, a merge base, or blame
+- there is no global merge-queue lock; tests run after merge and before deploy, and Claude usually fixes concurrent-change conflicts before a person notices
+
+What Scion leaves thin is exactly Tri's strength. The post describes repository access control, per-directory permissions, and approval rules that differ for a comment-only change and a sensitive logic change. It does not describe actors, grants, secret handling, embargoes, or what a denied read returns.
+
+Tri's position against Scion:
+
+- Tri already matches the shape: content-addressed snapshots, changesets created against a base, refs moved by compare-and-swap, disk as a cache.
+- Tri must close the scale gap: server-authoritative storage, sparse checkouts, tiered caches, and server-side history queries. See [Agent-Scale Gaps](#agent-scale-gaps).
+- Tri must keep its lead on policy: object-level visibility, secret leases, embargoed advisories, and machine-readable denials are the things Scion does not claim.
+
+### Entire
+
+Update 2026-11: Entire is now a forge. It opened on 26 October 2026, hosts Git repositories, replaces the pull request with Trails (agent scores on each push), and keeps agent session memory. The checkpoint analysis below still describes how its context capture works; the difference is that Entire now also competes for the hosted destination, so a hosted Tri would compete with it directly.
 
 ### Entire
 
@@ -195,9 +242,10 @@ Agent margins Tri has to prove:
 The product claim should stay modest:
 
 ```text
-Entire explains agent commits.
+Forges (Entire, Origin, GitHub) make Git faster and attach agent review to it.
 GitButler makes Git branches tolerable.
-Tri gives agents a native workspace and changeset substrate.
+Scion stops shipping a full clone to every agent.
+Tri makes the workspace, the changeset, and the policy decision the source of truth.
 ```
 
 Tri should be judged against them with concrete tests:
@@ -208,6 +256,46 @@ Tri should be judged against them with concrete tests:
 - Can Tri hide one changeset in a public project without moving metadata to a separate private repo?
 - Can Tri run a check with scoped config without ever writing secret-bearing files into source history?
 - Can Tri export to Git only after policy and review pass?
+
+## Agent-Scale Gaps
+
+Being the best agent-native source control means closing the gaps that Scion and the forges expose. Each gap is listed with its state in this repository.
+
+### Closed In The Prototype
+
+| Gap | Why it matters at agent scale | What Tri does now |
+| --- | --- | --- |
+| Same-file merges | Two agents editing different lines of one file conflicted at the path level, so conflicts grew with merge volume | `merge_entries` runs a line-level three-way merge for text files (`tri/textmerge.py`). Disjoint hunks merge; overlapping or adjacent hunks, binaries, symlinks, and mode clashes still conflict. Merges and workspace updates report `text_merged_paths`. |
+| Human review on every merge | At 30,000 merges a day, a required human approval is the bottleneck | Maintainers declare merge rules (`tri merge-rules add <project> <name> --path <glob> [--exclude <glob>] [--allow <selector>] [--max-files <n>]`). A changeset whose every changed path matches a rule merges without a review. Checks, conflicts, secrets, hidden paths, stacks, and embargoes still gate it, and advisory-linked changesets never qualify. The decision records `merge_rule:<id>` as its grant. Exports still need an approved review. |
+| Merge races | Concurrent merges race on one target compare-and-swap; the loser failed back to the agent | `tri changeset merge` recomputes against the moved target and retries (`--retry`, default 5) before reporting `stale_target_snapshot`. There is no global merge lock. |
+| History needs a checkout | Agents and CI asked Git for blame or merge bases by cloning | `tri files log <ref> <path>`, `tri files blame <ref> <path>`, and `tri snapshots merge-base <a> <b>` run on the store. Blame attributes lines to the snapshot, actor, and changeset that introduced them. History walks stop at the first snapshot the actor cannot read, and hidden or secret-like paths are refused. |
+| Self-asserted actors | Any HTTP client could claim `actor_local`, which holds maintainer and security roles, so the API could not safely leave one machine | `tri auth issue <actor> --file tokens.json` issues a bearer token bound to one actor and stores only its SHA-256. `tri serve --auth-file tokens.json` pins every request to the token's actor and rejects a different `--actor`, payload actor, batch actor, or `X-Tri-Actor` with `actor_mismatch`. Revocation applies on the next request. `tri serve` refuses to bind beyond loopback without `--auth-file` unless `--allow-unauthenticated` is passed. `serve`, `mcp`, and `auth` cannot run through the API or a batch. |
+| No MCP server | Claude Code, Codex, and Cursor reach tools through MCP; GitButler ships `but mcp` | `tri --actor agent:<id> mcp` serves the `tri` and `tri_batch` tools over stdio. Every call is pinned to the startup actor. |
+
+### Still Open
+
+These are ordered by how much they block the goal.
+
+1. **Server-authoritative storage.** Tri still runs on one machine with SQLite and local blobs. The target is Scion's shape: one authoritative service (a transactional metadata store plus object storage), with every disk a cache. The client/server question is settled in favor of this; decentralized sync is not a goal.
+2. **Sparse and virtual checkouts with tiered caches.** Materialization is copy-on-write but whole-tree. Agents should fetch only the trees and blobs they touch, through a per-machine daemon and a regional cache that serve the same API.
+3. **Two-way Git mirror.** Import, `targets refresh`, and policy-gated export exist, but nothing keeps a GitHub repository and a Tri target in sync continuously. Teammates who never install Tri must see an ordinary Git repository, and pushes from them must land as Tri snapshots.
+4. **Sandboxed remote runners.** `tri run` executes on the server host as the server user. With authentication that is acceptable for trusted agents on one machine, but a shared server needs isolated runners and resource limits before untrusted agents can call `run`.
+5. **Post-merge verification lane.** Scion runs tests after merge and before deploy. Tri's merge rules still require checks before merge. A policy that allows merge-then-verify for low-risk paths, with automatic revert on failure, would remove the last pre-merge wait.
+6. **Production runtime.** The prototype is one large Python module. It is the right tool for proving the object model; the server should be rewritten once the object model stops changing, keeping the JSON contracts as the compatibility boundary.
+
+## Agent-Scale Scorecard
+
+Tri is the best agent-native source control only when it wins these measurements against Git worktrees plus GitHub, GitButler, and Entire, and stays within reach of Scion's published numbers. `tri-bench` already compares Tri with Git, GitButler, and Entire on the workflow loop; the remaining rows need new scenarios.
+
+| Measurement | Bar | Status |
+| --- | --- | --- |
+| Parallel attempts from one base | 100 or more agents with isolated files and checks, no shared working directory | fan-out benchmark covers 50 |
+| Time to first edit on a large repository | seconds, independent of history size | needs a large-repo scenario and sparse checkouts |
+| Merges per hour under contention | no global lock; same-file disjoint edits merge without a person | line merges, merge rules, and merge retries shipped; needs a contention benchmark |
+| Conflict rate per 1,000 merges | lower than path-level merging on the same workload | needs the contention benchmark |
+| Leak tests | no hidden path, secret, private changeset, or embargoed advisory escapes through any read, search, diff, history, log, artifact, export, or API route | task fixtures cover hidden paths and secret leases; needs a sweep across every read route |
+| History without checkout | log, blame, and merge base answered by the store | shipped |
+| Agent harness reach | MCP and HTTP with authenticated, pinned actors | shipped |
 
 ## Response To Theo's Rant
 
@@ -2260,8 +2348,18 @@ tri review attach-check-summary <review> --body "checks refreshed"
 tri review attach-policy-finding <review> --body "export policy snapshot"
 tri review close <review> --body "superseded by another attempt"
 tri review approve <review>
-tri changeset merge <changeset> --target main
+tri changeset merge <changeset> --target main --retry 5
 tri review request-agent-pass <review> --task "minimize the patch"
+
+tri merge-rules add my-project docs --path "docs/**" --max-files 20
+tri merge-rules list my-project
+tri files log <workspace-changeset-target-or-snapshot> src/app.ts
+tri files blame <workspace-changeset-target-or-snapshot> src/app.ts
+tri snapshots merge-base <workspace> <target>
+
+tri auth issue agent:a --file ./tokens.json --label ci
+tri serve --host 0.0.0.0 --port 8765 --auth-file ./tokens.json
+tri --actor agent:claude mcp
 
 tri policy evaluate export <changeset>
 tri artifacts list --kind stdout
@@ -2323,6 +2421,17 @@ Required initial routes:
 
 All GET routes accept `X-Tri-Actor` and must use the same policy checks as the CLI command they wrap.
 
+When the server runs with `--auth-file`, every route except health requires `Authorization: Bearer <token>`. The token decides the actor. A request that names a different actor through `X-Tri-Actor`, the payload, a batch entry, or `--actor` fails with `actor_mismatch`; a missing or revoked token fails with HTTP 401 and `unauthenticated`.
+
+### MCP Shape
+
+`tri mcp` speaks the Model Context Protocol over stdio (protocol versions 2025-06-18, 2025-03-26, and 2024-11-05). It exposes two tools:
+
+- `tri`: `{"argv": [...], "response": "full" | "summary"}` runs one command and returns the Tri response envelope as both text and `structuredContent`, with `isError` set when `ok` is false
+- `tri_batch`: the same plan format as `tri batch`, run in one round trip
+
+The server runs every call as the actor it started with. Start it as a specific agent, for example `tri --actor agent:claude mcp`; starting it as `actor_local` hands the model maintainer rights.
+
 ## Git Compatibility
 
 Git compatibility is necessary, but it is boundary behavior.
@@ -2359,7 +2468,7 @@ Export records:
 
 ### Mirror Mode
 
-Later, Tri can mirror a Git remote bidirectionally. This is not required for the first proof.
+Tri must mirror a Git remote bidirectionally. It was deferred for the first proof; it is now an adoption requirement, because Cursor Origin and Zed DeltaDB both show that teams adopt a new system only when teammates who never install it still see an ordinary Git repository. Merged Tri targets should appear as commits on a mirrored branch, and pushes to that branch should land as Tri snapshots through `targets refresh`.
 
 ## First Implementation
 
@@ -2369,7 +2478,8 @@ Build a local daemon and CLI first.
 
 Required local components:
 
-- `tri serve`: local JSON API server and coordinator
+- `tri serve`: JSON API server and coordinator, with bearer-token actors for anything beyond loopback
+- `tri mcp`: MCP stdio server for agent harnesses
 - content store: blobs, trees, snapshots, artifacts
 - metadata DB: projects, workspaces, changesets, reviews, checks, policies
 - event log: append-only actor and operation history
@@ -2567,16 +2677,18 @@ Required evidence:
 
 The MVP should be judged by behaviors, not positioning.
 
-| Workflow | Git Worktrees + GitHub | Entire | GitButler | Tri Requirement |
-| --- | --- | --- | --- | --- |
-| Parallel agent attempts | manual worktrees and branches | tracked sessions, still Git workspace based | parallel branch lanes in one working directory | isolated copy-on-write workspaces |
-| Context before commit | shell history and agent logs | session capture, checkpointed around commits | branch agent session context | event log from first mutation |
-| Review unit | pull request branch | commit plus checkpoint | branch or stacked PR | changeset with operations and checks |
-| Private draft in public project | private fork or separate repo | private checkpoint remote, if configured | private branch/remote conventions | object-level visibility |
-| Secrets/config | `.env` conventions and secret scanners | transcript redaction and ignored files | Git/forge conventions | secret leases and non-exportable config artifacts |
-| Check evidence | CI logs | session/tool transcript around commit | forge CI status and local operation history | structured check-run objects |
-| Agent API surface | shell plus Git porcelain | hooks capture agent sessions | hooks/MCP organize branch output | source-control commands with schemas, events, diagnostics, and object refs |
-| Export | native Git | native Git | native Git | policy-gated Git adapter |
+| Workflow | Git Worktrees + GitHub | Entire | GitButler | Scion (internal) | Tri Requirement |
+| --- | --- | --- | --- | --- | --- |
+| Parallel agent attempts | manual worktrees and branches | tracked sessions, still Git workspace based | parallel branch lanes in one working directory | server-side changesets, sparse checkouts | isolated copy-on-write workspaces |
+| Context before commit | shell history and agent logs | session capture, checkpointed around commits | branch agent session context | not described | event log from first mutation |
+| Review unit | pull request branch | Trail on each push | branch or stacked PR | changeset reviewed in Antique | changeset with operations and checks |
+| Merge throughput | merge queue | forge merge | forge merge | no global lock, tests after merge | line merges, merge rules, compare-and-swap retries |
+| Private draft in public project | private fork or separate repo | private checkpoint remote, if configured | private branch/remote conventions | per-directory permissions | object-level visibility |
+| Secrets/config | `.env` conventions and secret scanners | transcript redaction and ignored files | Git/forge conventions | not described | secret leases and non-exportable config artifacts |
+| Check evidence | CI logs | agent scores and session transcript | forge CI status and local operation history | server-side diff and blame for CI | structured check-run objects |
+| Agent API surface | shell plus Git porcelain | hooks capture agent sessions | hooks and `but mcp` organize branch output | `scn` client and RPCs | typed commands over CLI, authenticated HTTP, and MCP |
+| History queries | full clone | full clone | full clone | server-side blame, history, merge base | `files log`, `files blame`, `snapshots merge-base` on the store |
+| Export | native Git | native Git | native Git | not exported | policy-gated Git adapter and, next, a two-way mirror |
 
 ## Example Workflows
 
@@ -2665,6 +2777,12 @@ Tri is worth continuing only if the MVP proves these claims with actual command 
 - Review comment threads expose path/line anchors, replies, and resolution state.
 - Closed reviews remain inspectable, do not delete their changeset, and reject further review mutation.
 - Advisory-linked changesets default to embargoed and cannot export until a release disclosure is prepared.
+- Two changesets that edit disjoint lines of the same text file both merge into a target without a conflict object.
+- A maintainer merge rule lets a checked changeset that only touches matching paths merge without a human review, while checks, secrets, hidden paths, and embargoes still block it.
+- Concurrent merges into one target retry the compare-and-swap instead of failing back to the agent.
+- Path history, line blame, and merge bases are answered from the store without a checkout, and stop at snapshots the actor cannot read.
+- An API client holding a bearer token can act only as that token's actor.
+- An MCP client can do the full workspace-to-merge loop through the `tri` tool without being able to change its actor.
 
 Competitive success requires narrower proof against Entire and GitButler:
 
@@ -2713,7 +2831,7 @@ One owns software meaning.
 
 Important questions to defer until the MVP pressure-tests the model:
 
-- Should Tri support decentralized sync, or start as a client/server system?
+- ~~Should Tri support decentralized sync, or start as a client/server system?~~ Settled 2026-11-20: client/server with one authoritative service and disks as caches, following Scion's evidence that agents are always-online clients. See [Agent-Scale Gaps](#agent-scale-gaps).
 - How much semantic diffing is necessary before path/text diffs are insufficient?
 - Should policies be declarative JSON, Rego-like rules, One declarations, or a small Tri-native policy language?
 - How should large binaries and generated artifacts be stored and garbage-collected?

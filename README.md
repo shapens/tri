@@ -6,13 +6,13 @@ This repository currently implements a local Python CLI and JSON HTTP API MVP. I
 
 ## Competitive Baseline
 
-Tri is not trying to beat Entire at session capture or GitButler at branch management.
+The goal is to be the best agent-native source control. The field as of 2026-11-20:
 
-- Entire's wedge is preserving prompts, transcripts, tool calls, file changes, and session metadata around Git commits.
-- GitButler's wedge is making parallel/virtual and stacked Git branches workable, including hooks and MCP that record agent edits and turn them into branch commits.
-- Tri's wedge is earlier: isolated workspaces, API-first mutations, pre-commit provenance, structured checks, object-level policy, secret leases, and reviewable changesets before Git or GitHub export.
+- Forges (Entire, Cursor Origin, GitHub, GitLab) host Git and attach agent context or agent scores to commits and pull requests. GitButler makes parallel and stacked Git branches workable and ships an MCP server. All of them still use Git as the live record.
+- Anthropic's internal Scion replaced Git for one agent-scale monorepo: server-side changesets, no full clones, server-side blame and merge bases, no global merge lock. Its access control is the thin part of its public write-up.
+- Tri's wedge is the live record itself: isolated workspaces, API-first mutations, pre-commit provenance, structured checks, object-level policy, secret leases, and reviewable changesets before any Git or GitHub export.
 
-Research refreshed 2026-05-28 from current public docs: <https://docs.entire.io/overview>, <https://docs.entire.io/cli/checkpoints>, <https://docs.entire.io/agents/overview>, <https://docs.entire.io/security>, <https://docs.gitbutler.com/overview>, <https://docs.gitbutler.com/features/branch-management/virtual-branches>, <https://docs.gitbutler.com/features/branch-management/stacked-branches>, <https://docs.gitbutler.com/features/coding-agents>, <https://docs.gitbutler.com/features/ai-integration/mcp-server>, and <https://docs.gitbutler.com/features/ai-integration/claude-code-hooks>.
+`tri.md` holds the full comparison, the gaps that remain (server-authoritative storage, sparse checkouts, two-way Git mirror, sandboxed runners), and the scorecard Tri has to win.
 
 The marginal advantage to prove is small and specific: an agent should be able to mutate, check, review, protect, and export work through stable Tri objects without first editing a shared working directory, assigning changes to a branch, or treating a GitHub pull request as the live coordination surface.
 
@@ -46,6 +46,21 @@ curl -s -X POST http://127.0.0.1:8765/v0/command \
   -d '{"actor":"agent:a","argv":["workspace","list"]}'
 ```
 
+Anything beyond loopback needs bearer tokens, each bound to one actor:
+
+```sh
+TRI_HOME=/tmp/tri-home tri auth issue agent:a --file /tmp/tri-tokens.json   # prints the token once
+TRI_HOME=/tmp/tri-home tri serve --host 0.0.0.0 --port 8765 --auth-file /tmp/tri-tokens.json
+curl -s -X POST http://host:8765/v0/command -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"argv":["workspace","list"]}'
+```
+
+Connect an agent harness over MCP (stdio). Every tool call runs as the actor the server starts with:
+
+```sh
+claude mcp add tri -- env TRI_HOME=/tmp/tri-home tri --actor agent:claude mcp
+```
+
 ## Implemented MVP Surface
 
 - machine-readable command discovery, schema catalog, response links for visible refs, generic typed-object inspection, derived actor identity inspection, actor-aware package boundary declaration/inspection, project discovery/inspection, and store doctor
@@ -76,7 +91,11 @@ curl -s -X POST http://127.0.0.1:8765/v0/command \
 - path and operation-range split preview
 - changeset discard/supersede lifecycle commands with replacement metadata and audit-readable retired changesets
 - changeset dependency stacking with merge/export gating and head-snapshot check revalidation
-- policy-gated changeset merge into Tri targets, with fast-forward, non-conflicting target merge, and conflict diagnostics
+- policy-gated changeset merge into Tri targets, with fast-forward, non-conflicting target merge, line-level three-way merges for text files edited on both sides, compare-and-swap retries under concurrent merges, and conflict diagnostics
+- maintainer merge rules that let checked changesets touching only matching paths merge without a human review, while every other merge gate still applies
+- history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
+- bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
+- MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
 - review object creation and inspection with task context, changeset summary, checks, artifacts, policy findings, attached policy/check evidence, visibility impact, reviewer state, threaded comments, and export preview
 - anchored review comments, direct review-action inspection, replies, thread resolution, requested changes, assigned-reviewer approvals, risk markers, explicit policy-finding/check-summary attachments, explicit review close, and request-agent-pass workspaces
 - Policy v0 export evaluation requiring passing checks and approved review, with explicit local override records
@@ -294,7 +313,10 @@ tri export list app --changeset cs_...
 
 - verify ReFS/Dev Drive clones on a Windows machine that has them (probe-guarded; falls back to `copy`). Overlay, XFS/btrfs reflinks, and the Windows port are verified in CI.
 
-- hosted collaboration layer
+- hosted collaboration layer: server-authoritative storage with disks as caches, sparse checkouts, and tiered caches (see "Agent-Scale Gaps" in `tri.md`)
+- two-way Git mirror so teammates without Tri see an ordinary repository
+- sandboxed remote runners before untrusted agents can call `run` on a shared server
+- post-merge verification lane with automatic revert for low-risk paths
 - broader hosted Policy v0 language: visibility role mapping, embargo lifecycle, cross-object inheritance rules, and actor identity binding
 - semantic conflict resolution beyond same-path ours/theirs/base choices
 - remote materialization lease coordination beyond local lease records and stale-sync guards
