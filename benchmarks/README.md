@@ -1,6 +1,6 @@
 # Tri Benchmarks
 
-Tri keeps two benchmark families because they answer different questions.
+Tri keeps several benchmark families because they answer different questions: the workflow benchmark, the contention benchmark (below), the fan-out disk benchmark (`tri-bench-fanout`, see the top-level README), and the task benchmark.
 
 ## Workflow Benchmark
 
@@ -72,6 +72,37 @@ Outputs:
 - `entire`: uses `entire enable --agent codex`, simulates Codex hook events against local transcript files, creates real local Entire checkpoints, commits each attempt with Git, reads checkpoint/session status, and exports through Git compatibility.
 
 The GitButler and Entire adapters intentionally use their documented automation paths instead of only timing vanilla Git commands with the tools installed beside them.
+
+## Contention Benchmark
+
+`tri-bench-contention` (`benchmarks/contention.py`) measures the two contention rows of the Agent-Scale Scorecard in `tri.md`: merges per hour under contention, and conflicts per 1,000 merges.
+
+The fixture is a generated repository of shared text files (`--files 20` x `--lines 200` by default). `--agents` agents (default 50) run `--parallel` at a time (default 8). Each agent starts from the current main, reads `--edits-per-agent` shared files (default 2), rewrites `--edit-lines` consecutive lines in each (default 3), runs a trivial check, and merges to main. Regions are assigned from a seeded shuffle so edits from different agents never touch and keep two unchanged lines between them; an `--overlap` fraction of agents (default 0.1) instead rewrites exactly the same lines as another agent that starts at about the same time, which is a real conflict for every target when the two race (when one merges before the other starts, the second reads the first's lines and rewrites them knowingly, which is not a conflict).
+
+```sh
+tri-bench-contention --agents 50 --parallel 8
+tri-bench-contention --agents 4 --parallel 2 --files 3 --lines 30   # smoke size
+```
+
+Targets:
+
+- `tri`: `tri workspace create`, `tri files read`/`write`, `tri run`, `tri changeset create`, then `tri changeset merge --target main --retry N` through a merge rule on `src/*`, so no human review. Merges use line-level three-way merges and retry on a moved target; there is no global lock.
+- `tri-path`: the same with `TRI_MERGE_TEXT=0`, a benchmark/diagnostic knob that turns line merges off, so any two changesets touching the same file conflict (path-level merging).
+- `git`: a bare repository; each agent clones it, edits, runs the same check, commits, and loops `git push` / `git pull --rebase` until the push lands, the rebase conflicts, or the same retry budget (`--retry`, default 5, with the same backoff Tri uses) runs out.
+
+Per target it records merges attempted, succeeded, conflicted, and retry-exhausted; retries; wall time of the agent phase; merges per hour (successful merges over that wall time); conflicts per 1,000 merges (conflicted over attempted); p50 and p95 merge latency (the merge call or push loop alone); line merges performed; conflicts by agents outside the deliberate overlap; and a correctness check of final main: every merged agent's edit is present unless a later merged agent read it and rewrote it, conflicted agents' edits are absent, every other line is the base line, and no file gained or lost lines. A target whose correctness check fails reports `failed`.
+
+Measured on macOS (Apple silicon), 50 agents, 8 at a time, 20 files x 200 lines, overlap 0.1, retry budget 5 (`benchmark-results/contention-50`):
+
+| Target | Attempted | Merged | Conflicted | Retry-exhausted | Retries | Wall s | Merges/hour | Conflicts per 1,000 | p50 merge s | p95 merge s | Correct |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| tri | 50 | 48 | 2 | 0 | 8 | 6.97 | 24,805 | 40 | 0.132 | 0.203 | yes |
+| tri-path | 50 | 29 | 21 | 0 | 0 | 7.12 | 14,659 | 420 | 0.129 | 0.161 | yes |
+| git | 50 | 28 | 3 | 19 | 140 | 22.98 | 4,386 | 60 | 2.217 | 5.233 | yes |
+
+Every Tri conflict came from the deliberate overlap (24 merges were line merges of the same file); path-level merging turned 18 disjoint same-file edits into conflicts. Git's rebase is also line-level, so its conflicts are the overlap too, but each retry cycle (fetch, rebase, push) is slow enough that 19 of 50 agents lost the push race six times in a row. Numbers vary run to run with scheduling, mostly in how many overlapping pairs actually race.
+
+Outputs: `results.json` (with per-agent outcomes) and `summary.md` under `benchmark-results/contention-<timestamp>/` or `--output`.
 
 ## Task Benchmark
 

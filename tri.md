@@ -290,14 +290,14 @@ These are ordered by how much they block the goal.
 
 ## Agent-Scale Scorecard
 
-Tri is the best agent-native source control only when it wins these measurements against Git worktrees plus GitHub, GitButler, and Entire, and stays within reach of Scion's published numbers. `tri-bench` already compares Tri with Git, GitButler, and Entire on the workflow loop; the remaining rows need new scenarios.
+Tri is the best agent-native source control only when it wins these measurements against Git worktrees plus GitHub, GitButler, and Entire, and stays within reach of Scion's published numbers. `tri-bench` already compares Tri with Git, GitButler, and Entire on the workflow loop, and `tri-bench-contention` covers the merge rows; the remaining rows need new scenarios.
 
 | Measurement | Bar | Status |
 | --- | --- | --- |
 | Parallel attempts from one base | 100 or more agents with isolated files and checks, no shared working directory | fan-out benchmark covers 50 |
 | Time to first edit on a large repository | seconds, independent of history size | about 1 s on a 50,000-file tree (workspace create plus first write); partial runs about 1.9 s; first full run after a merge 3.1 s on APFS |
-| Merges per hour under contention | no global lock; same-file disjoint edits merge without a person | line merges, merge rules, and merge retries shipped; needs a contention benchmark |
-| Conflict rate per 1,000 merges | lower than path-level merging on the same workload | needs the contention benchmark |
+| Merges per hour under contention | no global lock; same-file disjoint edits merge without a person | contention benchmark, 50 agents 8 at a time on 20 shared files: 24,805 merges/hour, 48 of 50 merged with no review and no lost lines (p95 merge 0.20 s), versus 4,386 for Git pull-rebase-push (19 agents ran out of retries) |
+| Conflict rate per 1,000 merges | lower than path-level merging on the same workload | 40 per 1,000 with line merges versus 420 with path-level merging on the same workload; every line-merge conflict was a deliberate same-line overlap |
 | Leak tests | no hidden path, secret, private changeset, or embargoed advisory escapes through any read, search, diff, history, log, artifact, export, or API route | task fixtures cover hidden paths and secret leases; needs a sweep across every read route |
 | History without checkout | log, blame, and merge base answered by the store | shipped |
 | Agent harness reach | MCP and HTTP with authenticated, pinned actors | shipped |

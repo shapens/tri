@@ -6039,6 +6039,10 @@ def line_merge_entry(
     target_entry: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Merge disjoint line edits to one text file; None means a real conflict."""
+    # Benchmark/diagnostic knob: TRI_MERGE_TEXT=0 turns line merges off so any
+    # same-path divergence conflicts (path-level merging). Not a product setting.
+    if os.environ.get("TRI_MERGE_TEXT", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return None
     if base_entry is None or head_entry is None or target_entry is None:
         return None
     modes = {entry.get("mode") for entry in (base_entry, head_entry, target_entry)}
