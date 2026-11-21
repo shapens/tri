@@ -426,7 +426,7 @@ def reap_claimed(store: Any, lease: Any, *, actor: str, force: bool, reason: str
             salvage = cli.create_salvage(store, ws, lease_id=lease["id"], kind="mount", base_snapshot=before, entries=after_entries, paths=paths, deleted_ignored={"count": 0, "paths": []}, actor=actor)
     cli.remove_tree(state_dir)
     identity = lease["root_identity"]
-    if root.is_dir() and not root.is_symlink() and (not identity or cli.directory_identity(root) == identity):
+    if root.is_dir() and not root.is_symlink() and cli.same_directory(root, identity):
         try:
             root.rmdir()  # only if empty: the view never wrote into the directory itself
         except OSError:

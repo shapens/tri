@@ -6877,7 +6877,7 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
                 str(baseline_path),
                 ttl_seconds,
                 dumps([record["key"] for record in env_plan.records if record.get("key")]),
-                directory_identity(root),
+                stamp_directory(root),
                 dumps(sparse) if sparse else None,
                 store.node_id,
             ),
@@ -7344,12 +7344,54 @@ def _lease_update(store: Store, table: str, lease_id: str, **fields: Any) -> Non
         store.conn.execute(f"UPDATE {table} SET {columns} WHERE id = ?", (*fields.values(), lease_id))
 
 
+ROOT_MARK_XATTR = "user.tri.root"
+
+
 def directory_identity(path: Path) -> str | None:
+    """dev:ino, plus what tells a recreated directory apart from the original:
+    inode numbers are reused (ext4 hands a just-freed inode to the next mkdir),
+    so add the birth time where the platform reports it and the random mark
+    stamp_directory() stored in an extended attribute."""
     try:
         st = os.stat(path)
     except OSError:
         return None
-    return f"{st.st_dev}:{st.st_ino}"
+    parts = [f"{st.st_dev}:{st.st_ino}"]
+    birth = getattr(st, "st_birthtime", None)
+    if birth:
+        parts.append(f"b{birth!r}")
+    if hasattr(os, "getxattr"):
+        try:
+            parts.append("x" + os.getxattr(path, ROOT_MARK_XATTR).decode())
+        except OSError:
+            pass
+    return ":".join(parts)
+
+
+def stamp_directory(path: Path) -> str | None:
+    """Mark a directory Tri created so the reaper never mistakes a replacement for it."""
+    if hasattr(os, "setxattr"):
+        try:
+            os.setxattr(path, ROOT_MARK_XATTR, uuid.uuid4().hex.encode())
+        except OSError:
+            pass  # no user xattrs on this filesystem: dev:ino (and birth time) only
+    return directory_identity(path)
+
+
+def same_directory(path: Path, recorded: str | None) -> bool:
+    """Compare with a recorded identity using only the parts it recorded, so
+    identities from before marks existed still match their directory."""
+    if not recorded:
+        return True
+    current = directory_identity(path)
+    if current is None:
+        return False
+    recorded_parts = recorded.split(":")
+    base, extras = recorded_parts[:2], recorded_parts[2:]
+    current_parts = current.split(":")
+    if current_parts[:2] != base:
+        return False
+    return all(part in current_parts[2:] for part in extras)
 
 
 def reap_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, force: bool = False, reason: str = "expired") -> dict[str, Any] | None:
@@ -7374,7 +7416,7 @@ def _reap_claimed_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, f
     result: dict[str, Any] = {"lease": lease["id"], "kind": "mount", "path": lease["path"], "workspace": lease["workspace_id"], "reason": reason}
     root = Path(lease["path"])
     identity = row_value(lease, "root_identity")
-    if root.is_symlink() or not root.is_dir() or (identity and directory_identity(root) != identity):
+    if root.is_symlink() or not root.is_dir() or not same_directory(root, identity):
         # Gone, or replaced by a directory Tri did not create: delete nothing.
         _lease_update(store, "materialization_leases", lease["id"], status="gone", reaped_at=utcnow())
         result["status"] = "gone"
