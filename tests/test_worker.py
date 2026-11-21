@@ -57,7 +57,7 @@ class WorkerProtocolTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-qm", "init"], check=True)
-        out = subprocess.run([sys.executable, "-m", "tri", "import", str(repo), "--name", "app"], cwd=ROOT, env=self.env, capture_output=True)
+        out = subprocess.run([sys.executable, "-m", "tri", "import", str(repo), "--name", "app", "--target", "main"], cwd=ROOT, env=self.env, capture_output=True)
         self.assertEqual(out.returncode, 0, out.stdout[-400:])
         self.server_file = root / "server.txt"
         self.server_file.write_bytes(b"server\n")

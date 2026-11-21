@@ -119,8 +119,14 @@ class S3ObjectStore(ObjectStore):
         encoded = quote(full, safe="/-_.~")
         return f"/{self.bucket}/{encoded}" if self.path_style else f"/{encoded}"
 
-    def _request(self, method: str, key: str, body: bytes = b"") -> tuple[int, bytes]:
-        path = self._object_path(key)
+    def create_bucket(self) -> None:
+        """Create the bucket (setup and tests; production buckets are provisioned)."""
+        status, _ = self._request("PUT", "", path=f"/{self.bucket}" if self.path_style else "/")
+        if status == 404:
+            raise ObjectStoreError(f"could not create bucket {self.bucket}", retryable=False)
+
+    def _request(self, method: str, key: str, body: bytes = b"", *, path: str | None = None) -> tuple[int, bytes]:
+        path = path or self._object_path(key)
         now = datetime.now(timezone.utc)
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date = now.strftime("%Y%m%d")

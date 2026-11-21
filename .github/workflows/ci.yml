@@ -61,13 +61,17 @@ jobs:
         run: |
           set -eux
           ARCH=$(uname -m)
-          URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+          RELEASE=release-20261116.0   # gVisor publishes release tarballs on GitHub (gvisor/gvisor)
+          URL=https://github.com/gvisor/gvisor/releases/download/${RELEASE}
           cd "$RUNNER_TEMP"
-          wget -q "${URL}/runsc" "${URL}/runsc.sha512" "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
-          sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
-          chmod a+rx runsc containerd-shim-runsc-v1
-          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin
-          sudo /usr/local/bin/runsc install
+          curl -fsSL -o "gvisor-${ARCH}.tar.bz2" "${URL}/gvisor-${ARCH}.tar.bz2"
+          curl -fsSL -o SHA512SUMS "${URL}/SHA512SUMS"
+          grep " gvisor-${ARCH}.tar.bz2\$" SHA512SUMS | sha512sum -c -
+          sudo mkdir -p /opt/gvisor
+          sudo tar -xjf "gvisor-${ARCH}.tar.bz2" -C /opt/gvisor
+          sudo ln -sf /opt/gvisor/runsc /usr/local/bin/runsc
+          sudo ln -sf /opt/gvisor/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
+          sudo /opt/gvisor/runsc install
           sudo systemctl restart docker
           docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' | grep -w runsc
           docker run --rm --runtime=runsc docker.io/library/python:3.11-slim python3 -c "import platform; print(platform.release())"
@@ -194,9 +198,9 @@ jobs:
           --health-retries 30
     env:
       TRI_TEST_DATABASE_URL: postgres://tri:tri-ci@127.0.0.1:5432/tri?sslmode=disable
-      TRI_OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
-      AWS_ACCESS_KEY_ID: triminio
-      AWS_SECRET_ACCESS_KEY: triminio-secret
+      TRI_OBJECT_STORE_ENDPOINT: http://127.0.0.1:8333
+      AWS_ACCESS_KEY_ID: tri-ci-access
+      AWS_SECRET_ACCESS_KEY: tri-ci-secret-key
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -206,11 +210,13 @@ jobs:
         run: |
           git config --global user.email ci@example.com
           git config --global user.name "Tri CI"
-      - name: Start MinIO (S3-compatible object storage) and create a bucket
+      - name: Start SeaweedFS (S3-compatible object storage that verifies request signatures) and create a bucket
         run: |
-          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=triminio -e MINIO_ROOT_PASSWORD=triminio-secret minio/minio server /data
-          for _ in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
-          docker run --rm --network host --entrypoint sh minio/mc -c "mc alias set local http://127.0.0.1:9000 triminio triminio-secret && mc mb local/tri-ci"
+          mkdir -p "$RUNNER_TEMP/s3"
+          printf '{"identities":[{"name":"tri","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > "$RUNNER_TEMP/s3/s3.json"
+          docker run -d --name s3 -p 8333:8333 -v "$RUNNER_TEMP/s3:/cfg" chrislusf/seaweedfs server -s3 -s3.config=/cfg/s3.json -dir=/data
+          for _ in $(seq 90); do code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8333/ || true); [ "$code" = 403 ] && break; sleep 1; done
+          python -c "from tri.objectstore import object_store_from_url as o; o('s3://tri-ci/x').create_bucket()"
       - name: Multi-node tests (shared PostgreSQL metadata; file and S3 object storage; failover)
         env:
           TRI_TEST_S3_URL: s3://tri-ci/tests
@@ -283,7 +289,7 @@ jobs:
           python-version: "3.11"
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
           cache: false
       - name: Configure git identity for fixture repos
         run: |

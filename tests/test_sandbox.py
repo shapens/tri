@@ -173,6 +173,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(sandbox.resolve_backend("Container"), "container")
 
 
+@unittest.skipIf(os.name == "nt", "the expected argv uses POSIX bind paths; Windows hosts translate them")
 class ContainerWrapTests(unittest.TestCase):
     """The engine command line, checked without an engine."""
 

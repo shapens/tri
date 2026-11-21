@@ -324,7 +324,9 @@ class RunnerAutoscaleTests(RunnerPoolBase):
         self.assertIn("start", actions)
         self.assertIn("drain", actions)
         jobs = self.tri("runner", "jobs", token=self.runner_token)["data"]["jobs"]
-        self.assertEqual(sorted(job["status"] for job in jobs), ["completed"] * 4)
+        failed = [self.tri("checks", "inspect", job["check"])["data"] if job.get("check") else job for job in jobs if job["status"] != "completed"]
+        details = [{key: item.get(key) for key in ("status", "exit_status", "file_changes", "reproducibility", "environment_policy")} for item in failed]
+        self.assertEqual(sorted(job["status"] for job in jobs), ["completed"] * 4, details)
         self.assertEqual(len({job["runner"] for job in jobs}), 1)  # one runner identity, several processes
 
 

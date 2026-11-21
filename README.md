@@ -76,7 +76,7 @@ Run several stateless nodes for one store: metadata in PostgreSQL, content in S3
 
 ```sh
 export TRI_DATABASE_URL='postgres://tri:...@db.internal:5432/tri?sslmode=require' TRI_DATABASE_SCHEMA=tri
-export TRI_OBJECT_STORE=s3://tri-objects/prod AWS_REGION=us-east-1   # TRI_OBJECT_STORE_ENDPOINT for MinIO/R2
+export TRI_OBJECT_STORE=s3://tri-objects/prod AWS_REGION=us-east-1   # TRI_OBJECT_STORE_ENDPOINT for SeaweedFS/MinIO/R2
 tri storage migrate --database "$TRI_DATABASE_URL" --schema tri --objects "$TRI_OBJECT_STORE"   # once, from an existing SQLite home
 TRI_NODE_ID=node-a tri serve --host 0.0.0.0 --auth-file tokens.json      # repeat on every node
 export TRI_REMOTE=https://tri-a.example.com,https://tri-b.example.com   # clients fail over

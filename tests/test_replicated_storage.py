@@ -4,7 +4,7 @@ The translation tests always run. The multi-node tests need a PostgreSQL server:
 set TRI_TEST_DATABASE_URL (or TRI_DATABASE_URL), e.g.
 postgres://user:pass@127.0.0.1:5432/postgres?sslmode=disable. The S3 test also
 needs TRI_TEST_S3_URL (s3://bucket/prefix) plus TRI_OBJECT_STORE_ENDPOINT and
-AWS credentials, e.g. a local MinIO.
+AWS credentials, e.g. a local SeaweedFS or MinIO.
 """
 
 from __future__ import annotations
