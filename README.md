@@ -12,7 +12,7 @@ The goal is to be the best agent-native source control. The field as of 2026-11-
 - Anthropic's internal Scion replaced Git for one agent-scale monorepo: server-side changesets, no full clones, server-side blame and merge bases, no global merge lock. Its access control is the thin part of its public write-up.
 - Tri's wedge is the live record itself: isolated workspaces, API-first mutations, pre-commit provenance, structured checks, object-level policy, secret leases, and reviewable changesets before any Git or GitHub export.
 
-`tri.md` holds the full comparison, the gaps that remain (server-authoritative storage, virtual checkouts, sandboxed runners), and the scorecard Tri has to win.
+`tri.md` holds the full comparison, the gaps that remain (replicated storage behind the service, virtual checkouts, a remote runner pool), and the scorecard Tri has to win.
 
 The marginal advantage to prove is small and specific: an agent should be able to mutate, check, review, protect, and export work through stable Tri objects without first editing a shared working directory, assigning changes to a branch, or treating a GitHub pull request as the live coordination surface.
 
@@ -61,6 +61,19 @@ Connect an agent harness over MCP (stdio). Every tool call runs as the actor the
 claude mcp add tri -- env TRI_HOME=/tmp/tri-home tri --actor agent:claude mcp
 ```
 
+Point clients at one central server instead of a local store. The server is the only copy; each machine keeps a blob cache and its mounted files:
+
+```sh
+export TRI_REMOTE=https://tri.example.com TRI_TOKEN=tri_...      # or TRI_TOKEN_FILE
+tri workspace create app --from main                          # runs on the server
+tri workspace mount ws_... ./wt --paths services/api          # fetches only uncached content
+tri workspace sync ws_...                                      # one batched upload of what changed
+tri run ws_... -- make test                                    # executes on the server, sandboxed
+claude mcp add tri -- env TRI_REMOTE=https://tri.example.com TRI_TOKEN_FILE=~/.tri-token tri mcp
+```
+
+Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name server paths (`files write --body`, `import <dir>`, `workspace mount <dir>`, ...) unless the caller is a maintainer.
+
 ## Implemented MVP Surface
 
 - machine-readable command discovery, schema catalog, response links for visible refs, generic typed-object inspection, derived actor identity inspection, actor-aware package boundary declaration/inspection, project discovery/inspection, and store doctor
@@ -96,6 +109,7 @@ claude mcp add tri -- env TRI_HOME=/tmp/tri-home tri --actor agent:claude mcp
 - history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
+- remote mode (`TRI_REMOTE`, `TRI_TOKEN`): the CLI and `tri mcp` run every command on one central `tri serve`; `workspace mount`/`sync` work through a per-machine blob cache (`TRI_CACHE_DIR`), and `files fetch` reads many files per round trip
 - post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
 - sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS; no network, no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/wall-clock limits
 - partial checkouts for large trees (`tri run --paths <glob>`, `tri workspace mount --paths <glob>`), with run directories deleted in the background and new base directories derived from the previous base

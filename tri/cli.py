@@ -132,7 +132,8 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "files-list", "usage": "tri files list <workspace-or-snapshot>", "schema": "tri.files.list", "description": "List files in a workspace or snapshot."},
     {"name": "files-stat", "usage": "tri files stat <workspace-or-snapshot> <path>", "schema": "tri.files.stat", "description": "Inspect path metadata without reading file contents."},
     {"name": "files-read", "usage": "tri files read <workspace-or-snapshot> <path> [--offset <n>] [--limit <n>]", "schema": "tri.files.read", "description": "Read a file through the Tri file API."},
-    {"name": "files-write", "usage": "tri files write <workspace> <path> (--text <text> | --body <file>) [--expect-head <snapshot>]", "schema": "tri.files.write", "description": "Write a file through the Tri file API."},
+    {"name": "files-fetch", "usage": "tri files fetch <workspace-or-snapshot> --path <path> [--path <path>] [--max-bytes <n>]", "schema": "tri.files.fetch", "description": "Read several files in one call as base64 (remote mounts); paths beyond the byte budget come back in deferred."},
+    {"name": "files-write", "usage": "tri files write <workspace> <path> (--text <text> | --base64 <data> | --body <file>) [--expect-head <snapshot>]", "schema": "tri.files.write", "description": "Write a file through the Tri file API."},
     {"name": "files-delete", "usage": "tri files delete <workspace> <path> [--expect-head <snapshot>]", "schema": "tri.files.delete", "description": "Delete a file through the Tri file API."},
     {"name": "files-move", "usage": "tri files move <workspace> <src> <dest> [--expect-head <snapshot>]", "schema": "tri.files.move", "description": "Move a file through the Tri file API."},
     {"name": "files-log", "usage": "tri files log <ref> <path> [--limit <n>]", "schema": "tri.files.log", "description": "Path history along the first-parent snapshot chain, with change provenance and no checkout."},
@@ -247,6 +248,8 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.diagnostic": {
         "required": ["code", "severity", "message", "retryable"],
         "codes": [
+            "remote_unreachable",
+            "content_mismatch",
             "sandbox_unavailable",
             "mirror_conflict",
             "mirror_diverged",
@@ -371,6 +374,9 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.merge_rule.list": {"required": ["project", "merge_rules"]},
     "tri.mirror.inspect": {"required": ["id", "project", "target", "remote", "branch", "audience", "status", "synced_snapshot", "synced_git_commit", "in_sync", "last_result", "created_by", "created_at"]},
     "tri.mirror.list": {"required": ["mirrors"]},
+    "tri.files.fetch": {"required": ["snapshot", "files", "missing", "deferred", "bytes"]},
+    "tri.remote.mount": {"required": ["workspace", "path", "snapshot", "remote", "files", "fetched_bytes", "cache_hits"]},
+    "tri.remote.sync": {"required": ["workspace", "path", "snapshot", "remote", "written", "deleted"]},
     "tri.verification.inspect": {"required": ["id", "project", "changeset", "target", "merged_snapshot", "pre_merge_snapshot", "check_set", "status", "checks", "created_at"]},
     "tri.verification.list": {"required": ["project", "verifications"]},
     "tri.verification.run": {"required": ["project", "processed", "pending", "cycles"]},
@@ -2488,6 +2494,61 @@ def result_name_for_batch_item(item: dict[str, Any], argv: list[str], index: int
     return ".".join(meaningful[:2]) if meaningful else f"command.{index}"
 
 
+# Arguments that name a file or directory on the machine running Tri. Over the
+# HTTP API that machine is the server: `files write --body /etc/shadow` would
+# copy a server file into a workspace, `workspace mount <ws> /srv/...` would
+# write into the server's filesystem. Remote callers use the file API instead.
+SERVER_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "cmd_files_write": ("body",),
+    "cmd_import": ("repo",),
+    "cmd_workspace_mount": ("path",),
+    "cmd_export_patch": ("output",),
+    "cmd_export_commit": ("repo",),
+    "cmd_export_github_pr": ("repo",),
+    "cmd_secrets_put": ("value_file",),
+    "cmd_task_create": ("body_file",),
+    "cmd_advisory_create": ("body_file",),
+    "cmd_policy_create_embargo": ("body_file",),
+    "cmd_batch": ("plan",),
+    "cmd_mirror_add": ("remote",),
+}
+
+
+def split_remote_flag(argv: list[str]) -> tuple[list[str], str | None]:
+    """Strip `--remote <url>` from the global options before the command word."""
+    out: list[str] = []
+    remote = None
+    index = 0
+    while index < len(argv) and argv[index].startswith("--"):
+        part = argv[index]
+        if part == "--remote" and index + 1 < len(argv):
+            remote = argv[index + 1]
+            index += 2
+        elif part.startswith("--remote="):
+            remote = part.split("=", 1)[1]
+            index += 1
+        elif part in ("--actor", "--response") and index + 1 < len(argv):
+            out += argv[index : index + 2]
+            index += 2
+        else:
+            out.append(part)
+            index += 1
+    return out + argv[index:], remote
+
+
+def require_no_server_paths(args: argparse.Namespace, *, actor: str) -> None:
+    names = SERVER_PATH_ARGUMENTS.get(getattr(getattr(args, "func", None), "__name__", ""), ())
+    used = [name for name in names if getattr(args, name, None) not in (None, "", [])]
+    if used and "role:maintainer" not in actor_selectors(actor):
+        raise TriError(
+            "policy_denied",
+            "Arguments that name paths on the server are not available over the API.",
+            arguments=["--" + name.replace("_", "-") for name in used],
+            reason="server_path",
+            hint="Send content through the file API (files write --text or --base64) instead of a server path.",
+        )
+
+
 def run_batch_payload(
     store: Store,
     payload: dict[str, Any],
@@ -2495,6 +2556,7 @@ def run_batch_payload(
     default_actor: str,
     start: float | None = None,
     pinned_actor: str | None = None,
+    server_paths_allowed: bool = True,
 ) -> tuple[dict[str, Any], bool]:
     commands = payload.get("commands")
     if commands is None:
@@ -2541,7 +2603,7 @@ def run_batch_payload(
         if pinned_actor is not None and item_actor and item_actor != pinned_actor:
             raise_actor_mismatch(item_actor, pinned_actor)
         command_started = time.perf_counter()
-        output, status = execute_argv(argv, actor=item_actor or default_actor, start=time.time(), store=store, pinned_actor=pinned_actor)
+        output, status = execute_argv(argv, actor=item_actor or default_actor, start=time.time(), store=store, pinned_actor=pinned_actor, server_paths_allowed=server_paths_allowed)
         wall_ms = round((time.perf_counter() - command_started) * 1000, 3)
         alias = item.get("as")
         if alias is not None and not isinstance(alias, str):
@@ -9094,10 +9156,45 @@ def cmd_files_read(store: Store, args: argparse.Namespace, command: list[str], s
     )
 
 
+FILES_FETCH_MAX_BYTES = 16 * 1024 * 1024
+
+
+def cmd_files_fetch(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    """Read several files in one call (remote mounts and caches); same policy as files read."""
+    snapshot, hidden_patterns = resolve_ref_context(store, args.ref, actor=args.actor, action="workspace.read")
+    entries = store.load_snapshot_tree(snapshot)
+    budget = min(args.max_bytes or FILES_FETCH_MAX_BYTES, FILES_FETCH_MAX_BYTES)
+    files: list[dict[str, Any]] = []
+    missing: list[str] = []
+    deferred: list[str] = []
+    used = 0
+    for raw in args.path or []:
+        path = normalize_path(raw)
+        entry = entries.get(path)
+        if entry is None:
+            missing.append(path)
+            continue
+        visible, reason = path_visibility(path, hidden_patterns)
+        if not visible:
+            raise TriError("policy_denied", "Path is hidden by policy.", object=path, reason=reason)
+        if files and used + int(entry.get("size") or 0) > budget:
+            deferred.append(path)
+            continue
+        data = store.read_blob(entry["blob"])
+        used += len(data)
+        files.append({"path": path, "hash": entry["hash"], "mode": entry.get("mode", "100644"), "size": len(data), "encoding": "base64", "content": base64.b64encode(data).decode()})
+    return envelope("tri.files.fetch", command, actor=args.actor, start=start, data={"snapshot": snapshot, "files": files, "missing": missing, "deferred": deferred, "bytes": used})
+
+
 def cmd_files_write(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     path = normalize_path(args.path)
     if args.body:
         data = Path(args.body).read_bytes()
+    elif getattr(args, "base64", None) is not None:
+        try:
+            data = base64.b64decode(args.base64, validate=True)
+        except ValueError:
+            raise TriError("invalid_command", "--base64 is not valid base64.") from None
     else:
         data = (args.text or "").encode()
 
@@ -15685,6 +15782,13 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
 
     pinned_actor: str | None = None
 
+    @property
+    def server_paths_allowed(self) -> bool:
+        """Server-local path arguments are only for an unauthenticated loopback
+        server, whose callers already run on this machine."""
+        host = str(self.server.server_address[0])
+        return getattr(self.server, "authority", None) is None and host in LOOPBACK_HOSTS
+
     def authenticate(self, start: float) -> bool:
         """With a token file, bind the request to the token's actor or refuse it."""
         self.pinned_actor = None
@@ -15736,7 +15840,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
         return header if header else None
 
     def run_get_command(self, start: float, argv: list[str]) -> bool:
-        output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
+        output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
         self.write_json(200, output)
         return True
 
@@ -15998,16 +16102,16 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             self.write_json(200, envelope("tri.api.health", ["tri", "serve", "health"], actor=self.actor_from_request() or "actor_local", start=start, data=data))
             return
         if parsed.path == "/v0/commands":
-            output, _ = execute_argv(["commands"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
+            output, _ = execute_argv(["commands"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
             self.write_json(200, output)
             return
         if parsed.path == "/v0/schema":
-            output, _ = execute_argv(["schema"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
+            output, _ = execute_argv(["schema"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
             self.write_json(200, output)
             return
         if parsed.path.startswith("/v0/schema/"):
             name = unquote(parsed.path.removeprefix("/v0/schema/"))
-            output, _ = execute_argv(["schema", name], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
+            output, _ = execute_argv(["schema", name], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
             self.write_json(200, output)
             return
         if self.route_object_get(start, parsed):
@@ -16050,7 +16154,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 store = Store(pack_on_close=False)
                 try:
                     actor = self.actor_from_request(payload) or "actor_local"
-                    data, ok = run_batch_payload(store, payload, default_actor=actor, start=start, pinned_actor=self.pinned_actor)
+                    data, ok = run_batch_payload(store, payload, default_actor=actor, start=start, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed)
                 finally:
                     store.close()
                 self.write_json(
@@ -16074,7 +16178,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 argv = argv[1:]
             if argv and argv[0] in API_BLOCKED_COMMANDS:
                 raise TriError("invalid_command", "This command is not available through the API.", object=argv[0])
-            output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, pack_on_close=False, pinned_actor=self.pinned_actor)
+            output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
             self.write_json(200, output)
         except TriError as exc:
             self.write_json(
@@ -16536,11 +16640,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_read.add_argument("--offset", type=int, default=0)
     p_read.add_argument("--limit", type=int)
     p_read.set_defaults(func=cmd_files_read)
+    p_fetch = files_sub.add_parser("fetch")
+    p_fetch.add_argument("ref")
+    p_fetch.add_argument("--path", action="append")
+    p_fetch.add_argument("--max-bytes", type=int)
+    p_fetch.set_defaults(func=cmd_files_fetch)
     p_write = files_sub.add_parser("write")
     p_write.add_argument("workspace")
     p_write.add_argument("path")
     p_write.add_argument("--body")
     p_write.add_argument("--text")
+    p_write.add_argument("--base64")
     p_write.add_argument("--expect-head")
     p_write.set_defaults(func=cmd_files_write)
     p_delete = files_sub.add_parser("delete")
@@ -17062,11 +17172,25 @@ def execute_argv(
     store: Store | None = None,
     pack_on_close: bool | None = None,
     pinned_actor: str | None = None,
+    server_paths_allowed: bool = True,
+    forward_remote: bool = True,
 ) -> tuple[dict[str, Any], int]:
     """Run one Tri command. pinned_actor is an authenticated identity: the command
-    runs as that actor and any other --actor in argv is refused."""
+    runs as that actor and any other --actor in argv is refused. With
+    server_paths_allowed=False (HTTP API callers), arguments that name files or
+    directories on the server's disk are refused for non-maintainers."""
     start = time.time() if start is None else start
     argv = list(argv)
+    argv, remote = split_remote_flag(argv)
+    if store is None and forward_remote:
+        remote = remote or os.environ.get("TRI_REMOTE", "").strip() or None
+        if remote:
+            from tri.remote import LOCAL_ONLY_COMMANDS, command_words, dispatch
+
+            words = command_words(argv)
+            if words and words[0] not in LOCAL_ONLY_COMMANDS:
+                output = dispatch(argv, remote.rstrip("/"))
+                return output, 0 if output.get("ok", False) else 1
     if pinned_actor is not None:
         actor = pinned_actor
     default_actor = actor or os.environ.get("TRI_ACTOR", "actor_local")
@@ -17103,6 +17227,11 @@ def execute_argv(
             ),
             1,
         )
+    if not server_paths_allowed:
+        try:
+            require_no_server_paths(args, actor=getattr(args, "actor", effective_actor))
+        except TriError as exc:
+            return envelope("tri.error", ["tri", *argv], ok=False, actor=getattr(args, "actor", effective_actor), diagnostics=[exc.diagnostic], start=start), 1
     active_store = store or Store(pack_on_close=pack_on_close)
     try:
         output = args.func(active_store, args, ["tri", *parse_argv], start)
