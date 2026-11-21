@@ -13,6 +13,7 @@ tri = "tri.cli:main"
 tri-bench = "benchmarks.agentic:main"
 tri-bench-tasks = "benchmarks.task_runner:main"
 tri-bench-fanout = "benchmarks.fanout:main"
+tri-bench-contention = "benchmarks.contention:main"
 
 [tool.setuptools.packages.find]
 include = ["tri*", "benchmarks*"]

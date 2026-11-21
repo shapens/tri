@@ -127,6 +127,20 @@ class AgentNativeCliTests(unittest.TestCase):
         self.assertEqual(merged["text_merged_paths"], ["docs/guide.md"])
         self.assertEqual(self.read(self.target_snapshot(), "docs/guide.md"), "A\nb\nc\nd\nE\n")
 
+    def test_merge_text_knob_off_falls_back_to_path_level_conflicts(self) -> None:
+        first = self.checked_changeset(self.workspace(), "docs/guide.md", "A\nb\nc\nd\ne\n")
+        second = self.checked_changeset(self.workspace(), "docs/guide.md", "a\nb\nc\nd\nE\n")
+        self.approve(first)
+        self.approve(second)
+        self.tri("changeset", "merge", first, "--target", "main")
+        self.env["TRI_MERGE_TEXT"] = "0"
+        blocked = self.tri("changeset", "merge", second, "--target", "main", ok=False)
+        self.assertEqual(blocked["data"]["status"], "conflict_required")
+        self.assertEqual([c["path"] for c in blocked["data"]["conflicts"]], ["docs/guide.md"])
+        self.env["TRI_MERGE_TEXT"] = "1"
+        merged = self.tri("changeset", "merge", second, "--target", "main")["data"]
+        self.assertEqual(merged["text_merged_paths"], ["docs/guide.md"])
+
     def test_workspace_update_line_merges_instead_of_conflicting(self) -> None:
         workspace = self.workspace()
         self.tri("files", "write", workspace, "docs/guide.md", "--text", "a\nb\nc\nd\nE\n")

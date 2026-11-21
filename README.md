@@ -91,7 +91,7 @@ claude mcp add tri -- env TRI_HOME=/tmp/tri-home tri --actor agent:claude mcp
 - path and operation-range split preview
 - changeset discard/supersede lifecycle commands with replacement metadata and audit-readable retired changesets
 - changeset dependency stacking with merge/export gating and head-snapshot check revalidation
-- policy-gated changeset merge into Tri targets, with fast-forward, non-conflicting target merge, line-level three-way merges for text files edited on both sides, compare-and-swap retries under concurrent merges, and conflict diagnostics
+- policy-gated changeset merge into Tri targets, with fast-forward, non-conflicting target merge, line-level three-way merges for text files edited on both sides, compare-and-swap retries under concurrent merges, and conflict diagnostics (`TRI_MERGE_TEXT=0` turns line merges off; it is a benchmark/diagnostic knob for measuring path-level merging, not a product setting)
 - maintainer merge rules that let checked changesets touching only matching paths merge without a human review, while every other merge gate still applies
 - history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
@@ -218,6 +218,12 @@ Run the fan-out disk benchmark (N attempts that each edit, install dependencies,
 
 ```sh
 tri-bench-fanout --attempts 10
+```
+
+Run the contention benchmark (N agents edit shared files and merge to main concurrently through a merge rule; Tri line merges versus Tri path-level merges versus Git pull-rebase-push; see [benchmarks/README.md](benchmarks/README.md#contention-benchmark)):
+
+```sh
+tri-bench-contention --agents 50 --parallel 8
 ```
 
 The task benchmark uses `benchmarks/tasks/<task-id>/` packages with `task.toml`, `instruction.md`, `environment/`, `tests/`, and `solution/`. These task verifiers complement the workflow benchmark by checking observable Tri behavior such as workspace isolation, hidden-path redaction, and conflict resolution. See [benchmarks/README.md](benchmarks/README.md).
