@@ -258,7 +258,7 @@ class FuseMount:
 
 
 def is_mounted(mountpoint: Path) -> bool:
-    target = os.path.realpath(str(mountpoint)) if os.path.exists(os.path.dirname(str(mountpoint)) or "/") else str(mountpoint)
+    target = os.path.abspath(str(mountpoint))  # callers pass resolved paths; never stat a possibly dead mount
     try:
         with open("/proc/self/mounts", "rb") as handle:
             for line in handle:

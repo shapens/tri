@@ -236,6 +236,8 @@ def wait_until(predicate, timeout: float = 10.0, interval: float = 0.05) -> bool
 class FuseTestBase(unittest.TestCase):
     def setUp(self) -> None:
         reason = fuse_skip_reason()
+        if reason and os.environ.get("TRI_REQUIRE_FUSE") == "1":
+            self.fail(f"TRI_REQUIRE_FUSE=1 but {reason}")  # the CI job that installs fuse3 must not skip
         if reason:
             self.skipTest(reason)
         self.tmp = tempfile.TemporaryDirectory(prefix="tri-fuse-")
@@ -309,6 +311,9 @@ class FuseLocalCheckoutTests(FuseTestBase):
         self.track_mount(mountpoint.resolve(), state_dir)
         self.assertTrue(fuse.is_mounted(mountpoint.resolve()))
         return mountpoint, out
+
+    def state_dir(self, out: dict) -> Path:
+        return Path(os.environ["TRI_HOME"]) / "leases" / f"{out['lease']}.virtual"
 
     def agent_workspace(self) -> str:
         return self.tri("workspace", "create", "app", "--from", "main", "--hide-path", f"docs/{HIDDEN_CANARY}.txt", actor="agent:a")["data"]["id"]
@@ -406,6 +411,7 @@ class FuseLocalCheckoutTests(FuseTestBase):
         (view / "unsynced.txt").write_bytes(b"keep me\n")
         os.kill(out["virtual"]["pid"], signal.SIGTERM)
         self.assertTrue(wait_until(lambda: not fuse.is_mounted(view.resolve())), "SIGTERM must unmount")
+        self.assertTrue(wait_until(lambda: not vfs.daemon_alive(self.state_dir(out))), "the daemon exits after unmounting")
         self.assertEqual(os.listdir(view), [], "the mountpoint is an ordinary empty directory again")
         report = self.tri("leases", "reap")["data"]
         reaped = [item for item in report["reaped"] if item["lease"] == out["lease"]]
@@ -417,6 +423,7 @@ class FuseLocalCheckoutTests(FuseTestBase):
         view, out = self.mount(ws)
         self.assertEqual((view / "README.md").read_bytes(), b"hello\n")
         os.kill(out["virtual"]["pid"], signal.SIGKILL)
+        self.assertTrue(wait_until(lambda: not vfs.daemon_alive(self.state_dir(out))))
         if out["virtual"]["auto_unmount"]:
             self.assertTrue(wait_until(lambda: not fuse.is_mounted(view.resolve())), "auto_unmount clears the mount")
         report = self.tri("gc", "--reap")["data"]["reaped"]
@@ -431,6 +438,7 @@ class FuseLocalCheckoutTests(FuseTestBase):
         view, out = self.mount(ws)
         os.kill(out["virtual"]["pid"], signal.SIGTERM)
         self.assertTrue(wait_until(lambda: not fuse.is_mounted(view.resolve())))
+        self.assertTrue(wait_until(lambda: not vfs.daemon_alive(self.state_dir(out))))
         _, again = self.mount(ws)
         self.assertNotEqual(again["lease"], out["lease"])
         self.assertEqual(self.tri("workspace", "lease-inspect", out["lease"])["data"]["status"], "reaped")
@@ -444,6 +452,8 @@ class FuseRemoteCheckoutTests(FuseTestBase):
         (repo / "src" / "app.py").write_bytes(b"print('v1')\n")
         (repo / "docs").mkdir()
         (repo / "docs" / "guide.md").write_bytes(b"guide\n")
+        (repo / "docs" / "faq.md").write_bytes(b"faq\n")
+        (repo / "docs" / "notes.md").write_bytes(b"notes\n")
         (repo / "vault").mkdir()
         (repo / "vault" / f"{PACKAGE_CANARY}.txt").write_bytes(f"{CONTENT_CANARY}\n".encode())
         self.server_env = {**os.environ, "TRI_HOME": str(self.root / "server-home"), "TRI_AUTO_REAP": "0"}
@@ -503,16 +513,21 @@ class FuseRemoteCheckoutTests(FuseTestBase):
         out = self.tri("workspace", "mount", ws, str(view), "--virtual")["data"]
         state_dir = Path(json.loads(mount_state_path(view.resolve()).read_text())["virtual"])
         self.track_mount(view.resolve(), state_dir)
-        self.assertEqual(out["files"], 2, "the private package is not listed to agent:a")
+        self.assertEqual(out["files"], 4, "the private package is not listed to agent:a")
         self.assertEqual(sorted(os.listdir(view)), ["docs", "src"])
         self.assertEqual((view / "src" / "app.py").read_bytes(), b"print('v1')\n")
-        (view / "docs" / "guide.md").write_bytes(b"guide v2\n")
+        # One round trip fetches faq.md and prefetches its small neighbours.
+        self.assertEqual((view / "docs" / "faq.md").read_bytes(), b"faq\n")
+        self.assertEqual((view / "docs" / "notes.md").read_bytes(), b"notes\n")
+        (view / "docs" / "guide.md").write_bytes(b"guide v2\n")  # truncating write: nothing to fetch
         (view / "new.txt").write_bytes(b"new\n")
         synced = self.tri("workspace", "sync", ws)["data"]
         self.assertEqual(synced["written"], ["docs/guide.md", "new.txt"])
         counters = synced["virtual"]["counters"]
-        self.assertEqual(counters["files_faulted"], 2)
-        self.assertEqual(counters["bytes_fetched"], len(b"print('v1')\n") + len(b"guide\n"))
+        self.assertEqual(counters["files_faulted"], 3)
+        self.assertEqual(counters["files_prefetched"], 2)
+        self.assertEqual(counters["cache_hits"], 1, "notes.md came from the prefetch")
+        self.assertEqual(counters["bytes_fetched"], len(b"print('v1')\n") + len(b"faq\n") + len(b"notes\n") + len(b"guide\n"))
         self.assertEqual(self.tri("files", "read", ws, "docs/guide.md")["data"]["text"], "guide v2\n")
         self.assertEqual(self.tri("workspace", "sync", ws)["data"]["written"], [])
         self.tri("workspace", "unmount", ws)
@@ -529,6 +544,26 @@ class FuseRemoteCheckoutTests(FuseTestBase):
         self.assertEqual(final["cache_hits"], 1)
         self.assertEqual(final["bytes_fetched"], 0)
         self.assertIsNotNone(again)
+
+
+class VirtualBenchmarkTests(unittest.TestCase):
+    def test_benchmark_runs_and_records_bytes_fetched(self) -> None:
+        from benchmarks import virtual as bench
+
+        modes = "full,paths" + ("" if fuse_skip_reason() else ",virtual")
+        with tempfile.TemporaryDirectory(prefix="tri-bench-virtual-test-") as out:
+            with mock.patch("sys.stdout"):
+                self.assertEqual(bench.main(["--files", "40", "--packages", "4", "--file-size", "64", "--modes", modes, "--transports", "local", "--output-dir", out]), 0)
+            report = json.loads((Path(out) / "results.json").read_text())
+            rows = {row["mode"]: row for row in report["results"]}
+            self.assertEqual(rows["full"]["files_on_disk"], 40)
+            self.assertEqual(rows["full"]["bytes_fetched"], 40 * 64)
+            self.assertEqual(rows["paths"]["files_on_disk"], 10)
+            if "virtual" in rows:
+                self.assertEqual(rows["virtual"]["files_fetched"], 1)
+                self.assertEqual(rows["virtual"]["bytes_fetched"], 64)
+                self.assertEqual(rows["virtual"]["package_walk_files_fetched"], 10)
+            self.assertIn("| local | full |", (Path(out) / "summary.md").read_text())
 
 
 if __name__ == "__main__":

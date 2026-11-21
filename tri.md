@@ -623,6 +623,8 @@ tri workspace lease-revoke <lease>
 
 If `tri workspace sync` is called without `--lease`, Tri may use the caller's own active materialization lease. Multiple active leases from different actors are ambiguous and must fail closed until the caller supplies the intended lease id.
 
+A virtual checkout (`tri workspace mount <workspace> <dir> --virtual`) is the same lease with backend `fuse`. Its lower layer is a manifest of the entries `files list` shows the mounting actor at mount time (hidden, package-private, and secret-like paths are never in it, and a directory that holds only such paths does not appear); its upper layer and whiteouts live in `leases/<lease>.virtual/`. Sync reads only the upper layer, applies the same ignore rules as a materialized mount, leaves writes at paths the actor cannot see local (reported as `local_only_paths`), and keeps the stale-head refusal. A lease whose daemon is gone is reaped as `daemon_exited`: unmount (`fusermount3 -u -z`), salvage unsynced edits, remove the state.
+
 ### Diff Contract
 
 A diff should be reproducible from snapshots.

@@ -72,6 +72,19 @@ tri run ws_... -- make test                                    # executes on the
 claude mcp add tri -- env TRI_REMOTE=https://tri.example.com TRI_TOKEN_FILE=~/.tri-token tri mcp
 ```
 
+Mount a whole workspace without naming paths up front (Linux, needs `fuse3`). Trees come from the manifest at mount time; file content is fetched on first read, from the local store or through the blob cache in remote mode:
+
+```sh
+tri workspace mount ws_... ./wt --virtual        # detached FUSE daemon; prints lease, pid, counters
+cat ./wt/services/api/main.py                    # faults in this one file (plus small neighbours remotely)
+$EDITOR ./wt/README.md                           # writes copy up into the view's upper layer
+tri workspace sync ws_...                        # records edits; refuses if the head moved (stale_materialization)
+tri workspace unmount ws_...                     # refuses with unsynced_changes unless --force (local: kept as a salvage)
+tri doctor | jq .data.virtual_checkouts          # backend, or why it is unavailable (macOS, Windows: use --paths)
+```
+
+`sync` and `unmount` report `files_faulted`, `bytes_fetched`, `cache_hits`, and `files_prefetched`. If a view's daemon is killed, `fusermount3` unmounts it (`auto_unmount`); `tri gc --reap` or the next reaper pass salvages its edits and releases the lease. A mount left wedged by an older fusermount recovers with `fusermount3 -u -z <dir>`.
+
 Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name server paths (`files write --body`, `import <dir>`, `workspace mount <dir>`, ...) unless the caller is a maintainer.
 
 ## Implemented MVP Surface
@@ -115,6 +128,7 @@ Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name 
 - post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
 - sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS; no network, no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/wall-clock limits
 - partial checkouts for large trees (`tri run --paths <glob>`, `tri workspace mount --paths <glob>`), with run directories deleted in the background and new base directories derived from the previous base
+- virtual checkouts on Linux (`tri workspace mount --virtual`, `tri workspace unmount`): a pure-Python FUSE server (no libfuse) mounted unprivileged through `fusermount3`, showing exactly the paths `files list` shows the actor and fetching content on first read; edits copy up and sync like a mounted directory. macOS and Windows report the backend unavailable in `tri doctor` and refuse with a `--paths` hint
 - two-way Git mirror (`tri mirror add|sync|inspect|list|remove`): Git pushes land as attributed snapshots, Tri merges land as Git commits titled by changeset, both-sides edits line-merge into a merge commit, and private packages and secret-like paths never leave Tri
 - review object creation and inspection with task context, changeset summary, checks, artifacts, policy findings, attached policy/check evidence, visibility impact, reviewer state, threaded comments, and export preview
 - anchored review comments, direct review-action inspection, replies, thread resolution, requested changes, assigned-reviewer approvals, risk markers, explicit policy-finding/check-summary attachments, explicit review close, and request-agent-pass workspaces

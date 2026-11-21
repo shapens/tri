@@ -40,6 +40,8 @@ from tri.fuse import Attr
 STATE_VERSION = 1
 STATS_FLUSH_SECONDS = 0.25
 LOWER_CACHE_BYTES = 64 << 20
+PREFETCH_BYTES = 256 << 10
+PREFETCH_MAX_FILE = 64 << 10
 
 
 def _atomic_write(path: Path, payload: Any) -> None:
@@ -68,7 +70,7 @@ def _mode_bits(entry: dict[str, Any], read_only: bool) -> int:
 class Stats:
     """Counters a view reports in JSON (files faulted, bytes fetched, ...)."""
 
-    FIELDS = ("files_faulted", "bytes_fetched", "cache_hits", "copy_ups", "lookups", "dirs_listed", "reads", "writes")
+    FIELDS = ("files_faulted", "bytes_fetched", "cache_hits", "files_prefetched", "copy_ups", "lookups", "dirs_listed", "reads", "writes")
 
     def __init__(self, path: Path | None, base: dict[str, Any] | None = None) -> None:
         self.path = path
@@ -174,11 +176,17 @@ class RemoteSource:
 
         self.client = RemoteClient(url, remote_token(), timeout=120.0)
         self.snapshot = snapshot
+        try:
+            self.prefetch_files = max(0, int(os.environ.get("TRI_VIRTUAL_PREFETCH", "32")))
+        except ValueError:
+            self.prefetch_files = 32
 
     def prepare(self) -> None:
         pass
 
-    def read(self, path: str, entry: dict[str, Any], stats: Stats) -> bytes:
+    def read(self, path: str, entry: dict[str, Any], stats: Stats, siblings: list[tuple[str, dict[str, Any]]] = ()) -> bytes:
+        """One round trip fetches the file plus up to ``TRI_VIRTUAL_PREFETCH``
+        (default 32) small uncached files from the same directory."""
         from tri.remote import cache_path, cache_put
 
         digest = entry["hash"]
@@ -190,19 +198,36 @@ class RemoteSource:
                 return data
         except OSError:
             pass
-        fetched = self.client.command(["files", "fetch", self.snapshot, "--path", path])
+        wanted = [path]
+        budget = int(entry.get("size") or 0)
+        for other, other_entry in siblings:
+            if len(wanted) > self.prefetch_files:
+                break
+            size = int(other_entry.get("size") or 0)
+            if other == path or size > PREFETCH_MAX_FILE or budget + size > PREFETCH_BYTES or cache_path(other_entry["hash"]).exists():
+                continue
+            wanted.append(other)
+            budget += size
+        fetched = self.client.command(["files", "fetch", self.snapshot, *sum((["--path", item] for item in wanted), []), "--max-bytes", str(max(budget, 1))])
         if not fetched.get("ok"):
             raise OSError(errno.EIO, f"fetch failed: {(fetched.get('diagnostics') or [{}])[0].get('code')}")
+        expected = {path: digest, **{other: other_entry["hash"] for other, other_entry in siblings}}
+        result: bytes | None = None
         for item in fetched["data"]["files"]:
-            if item["path"] != path:
+            content = base64.b64decode(item["content"])
+            if expected.get(item["path"]) != hashlib.sha256(content).hexdigest() or item.get("hash") != expected.get(item["path"]):
+                if item["path"] == path:
+                    raise OSError(errno.EIO, "content mismatch")
                 continue
-            data = base64.b64decode(item["content"])
-            if hashlib.sha256(data).hexdigest() != digest:
-                raise OSError(errno.EIO, "content mismatch")
-            cache_put(digest, data)
-            stats.add("bytes_fetched", len(data))
-            return data
-        raise OSError(errno.EIO, "server deferred or omitted the file")
+            cache_put(item["hash"], content)
+            stats.add("bytes_fetched", len(content))
+            if item["path"] == path:
+                result = content
+            else:
+                stats.add("files_prefetched")
+        if result is None:
+            raise OSError(errno.EIO, "server deferred or omitted the file")
+        return result
 
     def close(self) -> None:
         pass
@@ -399,7 +424,12 @@ class VirtualView:
         if cached is not None:
             return cached
         started = time.time()
-        data = self.source.read(path, entry, self.stats)
+        if getattr(self.source, "prefetch_files", 0):
+            parent = _parent(path)
+            siblings = [(other, self.lower[other]) for other in (_join(parent, name) for name in self.lower_dirs.get(parent, ())) if other in self.lower and other not in self.whiteouts]
+            data = self.source.read(path, entry, self.stats, siblings)
+        else:
+            data = self.source.read(path, entry, self.stats)
         if digest not in self._faulted:
             self._faulted.add(digest)
             self.stats.add("files_faulted")
@@ -425,7 +455,7 @@ class VirtualView:
                 raise OSError(errno.ELOOP, path)
             return LowerHandle(self, path, detail)
         if kind == "lower":
-            self.copy_up(path)
+            self.copy_up(path, empty=bool(flags & os.O_TRUNC))  # a truncating open never needs the old content
         fd = os.open(self.upper / path, flags & ~(os.O_CREAT | os.O_EXCL | os.O_APPEND | getattr(os, "O_NOCTTY", 0)))
         return UpperHandle(self, fd)
 
@@ -443,14 +473,14 @@ class VirtualView:
         self._ensure_upper_dir(_parent(path))
         os.mkdir(target, 0o755)
 
-    def copy_up(self, path: str) -> None:
+    def copy_up(self, path: str, *, empty: bool = False) -> None:
         entry = self.lower[path]
         self._ensure_upper_dir(_parent(path))
         target = self.upper / path
         if entry.get("mode") == "120000":
             os.symlink(self.readlink(path), target)
         else:
-            data = self.lower_content(path, entry)
+            data = b"" if empty else self.lower_content(path, entry)
             tmp = target.with_name(f".tri-copyup-{uuid.uuid4().hex}")
             tmp.write_bytes(data)
             os.chmod(tmp, 0o755 if entry.get("mode") == "100755" else 0o644)
@@ -598,7 +628,7 @@ class VirtualView:
         if kind == "dir":
             raise OSError(errno.EISDIR, path)
         if kind == "lower":
-            self.copy_up(path)
+            self.copy_up(path, empty=size == 0)
         os.truncate(self.upper / path, size)
 
     def chmod(self, path: str, mode: int) -> None:
