@@ -359,7 +359,11 @@ def ensure_link_base(bases: Path, cache: CheckoutCache, read_blob: Callable[[str
                 continue
             digest = entry.get("hash")
             if isinstance(digest, str):
-                _link_or_copy(cache.path_for(digest, entry["blob"], mode == "100755"), target)
+                try:
+                    _link_or_copy(cache.path_for(digest, entry["blob"], mode == "100755"), target)
+                except FileNotFoundError:
+                    # A concurrent eviction removed the cache entry after lookup: recreate it once.
+                    _link_or_copy(cache.path_for(digest, entry["blob"], mode == "100755"), target)
             else:
                 target.write_bytes(read_blob(entry["blob"]))
                 os.chmod(target, 0o755 if mode == "100755" else 0o644)

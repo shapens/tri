@@ -6868,11 +6868,15 @@ def empty_trash(store: Store, *, min_age_seconds: float = 600.0) -> int:
         stamp = child.name.split("-", 1)[0]
         if stamp.isdigit() and now - int(stamp) < min_age_seconds:
             continue
-        try:
-            remove_tree(child)
-            removed += 1
-        except OSError:
-            pass
+        # A detached remover may be deleting the same tree; retry until it is gone.
+        for _attempt in range(5):
+            try:
+                remove_tree(child)
+            except OSError:
+                pass
+            if not child.exists():
+                removed += 1
+                break
     return removed
 
 
@@ -8345,6 +8349,7 @@ def cmd_gc(store: Store, args: argparse.Namespace, command: list[str], start: fl
         data["trash_removed"] = empty_trash(store, min_age_seconds=0 if args.apply else 600.0)
     if args.clear_caches:
         data["evicted"] = evict_caches(store, clear=True)
+        data["trash_removed"] = empty_trash(store, min_age_seconds=0)
     data["plan"] = gc_plan_summary(store, gc_compute(store, retention_days=retention, grace_seconds=grace))
     if args.apply:
         data["purged"] = gc_apply(store, retention_days=retention, grace_seconds=grace)
