@@ -12,7 +12,7 @@ The goal is to be the best agent-native source control. The field as of 2026-11-
 - Anthropic's internal Scion replaced Git for one agent-scale monorepo: server-side changesets, no full clones, server-side blame and merge bases, no global merge lock. Its access control is the thin part of its public write-up.
 - Tri's wedge is the live record itself: isolated workspaces, API-first mutations, pre-commit provenance, structured checks, object-level policy, secret leases, and reviewable changesets before any Git or GitHub export.
 
-`tri.md` holds the full comparison, the gaps that remain (replicated storage behind the service, virtual checkouts, runner hardening), and the scorecard Tri has to win.
+`tri.md` holds the full comparison, the gaps that remain (replicated storage behind the service, virtual checkouts, a production runtime), and the scorecard Tri has to win.
 
 The marginal advantage to prove is small and specific: an agent should be able to mutate, check, review, protect, and export work through stable Tri objects without first editing a shared working directory, assigning changes to a branch, or treating a GitHub pull request as the live coordination surface.
 
@@ -86,6 +86,29 @@ tri backup create /backups/tri-$(date +%F)                              # a comp
 
 Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name server paths (`files write --body`, `import <dir>`, `workspace mount <dir>`, ...) unless the caller is a maintainer.
 
+Move runs off the store machine onto a runner pool, isolate them in containers (gVisor or Firecracker microVMs through Kata), hand them secret leases, and scale the pool with the queue:
+
+```sh
+tri serve --host 0.0.0.0 --auth-file tokens.json --run-executor remote   # runs queue as jobs
+tri auth issue service:runners --file tokens.json                         # one token for the pool
+
+# on each runner host (Docker or Podman; runsc registered as a Docker runtime for gVisor)
+export TRI_REMOTE=https://tri.example.com TRI_TOKEN_FILE=~/.tri-runner-token
+export TRI_RUN_SANDBOX_BACKEND=container TRI_RUN_OCI_RUNTIME=runsc       # or kata-fc, or runc
+export TRI_RUN_OCI_IMAGE=ghcr.io/acme/ci:2026-11 TRI_RUN_MEMORY_MB=2048 TRI_RUN_CPUS=2 TRI_RUN_PIDS=512
+tri runner autoscale --min 1 --max 8 --idle-seconds 60                    # starts and drains `tri runner work`
+tri doctor | jq .data.sandbox                                             # backend, runtime, image
+
+# an agent: the lease's value reaches only the runner holding the job's claim
+tri secrets request-lease ws_... NPM_TOKEN --env NPM_TOKEN --ttl-seconds 900
+tri run ws_... --runner remote --with-lease lease_... -- npm publish --dry-run
+
+# an external autoscaler (KEDA metrics-api on data.queued, or Prometheus)
+curl -H "Authorization: Bearer $RUNNER_TOKEN" 'https://tri.example.com/v0/runners/metrics?format=prometheus'
+```
+
+On Windows, `TRI_RUN_SANDBOX_BACKEND=auto` (the default) runs sandboxed commands at low integrity inside a Job Object. It cannot block the network without administrator rights, and every run records `network_enforced: false`.
+
 ## Implemented MVP Surface
 
 - machine-readable command discovery, schema catalog, response links for visible refs, generic typed-object inspection, derived actor identity inspection, actor-aware package boundary declaration/inspection, project discovery/inspection, and store doctor
@@ -122,11 +145,11 @@ Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name 
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
 - regional cache (`tri cache serve --upstream <url>`): forwards requests with the caller's token and serves authorized file content from a shared content-addressed store
-- remote runner pool: `tri run --runner remote` / `tri serve --run-executor remote` queue runs; `tri runner work` on other machines claims jobs, fetches only the job's visible files, runs them sandboxed, and reports results
+- remote runner pool: `tri run --runner remote` / `tri serve --run-executor remote` queue runs; `tri runner work` on other machines claims jobs, fetches only the job's visible files, runs them sandboxed, and reports results. Jobs may carry secret leases (delivered only to the claim holder while the claim is live, redacted from output, audited). `tri runner metrics` and `GET /v0/runners/metrics` expose queue depth and claim leases (JSON or Prometheus), and `tri runner autoscale --min N --max M` supervises local workers
 - replicated storage: PostgreSQL metadata (`TRI_DATABASE_URL`, standard-library wire client with TLS and SCRAM) and shared object storage (`TRI_OBJECT_STORE`, S3 Signature V4 or a shared directory) behind any number of stateless `tri serve` nodes; writers stay serialized across nodes, clients fail over between nodes, `tri storage migrate` moves a SQLite store, and backups of a shared store are single-node homes
 - remote mode (`TRI_REMOTE`, `TRI_TOKEN`): the CLI and `tri mcp` run every command on one central `tri serve`; `workspace mount`/`sync` work through a per-machine blob cache (`TRI_CACHE_DIR`), and `files fetch` reads many files per round trip
 - post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
-- sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS; no network, no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/wall-clock limits
+- sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS, a low-integrity Job Object on Windows, or an OCI container (`TRI_RUN_SANDBOX_BACKEND=container`; `TRI_RUN_OCI_RUNTIME=runc|runsc|kata-fc`); no network (except on Windows), no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/pids/wall-clock limits
 - partial checkouts for large trees (`tri run --paths <glob>`, `tri workspace mount --paths <glob>`), with run directories deleted in the background and new base directories derived from the previous base
 - two-way Git mirror (`tri mirror add|sync|inspect|list|remove`): Git pushes land as attributed snapshots, Tri merges land as Git commits titled by changeset, both-sides edits line-merge into a merge commit, and private packages and secret-like paths never leave Tri
 - review object creation and inspection with task context, changeset summary, checks, artifacts, policy findings, attached policy/check evidence, visibility impact, reviewer state, threaded comments, and export preview
@@ -353,7 +376,7 @@ tri export list app --changeset cs_...
 - verify ReFS/Dev Drive clones on a Windows machine that has them (probe-guarded; falls back to `copy`). Overlay, XFS/btrfs reflinks, and the Windows port are verified in CI.
 
 - hosted collaboration layer: server-authoritative storage with disks as caches, sparse checkouts, and tiered caches (see "Agent-Scale Gaps" in `tri.md`)
-- sandboxed remote runners before untrusted agents can call `run` on a shared server
+- Firecracker microVM runs are documented through Kata (`TRI_RUN_OCI_RUNTIME=kata-fc`) but not exercised in CI, which has no KVM; there is no native Firecracker driver
 - post-merge verification lane with automatic revert for low-risk paths
 - broader hosted Policy v0 language: visibility role mapping, embargo lifecycle, cross-object inheritance rules, and actor identity binding
 - semantic conflict resolution beyond same-path ours/theirs/base choices

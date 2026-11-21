@@ -43,6 +43,7 @@ Decisions recorded here (tri.md, "Policy Applies To Reads And Exports" and
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -68,6 +69,7 @@ if str(ROOT) not in sys.path:
 from tri import cli  # noqa: E402
 
 OUTSIDER = "agent:outsider"
+RUNNER = "service:sweep-runner"
 OWNER = "agent:owner"
 SECURITY = "human:security"
 ADMIN = "actor_local"
@@ -262,6 +264,16 @@ class LeakSweepFixture:
         self.tri("files", "write", mix["id"], "src/mix.txt", "--text", "mixed public\n")
         ids["lease_secret_mix"] = self.tri("secrets", "request-lease", mix["id"], C["secret_name"], "--env", "API_TOKEN")["data"]["id"]
         ids["check_mix"] = self.check(mix["id"], "import os; print('token', os.environ['API_TOKEN'])", lease=ids["lease_secret_mix"])["id"]
+        # The same lease on a remote job: a runner fetches the value, the job
+        # prints it and writes it to a file. Both must come back redacted.
+        job = self.tri("run", mix["id"], "--runner", "remote", "--wait", "0", "--with-lease", ids["lease_secret_mix"], "--", sys.executable, "-c", "pass")["data"]
+        claimed = self.tri("runner", "claim", actor=RUNNER)["data"]["job"]
+        assert claimed["id"] == job["id"], claimed
+        value = self.tri("runner", "secrets", job["id"], actor=RUNNER)["data"]["env"]["API_TOKEN"]
+        leaked = base64.b64encode(f"remote token {value}\n".encode()).decode()
+        result = {"exit_status": 0, "stdout": leaked, "stderr": leaked, "written": [{"path": "src/remote-token.txt", "content": leaked}], "deleted": []}
+        ids["check_remote"] = self.tri("runner", "complete", job["id"], "--result", json.dumps(result), actor=RUNNER)["data"]["id"]
+        ids["job_remote"] = job["id"]
         ids["cs_mix"] = self.tri("changeset", "create", mix["id"], "--title", "Mixed public change", "--visibility", "public")["data"]["id"]
         self.approve(ids["cs_mix"])
         self.tri("export", "git-patch", ids["cs_mix"], ok=None)
@@ -271,6 +283,7 @@ class LeakSweepFixture:
         ids["cs_mixpriv"] = self.tri("changeset", "create", mix["id"], "--title", C["privcs_title"], "--visibility", "private")["data"]["id"]
         ids["check_mixpriv"] = self.tri("changeset", "revalidate", ids["cs_mixpriv"])["data"]["checks"][0]["id"]
         ids["lease_secret_priv"] = self.tri("secrets", "request-lease", priv["id"], C["secret_name"], "--env", "API_TOKEN", actor=OWNER)["data"]["id"]
+        ids["job_priv"] = self.tri("run", priv["id"], "--runner", "remote", "--wait", "0", "--with-lease", ids["lease_secret_priv"], "--", sys.executable, "-c", "pass", actor=OWNER)["data"]["id"]
 
         # Embargoed advisory with its private fix.
         advisory = self.tri(
@@ -305,18 +318,18 @@ class LeakSweepFixture:
         self.private_ids |= {
             ids["vault_package"], ids["secret"], ids["advisory"], ids["run_priv"],
             ids["review_priv"], ids["review_emb"], ids["check_priv"], ids["check_emb"], ids["check_mixpriv"],
-            ids["lease_secret_priv"], ids["lease_mount_priv"],
+            ids["lease_secret_priv"], ids["lease_mount_priv"], ids["job_priv"],
         }
         # A lease id in a public workspace is public: workspace readers see it in
         # check records and in the redaction marker that replaces the value. The
         # secret it points at (id, name, value) stays private.
         self.public_ids.add(ids["lease_secret_mix"])
-        self.public_ids |= public_workspaces | public_changesets | {ids["review_pub"], ids["check_pub"], ids["check_mix"], ids["task"], ids["release_pub"]}
+        self.public_ids |= public_workspaces | public_changesets | {ids["review_pub"], ids["check_pub"], ids["check_mix"], ids["check_remote"], ids["job_remote"], ids["task"], ids["release_pub"]}
 
         ids["workspaces"] = sorted(private_workspaces | public_workspaces)
         ids["changesets"] = sorted(private_changesets | public_changesets)
         ids["reviews"] = [ids["review_pub"], ids["review_priv"], ids["review_emb"]]
-        ids["checks"] = [ids["check_pub"], ids["check_mix"], ids["check_priv"], ids["check_emb"], ids["check_mixpriv"]]
+        ids["checks"] = [ids["check_pub"], ids["check_mix"], ids["check_remote"], ids["check_priv"], ids["check_emb"], ids["check_mixpriv"]]
         ids["leases"] = [ids["lease_secret_mix"], ids["lease_secret_priv"], ids["lease_mount_priv"]]
 
         # Operations and the snapshots they produced.
@@ -472,6 +485,11 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
         ["verify", "inspect", "verify_missing"],
         ["runner", "jobs"],
         ["runner", "fetch", "job_missing", "--path", "src/app.txt"],
+        ["runner", "secrets", ids["job_remote"]],
+        ["runner", "secrets", ids["job_priv"]],
+        ["runner", "secrets", "job_missing"],
+        ["runner", "metrics"],
+        ["runner", "metrics", "--format", "prometheus"],
         ["merge-rules", "list", "app"],
         ["merge-rules", "list", "app", "--all"],
         ["merge-rules", "inspect", "app", "docs"],
@@ -800,7 +818,7 @@ class LeakSweepTests(unittest.TestCase):
     def get_routes(self) -> list[str]:
         ids = self.fx.ids
         q = lambda value: quote(value, safe="")  # noqa: E731
-        routes = ["/v0", "/v0/commands", "/v0/schema", "/v0/projects", "/v0/projects/app", "/v0/artifacts?limit=500", "/v0/events?limit=500", "/v0/conflicts"]
+        routes = ["/v0", "/v0/commands", "/v0/schema", "/v0/projects", "/v0/projects/app", "/v0/artifacts?limit=500", "/v0/events?limit=500", "/v0/conflicts", "/v0/runners/metrics", "/v0/runners/metrics?format=prometheus"]
         for sub in ("targets", "packages", "snapshots", "workspaces", "check-sets", "advisories", "releases", "secrets", "exports?limit=500", "events?limit=500"):
             routes.append(f"/v0/projects/app/{sub}")
         routes += ["/v0/projects/app/targets/main", "/v0/projects/app/packages/vault"]
@@ -922,7 +940,7 @@ class LeakSweepCoverageTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TRI_HOME": str(root / "tri-home")}):
             fx = LeakSweepFixture(root)
             # Ids only shape argv here; the commands are never run.
-            fx.ids = {key: f"{key}_x" for key in ("target", "main_snapshot", "head_priv", "head_emb", "head_pub", "vault_package", "task", "run_priv", "ws_pub", "ws_priv", "ws_emb", "cs_pub", "cs_priv", "check_pub", "check_priv", "advisory", "secret", "base_snapshot")}
+            fx.ids = {key: f"{key}_x" for key in ("target", "main_snapshot", "head_priv", "head_emb", "head_pub", "vault_package", "task", "run_priv", "ws_pub", "ws_priv", "ws_emb", "cs_pub", "cs_priv", "check_pub", "check_priv", "advisory", "secret", "base_snapshot", "job_remote", "job_priv")}
             for key in ("workspaces", "changesets", "checks", "reviews", "review_actions", "operations", "snapshots", "trees", "blobs", "releases", "conflicts", "leases", "grants", "artifacts", "exports", "events", "decisions"):
                 fx.ids[key] = [f"{key}_x"]
             argvs = sweep_argvs(fx)
