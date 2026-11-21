@@ -67,7 +67,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "schema", "usage": "tri schema [name]", "schema": "tri.schema", "description": "Show first JSON schemas used by agent clients."},
     {"name": "batch", "usage": "tri batch <plan.json> [--continue-on-error]", "schema": "tri.batch", "description": "Run a dependent JSON command batch in one local agent round trip."},
     {"name": "doctor", "usage": "tri doctor", "schema": "tri.doctor", "description": "Inspect local Tri store health and command availability."},
-    {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs]", "schema": "tri.api.server", "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor. Beyond loopback, runs are sandboxed by default (--run-sandbox required)."},
+    {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs] [--run-executor local|remote]", "schema": "tri.api.server", "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor. Beyond loopback, runs are sandboxed by default (--run-sandbox required)."},
     {"name": "auth-issue", "usage": "tri auth issue <actor> --file <tokens.json> [--label <text>]", "schema": "tri.auth.token", "description": "Issue a bearer token bound to one actor; the token is shown once and only its hash is stored."},
     {"name": "auth-list", "usage": "tri auth list --file <tokens.json>", "schema": "tri.auth.list", "description": "List issued tokens without their secrets."},
     {"name": "auth-revoke", "usage": "tri auth revoke <token-id-or-actor> --file <tokens.json>", "schema": "tri.auth.list", "description": "Revoke tokens; a running server stops accepting them on its next request."},
@@ -143,7 +143,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "operations-inspect", "usage": "tri operations inspect <operation>", "schema": "tri.operation.inspect", "description": "Inspect one policy-gated operation provenance record."},
     {"name": "search", "usage": "tri search <project> <query> [--scope <scope>] [--glob <glob>] [--include-history] [--limit <n>] [--case-sensitive]", "schema": "tri.search", "description": "Search authorized project work with provenance across files and Tri objects."},
     {"name": "diff", "usage": "tri diff <workspace-or-changeset> | tri diff <base-snapshot> <head-snapshot> [--mode summary|files|patch|machine] [--path <glob>]", "schema": "tri.diff", "description": "Diff workspace, changeset, or explicit snapshots."},
-    {"name": "run", "usage": "tri run <workspace> [--paths <glob>] [--sandbox] [--timeout <seconds>] [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run. --sandbox requires isolation (no network, writes only in the run directory, no Tri home or credential reads, scrubbed environment); --timeout kills the command's process group. --paths lays out only matching files (a partial checkout); changes anywhere are still imported, and only files that were laid out can be deleted."},
+    {"name": "run", "usage": "tri run <workspace> [--paths <glob>] [--sandbox] [--timeout <seconds>] [--runner local|remote [--wait <seconds>]] [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run. --sandbox requires isolation (no network, writes only in the run directory, no Tri home or credential reads, scrubbed environment); --timeout kills the command's process group. --paths lays out only matching files (a partial checkout); changes anywhere are still imported, and only files that were laid out can be deleted."},
     {"name": "checks-list", "usage": "tri checks list <workspace-or-changeset>", "schema": "tri.check.list", "description": "List check runs for a workspace or changeset."},
     {"name": "checks-inspect", "usage": "tri checks inspect <check>", "schema": "tri.check.inspect", "description": "Inspect one structured check run."},
     {"name": "checks-set-create", "usage": "tri checks set-create <project> <name> --required-check <cmd>", "schema": "tri.check_set.inspect", "description": "Create a reusable project required-check set."},
@@ -155,6 +155,11 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "mirror-inspect", "usage": "tri mirror inspect <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Inspect one Git mirror and its last sync."},
     {"name": "mirror-sync", "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.mirror.sync", "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits."},
     {"name": "mirror-remove", "usage": "tri mirror remove <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Stop mirroring a target."},
+    {"name": "runner-claim", "usage": "tri runner claim [--wait <seconds>]", "schema": "tri.runner.claim", "description": "Runner service: claim the oldest queued run job, with its file manifest."},
+    {"name": "runner-fetch", "usage": "tri runner fetch <job> --path <path> [--path <path>]", "schema": "tri.files.fetch", "description": "Runner service: read files of a claimed job (only paths the requester can see)."},
+    {"name": "runner-complete", "usage": "tri runner complete <job> --result <json>", "schema": "tri.check.inspect", "description": "Runner service: report exit status, output, and file changes; the server records the check run."},
+    {"name": "runner-jobs", "usage": "tri runner jobs [--status queued|claimed|completed|failed] [--limit <n>]", "schema": "tri.run_job.list", "description": "Runner service: list run jobs."},
+    {"name": "runner-work", "usage": "tri runner work [--once] [--max-jobs <n>] [--interval <seconds>] [--sandbox off|auto|required]", "schema": "tri.runner.work", "description": "Run queued jobs from TRI_REMOTE on this machine, each in a sandbox, until stopped."},
     {"name": "verify-run", "usage": "tri verify run <project> [--limit <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.verification.run", "description": "Run queued post-merge verifications in merge order; a failure reverts the changeset on the current target."},
     {"name": "verify-list", "usage": "tri verify list <project> [--status pending|running|verified|reverted|revert_conflict]", "schema": "tri.verification.list", "description": "List post-merge verifications."},
     {"name": "verify-inspect", "usage": "tri verify inspect <verification>", "schema": "tri.verification.inspect", "description": "Inspect one post-merge verification."},
@@ -374,6 +379,10 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.merge_rule.list": {"required": ["project", "merge_rules"]},
     "tri.mirror.inspect": {"required": ["id", "project", "target", "remote", "branch", "audience", "status", "synced_snapshot", "synced_git_commit", "in_sync", "last_result", "created_by", "created_at"]},
     "tri.mirror.list": {"required": ["mirrors"]},
+    "tri.runner.claim": {"required": ["job"]},
+    "tri.run_job.inspect": {"required": ["id", "workspace", "status", "command", "snapshot"]},
+    "tri.run_job.list": {"required": ["jobs"]},
+    "tri.runner.work": {"required": ["jobs", "count"]},
     "tri.files.fetch": {"required": ["snapshot", "files", "missing", "deferred", "bytes"]},
     "tri.remote.mount": {"required": ["workspace", "path", "snapshot", "remote", "files", "fetched_bytes", "cache_hits"]},
     "tri.remote.sync": {"required": ["workspace", "path", "snapshot", "remote", "written", "deleted"]},
@@ -990,6 +999,23 @@ class Store:
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS run_jobs (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              project_id TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              command_json TEXT NOT NULL,
+              sparse_paths_json TEXT NOT NULL DEFAULT '[]',
+              timeout_seconds REAL,
+              before_snapshot_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              runner_actor TEXT,
+              claimed_at TEXT,
+              lease_expires_at TEXT,
+              check_id TEXT,
+              created_at TEXT NOT NULL,
+              completed_at TEXT
             );
             CREATE TABLE IF NOT EXISTS verifications (
               id TEXT PRIMARY KEY,
@@ -9186,6 +9212,251 @@ def cmd_files_fetch(store: Store, args: argparse.Namespace, command: list[str], 
     return envelope("tri.files.fetch", command, actor=args.actor, start=start, data={"snapshot": snapshot, "files": files, "missing": missing, "deferred": deferred, "bytes": used})
 
 
+# --- Remote runner pool --------------------------------------------------------
+#
+# `tri run --runner remote` (or `tri serve --run-executor remote`) queues the
+# command instead of executing it on the machine that holds the store. Runner
+# machines claim jobs with a service token (`tri runner work`), fetch only the
+# files they need through job-scoped reads, run the command in their own
+# sandbox, and report output and file changes. The server records the check run
+# and applies the changes with the same stale-head protection as a local run.
+
+RUNNER_ROLES = ("role:service", "role:maintainer")
+RUNNER_LEASE_SECONDS = 900
+
+
+def require_runner(actor: str, job_id: str | None = None) -> None:
+    if not set(RUNNER_ROLES) & set(actor_selectors(actor)):
+        raise TriError("policy_denied", "Only runner services can claim or complete run jobs.", object=job_id, action="runner.claim", required_grant="role:service")
+
+
+def run_job_data(row: sqlite3.Row, *, include_manifest: bool = False, store: Store | None = None) -> dict[str, Any]:
+    data = {
+        "id": row["id"],
+        "workspace": row["workspace_id"],
+        "project": row["project_id"],
+        "requested_by": row["actor"],
+        "snapshot": row["before_snapshot_id"],
+        "command": loads(row["command_json"], []),
+        "sparse_paths": loads(row["sparse_paths_json"], []),
+        "timeout_seconds": row["timeout_seconds"],
+        "status": row["status"],
+        "runner": row["runner_actor"],
+        "claimed_at": row["claimed_at"],
+        "lease_expires_at": row["lease_expires_at"],
+        "check": row["check_id"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"],
+    }
+    if include_manifest and store is not None:
+        data["files"] = [{"path": path, "hash": entry["hash"], "mode": entry.get("mode", "100644"), "size": entry.get("size")} for path, entry in run_job_entries(store, row).items()]
+    return data
+
+
+def run_job_entries(store: Store, job: sqlite3.Row) -> dict[str, dict[str, Any]]:
+    """What a runner may see: the job's snapshot minus paths hidden from the requester."""
+    ws = store.get_workspace(job["workspace_id"])
+    hidden = effective_hidden_patterns(store, ws["project_id"], loads(ws["hidden_paths_json"], []), actor=job["actor"])
+    entries = store.load_snapshot_tree(job["before_snapshot_id"])
+    visible = {path: entry for path, entry in entries.items() if path_visibility(path, hidden)[0]}
+    return sparse_entries(visible, loads(job["sparse_paths_json"], []))
+
+
+def resolve_run_job(store: Store, job_id: str) -> sqlite3.Row:
+    row = store.row("SELECT * FROM run_jobs WHERE id = ?", (job_id,))
+    if row is None:
+        raise TriError("path_not_found", "Run job not found.", object=job_id)
+    return row
+
+
+def require_job_claim(job: sqlite3.Row, actor: str) -> None:
+    if job["status"] != "claimed" or job["runner_actor"] != actor:
+        raise TriError("policy_denied", "This run job is not claimed by this runner.", object=job["id"], status=job["status"])
+
+
+def enqueue_run_job(store: Store, ws: sqlite3.Row, cmd: list[str], *, actor: str, sparse: list[str], timeout: float | None) -> sqlite3.Row:
+    if ws["status"] != "active":
+        raise TriError("policy_denied", "Only active workspaces can run checks.", object=ws["id"])
+    require_object_access(store, ws["id"], actor=actor, action="workspace.write")
+    if not cmd:
+        raise TriError("path_not_found", "No command supplied for tri run.")
+    job_id = new_id("job")
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO run_jobs (id, workspace_id, project_id, actor, command_json, sparse_paths_json, timeout_seconds, before_snapshot_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+            (job_id, ws["id"], ws["project_id"], actor, dumps(cmd), dumps(sparse), timeout, ws["head_snapshot_id"], utcnow()),
+        )
+        store.create_event(kind="run_job.queued", actor=actor, project_id=ws["project_id"], workspace_id=ws["id"], object_refs={"job": job_id, "command": cmd})
+    return resolve_run_job(store, job_id)
+
+
+def requeue_expired_run_jobs(store: Store) -> int:
+    with store.conn:
+        return store.conn.execute(
+            "UPDATE run_jobs SET status = 'queued', runner_actor = NULL, claimed_at = NULL, lease_expires_at = NULL WHERE status = 'claimed' AND lease_expires_at < ?",
+            (utcnow(),),
+        ).rowcount
+
+
+def wait_for_run_job(store: Store, job_id: str, wait_seconds: float) -> sqlite3.Row:
+    deadline = time.time() + max(wait_seconds, 0)
+    while True:
+        row = resolve_run_job(store, job_id)
+        if row["status"] in ("completed", "failed") or time.time() >= deadline:
+            return row
+        time.sleep(0.1)
+
+
+def run_via_queue(store: Store, ws: sqlite3.Row, cmd: list[str], *, actor: str, command: list[str], start: float, sparse: list[str], timeout: float | None, wait: float) -> dict[str, Any]:
+    job = enqueue_run_job(store, ws, cmd, actor=actor, sparse=sparse, timeout=timeout)
+    job = wait_for_run_job(store, job["id"], wait)
+    if job["check_id"]:
+        output = envelope("tri.check.inspect", command, actor=actor, start=start, ok=job["status"] == "completed", data=check_view(store, job["check_id"], actor=actor))
+        output["data"]["job"] = job["id"]
+        return output
+    return envelope("tri.run_job.inspect", command, actor=actor, start=start, data=run_job_data(job))
+
+
+def cmd_runner_claim(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_runner(args.actor)
+    deadline = time.time() + max(args.wait or 0, 0)
+    while True:
+        requeue_expired_run_jobs(store)
+        row = store.row("SELECT * FROM run_jobs WHERE status = 'queued' ORDER BY rowid LIMIT 1", ())
+        if row is not None:
+            expires = (datetime.now(timezone.utc) + timedelta(seconds=RUNNER_LEASE_SECONDS + float(row["timeout_seconds"] or 0))).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            with store.conn:
+                claimed = store.conn.execute(
+                    "UPDATE run_jobs SET status = 'claimed', runner_actor = ?, claimed_at = ?, lease_expires_at = ? WHERE id = ? AND status = 'queued'",
+                    (args.actor, utcnow(), expires, row["id"]),
+                ).rowcount
+                if claimed:
+                    store.create_event(kind="run_job.claimed", actor=args.actor, project_id=row["project_id"], workspace_id=row["workspace_id"], object_refs={"job": row["id"]})
+            if claimed:
+                job = resolve_run_job(store, row["id"])
+                return envelope("tri.runner.claim", command, actor=args.actor, start=start, data={"job": run_job_data(job, include_manifest=True, store=store)})
+            continue
+        if time.time() >= deadline:
+            return envelope("tri.runner.claim", command, actor=args.actor, start=start, data={"job": None})
+        time.sleep(0.2)
+
+
+def cmd_runner_fetch(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_runner(args.actor, args.job)
+    job = resolve_run_job(store, args.job)
+    require_job_claim(job, args.actor)
+    entries = run_job_entries(store, job)
+    files = []
+    used = 0
+    deferred = []
+    for raw in args.path or []:
+        path = normalize_path(raw)
+        entry = entries.get(path)
+        if entry is None:
+            raise TriError("policy_denied", "Path is not part of this job.", object=path)
+        if files and used + int(entry.get("size") or 0) > FILES_FETCH_MAX_BYTES:
+            deferred.append(path)
+            continue
+        data = store.read_blob(entry["blob"])
+        used += len(data)
+        files.append({"path": path, "hash": entry["hash"], "mode": entry.get("mode", "100644"), "size": len(data), "encoding": "base64", "content": base64.b64encode(data).decode()})
+    return envelope("tri.files.fetch", command, actor=args.actor, start=start, data={"snapshot": job["before_snapshot_id"], "files": files, "missing": [], "deferred": deferred, "bytes": used})
+
+
+def cmd_runner_complete(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_runner(args.actor, args.job)
+    job = resolve_run_job(store, args.job)
+    require_job_claim(job, args.actor)
+    try:
+        result = json.loads(args.result)
+    except json.JSONDecodeError as exc:
+        raise TriError("invalid_command", f"Invalid runner result JSON: {exc.msg}") from None
+    ws = store.get_workspace(job["workspace_id"])
+    before = job["before_snapshot_id"]
+    before_entries = store.load_snapshot_tree(before)
+    visible = run_job_entries(store, job)
+    after_entries = dict(before_entries)
+    for path in result.get("deleted", []):
+        path = normalize_path(path)
+        if path in visible:  # a runner can only delete what it was shown
+            after_entries.pop(path, None)
+    for item in result.get("written", []):
+        path = normalize_path(item["path"])
+        if path in before_entries and path not in visible:
+            continue  # never overwrite content hidden from the requester
+        if is_secret_like_path(path) and path not in before_entries:
+            continue
+        blob = store.put_blob(base64.b64decode(item["content"]))
+        after_entries[path] = {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": item.get("mode", "100644")}
+    after_entries = dict(sorted(after_entries.items()))
+    paths = changed_paths(before_entries, after_entries)
+    stdout_bytes = base64.b64decode(result.get("stdout", ""))
+    stderr_bytes = base64.b64decode(result.get("stderr", ""))
+    exit_status = int(result.get("exit_status", 1))
+    duration_ms = int(result.get("duration_ms", 0))
+    cmd = loads(job["command_json"], [])
+    check_id = new_id("check")
+    after = before
+    stale = None
+    events: list[str] = []
+    file_change_ops: list[str] = []
+    with store.conn:
+        if paths:
+            current = store.row("SELECT head_snapshot_id FROM workspaces WHERE id = ?", (ws["id"],))["head_snapshot_id"]
+            if current != before:
+                stale = TriError("stale_workspace_head", "Workspace head changed while the remote run was executing; its file changes were not imported.", object=ws["id"], expected=before, actual=current, paths=paths, retryable=True).diagnostic
+            else:
+                snapshot = store.create_snapshot(ws["project_id"], after_entries, parents=[before], source="workspace", actor=job["actor"], metadata={"workspace": ws["id"], "operation": "run_file_changes", "runner": args.actor, "job": job["id"]})
+                op_id = new_id("op")
+                store.conn.execute(
+                    "INSERT INTO operations (id, workspace_id, actor, kind, input_snapshot_id, output_snapshot_id, path_set_json, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (op_id, ws["id"], job["actor"], "run_file_changes", before, snapshot["id"], dumps(paths), dumps({"command": cmd, "runner": args.actor, "job": job["id"]}), utcnow()),
+                )
+                store.conn.execute("UPDATE workspaces SET head_snapshot_id = ?, updated_at = ? WHERE id = ? AND head_snapshot_id = ?", (snapshot["id"], utcnow(), ws["id"], before))
+                events.append(store.create_event(kind="workspace.run_file_changes", actor=job["actor"], project_id=ws["project_id"], workspace_id=ws["id"], object_refs={"operation": op_id, "snapshot": snapshot["id"], "paths": paths, "runner": args.actor}))
+                after = snapshot["id"]
+                file_change_ops.append(op_id)
+        status = "stale" if stale else ("passed" if exit_status == 0 else "failed")
+        stdout_artifact = write_artifact(store, "stdout", f"{check_id}-stdout.txt", stdout_bytes, labels=[])
+        stderr_artifact = write_artifact(store, "stderr", f"{check_id}-stderr.txt", stderr_bytes, labels=[])
+        environment_policy = check_environment_policy([], {})
+        environment_policy["sandbox"] = result.get("sandbox") or {"kind": "unknown", "isolated": False}
+        environment_policy["runner"] = args.actor
+        materialized_directory = {"mode": "remote_runner", "runner": args.actor, "job": job["id"], "input_snapshot": before, "output_snapshot": after, "sparse_paths": loads(job["sparse_paths_json"], []), "materialized_files": len(visible)}
+        store.conn.execute(
+            """
+            INSERT INTO check_runs (
+              id, workspace_id, changeset_id, task_run_id, rerun_of, actor, status, runner, command_json,
+              snapshot_before, snapshot_after, exit_status, duration_ms, logs_json,
+              artifacts_json, secret_leases_json, materialized_directory_json, environment_policy_json,
+              file_changes_json, cost_json, assumptions_json, reproducibility, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                check_id, ws["id"], None, None, None, job["actor"], status, f"remote:{args.actor}", dumps(cmd),
+                before, after, exit_status, duration_ms, dumps({"stdout": stdout_artifact, "stderr": stderr_artifact}),
+                dumps([stdout_artifact, stderr_artifact]), dumps([]), dumps(materialized_directory), dumps(environment_policy),
+                dumps(file_change_ops), dumps(local_check_cost(cmd, duration_ms, stdout_bytes, stderr_bytes)), dumps([]),
+                "not_imported_stale_workspace_head" if stale else "remote_replayable", utcnow(),
+            ),
+        )
+        store.conn.execute("UPDATE run_jobs SET status = ?, check_id = ?, completed_at = ? WHERE id = ?", ("completed" if status == "passed" else "failed", check_id, utcnow(), job["id"]))
+        events.append(store.create_event(kind="check.completed", actor=job["actor"], project_id=ws["project_id"], workspace_id=ws["id"], object_refs={"check": check_id, "status": status, "runner": args.actor, "job": job["id"]}, input_fingerprints={"snapshot": before}, output_fingerprints={"snapshot": after}))
+    return envelope("tri.check.inspect", command, actor=args.actor, start=start, ok=stale is None, events=events, diagnostics=[stale] if stale else [], data=check_view(store, check_id, actor=job["actor"]))
+
+
+def cmd_runner_jobs(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_runner(args.actor)
+    requeue_expired_run_jobs(store)
+    rows = store.rows("SELECT * FROM run_jobs WHERE (? IS NULL OR status = ?) ORDER BY rowid DESC LIMIT ?", (args.status, args.status, args.limit))
+    return envelope("tri.run_job.list", command, actor=args.actor, start=start, data={"jobs": [run_job_data(row) for row in rows]})
+
+
+def cmd_runner_work(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    # With TRI_REMOTE set, tri.remote.dispatch runs the worker before any store opens.
+    raise TriError("invalid_command", "tri runner work needs TRI_REMOTE (or --remote) pointing at the Tri service, and a runner token in TRI_TOKEN or TRI_TOKEN_FILE.")
+
+
 def cmd_files_write(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     path = normalize_path(args.path)
     if args.body:
@@ -10784,7 +11055,9 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
     sparse_paths = list(args.paths or [])
     sandbox_mode = "required" if args.sandbox else None
     timeout = args.timeout
-    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env", "--paths", "--sandbox", "--timeout"):
+    runner = args.runner
+    wait_seconds = args.wait
+    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env", "--paths", "--sandbox", "--timeout", "--runner", "--wait"):
         if cmd[0] == "--sandbox":
             sandbox_mode = "required"
             cmd = cmd[1:]
@@ -10803,16 +11076,30 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
             lease_ids.append(cmd[1])
         elif cmd[0] == "--paths":
             sparse_paths.append(cmd[1])
-        elif cmd[0] == "--timeout":
+        elif cmd[0] in ("--timeout", "--wait"):
             try:
-                timeout = float(cmd[1])
+                value = float(cmd[1])
             except ValueError:
-                raise TriError("invalid_command", "--timeout takes seconds.", value=cmd[1]) from None
+                raise TriError("invalid_command", f"{cmd[0]} takes seconds.", value=cmd[1]) from None
+            if cmd[0] == "--timeout":
+                timeout = value
+            else:
+                wait_seconds = value
+        elif cmd[0] == "--runner":
+            if cmd[1] not in ("local", "remote"):
+                raise TriError("invalid_command", "--runner is local or remote.", value=cmd[1])
+            runner = cmd[1]
         else:
             assumptions.append(cmd[1])
         cmd = cmd[2:]
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
+    executor = (runner or os.environ.get("TRI_RUN_EXECUTOR") or "local").lower()
+    if executor == "remote":
+        if lease_ids:
+            raise TriError("invalid_command", "Secret leases are not sent to remote runners yet; run with --runner local.", object=ws["id"])
+        wait = wait_seconds if wait_seconds is not None else float(os.environ.get("TRI_RUN_WAIT", "600"))
+        return run_via_queue(store, ws, cmd, actor=args.actor, command=command, start=start, sparse=normalize_path_patterns(sparse_paths), timeout=timeout, wait=wait)
     return run_check_for_workspace(
         store,
         ws,
@@ -16265,7 +16552,8 @@ def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start:
             required_flag="--auth-file",
         )
     run_sandbox = args.run_sandbox or os.environ.get(sandbox.MODE_ENV) or ("off" if args.host in LOOPBACK_HOSTS else "required")
-    if run_sandbox == "required" and not sandbox.probe()["isolated"] and not args.allow_unsandboxed_runs:
+    remote_executor = (args.run_executor or os.environ.get("TRI_RUN_EXECUTOR") or "local") == "remote"
+    if run_sandbox == "required" and not remote_executor and not sandbox.probe()["isolated"] and not args.allow_unsandboxed_runs:
         raise TriError(
             "sandbox_unavailable",
             "Refusing to serve beyond loopback without sandboxed runs: any client could execute code as the server user.",
@@ -16273,6 +16561,8 @@ def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start:
             hint="Install bubblewrap, or pass --allow-unsandboxed-runs if every token holder is trusted.",
         )
     os.environ[sandbox.MODE_ENV] = "auto" if run_sandbox == "required" and args.allow_unsandboxed_runs else run_sandbox
+    if args.run_executor:
+        os.environ["TRI_RUN_EXECUTOR"] = args.run_executor
     server = TriHTTPServer((args.host, args.port), TriAPIHandler)
     server.authority = TokenAuthority(Path(auth_file).resolve()) if auth_file else None
     host, port = server.server_address
@@ -16379,6 +16669,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-unauthenticated", action="store_true")
     p.add_argument("--run-sandbox", choices=list(sandbox.MODES))
     p.add_argument("--allow-unsandboxed-runs", action="store_true")
+    p.add_argument("--run-executor", choices=["local", "remote"])
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("mcp")
@@ -16716,8 +17007,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--paths", action="append")
     p.add_argument("--sandbox", action="store_true")
     p.add_argument("--timeout", type=float)
+    p.add_argument("--runner", choices=["local", "remote"])
+    p.add_argument("--wait", type=float)
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("runner")
+    runner_sub = p.add_subparsers(dest="runner_cmd", required=True)
+    p_runner = runner_sub.add_parser("claim")
+    p_runner.add_argument("--wait", type=float, default=0)
+    p_runner.set_defaults(func=cmd_runner_claim)
+    p_runner = runner_sub.add_parser("fetch")
+    p_runner.add_argument("job")
+    p_runner.add_argument("--path", action="append")
+    p_runner.set_defaults(func=cmd_runner_fetch)
+    p_runner = runner_sub.add_parser("complete")
+    p_runner.add_argument("job")
+    p_runner.add_argument("--result", required=True)
+    p_runner.set_defaults(func=cmd_runner_complete)
+    p_runner = runner_sub.add_parser("jobs")
+    p_runner.add_argument("--status")
+    p_runner.add_argument("--limit", type=int, default=50)
+    p_runner.set_defaults(func=cmd_runner_jobs)
+    p_runner = runner_sub.add_parser("work")
+    p_runner.add_argument("--once", action="store_true")
+    p_runner.add_argument("--max-jobs", type=int)
+    p_runner.add_argument("--interval", type=float, default=5.0)
+    p_runner.add_argument("--sandbox", choices=list(sandbox.MODES))
+    p_runner.set_defaults(func=cmd_runner_work)
 
     p = sub.add_parser("merge-rules")
     merge_rules_sub = p.add_subparsers(dest="merge_rules_cmd", required=True)

@@ -280,6 +280,102 @@ def remote_sync(client: RemoteClient, argv: list[str], workspace: str, dest: Pat
     return envelope("tri.remote.sync", ["tri", *argv], start=started, data=data)
 
 
+# -- runner worker ------------------------------------------------------------------
+
+
+def execute_job(client: RemoteClient, job: dict[str, Any], *, sandbox_mode: str | None = None) -> dict[str, Any]:
+    """Lay out a claimed job's files from the machine cache, run it sandboxed, and diff."""
+    import tempfile
+
+    from tri import sandbox
+
+    root = Path(tempfile.mkdtemp(prefix="tri-runner-"))
+    work = root / "work"
+    work.mkdir()
+    try:
+        manifest = {item["path"]: item for item in job["files"]}
+        pending = [path for path, item in manifest.items() if not cache_path(item["hash"]).exists()]
+        while pending:
+            chunk, pending = pending[:FETCH_CHUNK], pending[FETCH_CHUNK:]
+            fetched = client.command(["runner", "fetch", job["id"], *sum((["--path", path] for path in chunk), [])])
+            if not fetched.get("ok"):
+                raise RuntimeError(f"fetch failed: {fetched.get('diagnostics')}")
+            for item in fetched["data"]["files"]:
+                data = base64.b64decode(item["content"])
+                if hashlib.sha256(data).hexdigest() != item["hash"]:
+                    raise RuntimeError(f"content mismatch for {item['path']}")
+                cache_put(item["hash"], data)
+            pending = fetched["data"].get("deferred", []) + pending
+        for path, item in manifest.items():
+            if ".." in Path(path).parts or Path(path).is_absolute():
+                raise RuntimeError(f"unsafe path {path}")
+            target = work / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if item.get("mode") == "120000":
+                os.symlink(cache_path(item["hash"]).read_text(), target)
+            else:
+                shutil.copyfile(cache_path(item["hash"]), target)
+                os.chmod(target, 0o755 if item.get("mode") == "100755" else 0o644)
+        mode = sandbox_mode or os.environ.get(sandbox.MODE_ENV) or "auto"
+        hidden = [cache_root()]
+        token_file = os.environ.get(TOKEN_FILE_ENV)
+        if token_file:
+            hidden.append(Path(token_file).expanduser())
+        box = sandbox.build(mode, run_dir=root, hidden=hidden, limits=sandbox.Limits.from_env(timeout_seconds=job.get("timeout_seconds")))
+        env = sandbox.scrubbed_env(root)  # never hand the runner's token to the job, even unsandboxed
+        started = time.time()
+        completed = sandbox.run(box, list(job["command"]), cwd=work, env=env)
+        duration_ms = int((time.time() - started) * 1000)
+        written: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for dirpath, dirnames, filenames in os.walk(work):
+            dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+            for name in filenames:
+                full = Path(dirpath) / name
+                rel = full.relative_to(work).as_posix()
+                seen.add(rel)
+                data = os.readlink(full).encode() if full.is_symlink() else full.read_bytes()
+                known = manifest.get(rel)
+                if known is not None and known["hash"] == hashlib.sha256(data).hexdigest():
+                    continue
+                mode_bits = "120000" if full.is_symlink() else ("100755" if os.access(full, os.X_OK) else "100644")
+                written.append({"path": rel, "mode": mode_bits, "content": base64.b64encode(data).decode()})
+        deleted = sorted(path for path in manifest if path not in seen)
+        return {
+            "exit_status": completed.returncode,
+            "stdout": base64.b64encode(completed.stdout).decode(),
+            "stderr": base64.b64encode(completed.stderr).decode(),
+            "duration_ms": duration_ms,
+            "written": written,
+            "deleted": deleted,
+            "sandbox": ({**box.describe(), "timed_out": completed.timed_out} if box else {"kind": "off", "isolated": False}),
+        }
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def run_remote_jobs(client: RemoteClient, *, max_jobs: int | None = None, idle_exit: bool = False, poll_seconds: float = 5.0, sandbox_mode: str | None = None) -> dict[str, Any]:
+    jobs: list[dict[str, Any]] = []
+    while True:
+        claim = client.command(["runner", "claim", "--wait", str(poll_seconds)])
+        if not claim.get("ok"):
+            return {"jobs": jobs, "count": len(jobs), "error": (claim.get("diagnostics") or [{}])[0]}
+        job = claim["data"]["job"]
+        if job is None:
+            if idle_exit:
+                break
+            continue
+        try:
+            result = execute_job(client, job, sandbox_mode=sandbox_mode)
+        except Exception as exc:  # report the failure as a failed check instead of abandoning the claim
+            result = {"exit_status": 125, "stdout": "", "stderr": base64.b64encode(f"[tri runner] {type(exc).__name__}: {exc}\n".encode()).decode(), "duration_ms": 0, "written": [], "deleted": []}
+        done = client.command(["runner", "complete", job["id"], "--result", json.dumps(result)])
+        jobs.append({"job": job["id"], "ok": bool(done.get("ok")), "check": (done.get("data") or {}).get("id"), "status": (done.get("data") or {}).get("status")})
+        if max_jobs and len(jobs) >= max_jobs:
+            break
+    return {"jobs": jobs, "count": len(jobs)}
+
+
 # -- dispatch -------------------------------------------------------------------
 
 
@@ -346,6 +442,16 @@ def dispatch(argv: list[str], url: str) -> dict[str, Any]:
             return error_envelope(argv, "invalid_command", "usage: tri workspace sync <workspace> [--path <dir>]")
         paths = _flag_values(argv, "--path")
         return remote_sync(client, argv, positional[index + 1], Path(paths[0]) if paths else None)
+    if words[:2] == ["runner", "work"]:
+        from tri.cli import envelope
+
+        started = time.time()
+        max_jobs = _flag_values(argv, "--max-jobs")
+        interval = _flag_values(argv, "--interval")
+        modes = _flag_values(argv, "--sandbox")
+        summary = run_remote_jobs(client, max_jobs=int(max_jobs[0]) if max_jobs else None, idle_exit="--once" in argv, poll_seconds=float(interval[0]) if interval else 5.0, sandbox_mode=modes[0] if modes else None)
+        ok = "error" not in summary
+        return envelope("tri.runner.work", ["tri", *argv], ok=ok, start=started, data=summary, diagnostics=[summary["error"]] if not ok and summary["error"].get("code") else [])
     if words[:2] == ["files", "write"] and _flag_values(argv, "--body"):
         local = Path(_flag_values(argv, "--body")[0]).expanduser()
         try:

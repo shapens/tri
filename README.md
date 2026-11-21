@@ -12,7 +12,7 @@ The goal is to be the best agent-native source control. The field as of 2026-11-
 - Anthropic's internal Scion replaced Git for one agent-scale monorepo: server-side changesets, no full clones, server-side blame and merge bases, no global merge lock. Its access control is the thin part of its public write-up.
 - Tri's wedge is the live record itself: isolated workspaces, API-first mutations, pre-commit provenance, structured checks, object-level policy, secret leases, and reviewable changesets before any Git or GitHub export.
 
-`tri.md` holds the full comparison, the gaps that remain (replicated storage behind the service, virtual checkouts, a remote runner pool), and the scorecard Tri has to win.
+`tri.md` holds the full comparison, the gaps that remain (replicated storage behind the service, virtual checkouts, runner hardening), and the scorecard Tri has to win.
 
 The marginal advantage to prove is small and specific: an agent should be able to mutate, check, review, protect, and export work through stable Tri objects without first editing a shared working directory, assigning changes to a branch, or treating a GitHub pull request as the live coordination surface.
 
@@ -109,6 +109,7 @@ Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name 
 - history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
+- remote runner pool: `tri run --runner remote` / `tri serve --run-executor remote` queue runs; `tri runner work` on other machines claims jobs, fetches only the job's visible files, runs them sandboxed, and reports results
 - remote mode (`TRI_REMOTE`, `TRI_TOKEN`): the CLI and `tri mcp` run every command on one central `tri serve`; `workspace mount`/`sync` work through a per-machine blob cache (`TRI_CACHE_DIR`), and `files fetch` reads many files per round trip
 - post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
 - sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS; no network, no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/wall-clock limits
