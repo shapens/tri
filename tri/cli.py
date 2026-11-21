@@ -155,6 +155,8 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "mirror-inspect", "usage": "tri mirror inspect <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Inspect one Git mirror and its last sync."},
     {"name": "mirror-sync", "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.mirror.sync", "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits."},
     {"name": "mirror-remove", "usage": "tri mirror remove <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Stop mirroring a target."},
+    {"name": "backup-create", "usage": "tri backup create <dir> [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.backup.create", "description": "Maintainer: consistent online backup that is itself a Tri home (restore by pointing TRI_HOME at it); repeats copy only new objects, --watch keeps a warm standby."},
+    {"name": "backup-verify", "usage": "tri backup verify <dir> [--deep]", "schema": "tri.backup.verify", "description": "Maintainer: check a backup's database integrity and that every live object and artifact is present (--deep rehashes content)."},
     {"name": "cache-serve", "usage": "tri cache serve --upstream <url> [--host 127.0.0.1] [--port 8766] [--dir <path>] [--quiet]", "schema": "tri.cache.server", "description": "Regional read-through cache in front of a Tri service: forwards every request with the caller's token, and serves file content the service has authorized from a shared content-addressed cache."},
     {"name": "runner-claim", "usage": "tri runner claim [--wait <seconds>]", "schema": "tri.runner.claim", "description": "Runner service: claim the oldest queued run job, with its file manifest."},
     {"name": "runner-fetch", "usage": "tri runner fetch <job> --path <path> [--path <path>] [--hashes-only]", "schema": "tri.files.fetch", "description": "Runner service: read files of a claimed job (only paths the requester can see)."},
@@ -254,6 +256,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.diagnostic": {
         "required": ["code", "severity", "message", "retryable"],
         "codes": [
+            "backup_incomplete",
             "remote_unreachable",
             "content_mismatch",
             "sandbox_unavailable",
@@ -382,6 +385,8 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.mirror.list": {"required": ["mirrors"]},
     "tri.runner.claim": {"required": ["job"]},
     "tri.cache.server": {"required": ["host", "port", "upstream", "dir"]},
+    "tri.backup.create": {"required": ["dest", "cycles", "created_at", "counts", "copied"]},
+    "tri.backup.verify": {"required": ["dest", "ok", "blobs_checked", "artifacts_checked", "problems"]},
     "tri.run_job.inspect": {"required": ["id", "workspace", "status", "command", "snapshot"]},
     "tri.run_job.list": {"required": ["jobs"]},
     "tri.runner.work": {"required": ["jobs", "count"]},
@@ -3578,8 +3583,16 @@ def event_view(store: Store, row: sqlite3.Row, *, actor: str, record_denial: boo
     return event_view_data(store, event_data(row), actor=actor, record_denial=record_denial)
 
 
+def artifact_path(value: str) -> Path:
+    """Artifact files are recorded absolute; backups record them relative to the home."""
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path(os.environ.get("TRI_HOME", ".tri")).resolve() / path
+
+
 def artifact_data(row: sqlite3.Row, *, include_text: bool = False) -> dict[str, Any]:
-    path = Path(row["path"])
+    path = artifact_path(row["path"])
     raw = path.read_bytes()
     data = {
         "id": row["id"],
@@ -3920,7 +3933,7 @@ def generated_config_records_for_run(store: Store, workspace_id: str, *, actor: 
 def materialize_generated_configs_for_run(store: Store, root: Path, configs: list[dict[str, Any]]) -> None:
     for config in configs:
         artifact = store.get_artifact(config["artifact"])
-        write_materialized_config(root, config["path"], Path(artifact["path"]).read_bytes())
+        write_materialized_config(root, config["path"], artifact_path(artifact["path"]).read_bytes())
 
 
 def filter_generated_config_entries(
@@ -9763,7 +9776,7 @@ def append_artifact_matches(
         counters["policy_denied_skipped"] += 1
         return False
     row = store.get_artifact(artifact_id)
-    raw = Path(row["path"]).read_bytes()
+    raw = artifact_path(row["path"]).read_bytes()
     if b"\0" in raw:
         counters["binary_skipped"] += 1
         return False
@@ -11275,7 +11288,7 @@ def cmd_checks_stream(store: Store, args: argparse.Namespace, command: list[str]
     if not artifact_id:
         raise TriError("path_not_found", "Check log not found.", object=args.check, log=args.log)
     artifact = store.get_artifact(artifact_id)
-    raw = Path(artifact["path"]).read_bytes()
+    raw = artifact_path(artifact["path"]).read_bytes()
     chunk = raw[args.offset : args.offset + args.limit]
     next_offset = min(args.offset + len(chunk), len(raw))
     try:
@@ -14749,7 +14762,7 @@ def export_artifact_fingerprint(store: Store, artifact_id: str | None) -> str | 
     if not artifact_id:
         return None
     artifact = store.get_artifact(artifact_id)
-    return f"sha256:{sha256(Path(artifact['path']).read_bytes())}"
+    return f"sha256:{sha256(artifact_path(artifact['path']).read_bytes())}"
 
 
 def export_input_fingerprint(store: Store, row: sqlite3.Row) -> str:
@@ -15393,7 +15406,7 @@ def cmd_secrets_redact_logs(store: Store, args: argparse.Namespace, command: lis
     with store.conn:
         for artifact_id in log_artifacts:
             artifact = store.get_artifact(artifact_id)
-            path = Path(artifact["path"])
+            path = artifact_path(artifact["path"])
             before = path.read_bytes()
             replacements = sum(before.count(value) for _, value in redactions if value)
             after = redact_secret_bytes(before, redactions)
@@ -16550,6 +16563,135 @@ def cmd_auth_revoke(store: Store, args: argparse.Namespace, command: list[str], 
     return envelope("tri.auth.list", command, actor=args.actor, start=start, data={"file": str(Path(args.file).resolve()), "tokens": [public_record(item) for item in removed]})
 
 
+# --- Backups and warm standbys ---------------------------------------------------
+#
+# A backup directory is a complete Tri home: an online, consistent copy of the
+# metadata database plus every content-addressed object, artifact, and secret
+# file. Restoring is pointing TRI_HOME at it. Objects never change once written,
+# so repeated backups copy only new files; `--watch` keeps a warm standby.
+
+BACKUP_DIRS = ("objects", "artifacts", "secrets")
+
+
+def copy_missing_files(source: Path, dest: Path) -> tuple[int, int]:
+    copied = bytes_copied = 0
+    if not source.is_dir():
+        return 0, 0
+    for dirpath, _, filenames in os.walk(source):
+        relative = Path(dirpath).relative_to(source)
+        for name in filenames:
+            if name.endswith(".tmp"):
+                continue
+            src = Path(dirpath) / name
+            dst = dest / relative / name
+            if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_name(f".{name}.{uuid.uuid4().hex}.tmp")
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            copied += 1
+            bytes_copied += src.stat().st_size
+    return copied, bytes_copied
+
+
+def backup_once(store: Store, dest: Path) -> dict[str, Any]:
+    started = time.time()
+    dest.mkdir(parents=True, exist_ok=True)
+    # Metadata first: every object it references was written before its row committed.
+    tmp_db = dest / f".tri.sqlite3.{uuid.uuid4().hex}.tmp"
+    target = sqlite3.connect(tmp_db)
+    try:
+        store.conn.backup(target)
+        target.execute("UPDATE blobs SET object_path = substr(hash, 1, 2) || '/' || hash")
+        artifacts_root = str(store.artifacts) + os.sep
+        rows = target.execute("SELECT id, path FROM artifacts").fetchall()
+        for artifact_id, path in rows:
+            if isinstance(path, str) and path.startswith(artifacts_root):
+                target.execute("UPDATE artifacts SET path = ? WHERE id = ?", ("artifacts/" + path[len(artifacts_root):].replace(os.sep, "/"), artifact_id))
+        target.commit()
+    finally:
+        target.close()
+    os.replace(tmp_db, dest / "tri.sqlite3")
+    packed = dest / "tri.sqlite3.tri"
+    if packed.exists():
+        packed.unlink()
+    copied: dict[str, Any] = {}
+    for name in BACKUP_DIRS:
+        files, size = copy_missing_files(store.home / name, dest / name)
+        copied[name] = {"files": files, "bytes": size}
+    secrets_dir = dest / "secrets"
+    if secrets_dir.is_dir() and os.name != "nt":
+        for dirpath, _, filenames in os.walk(secrets_dir):
+            for filename in filenames:
+                os.chmod(Path(dirpath) / filename, 0o600)
+    counts = {table: count_row(store, f"SELECT COUNT(*) AS count FROM {table}", ()) for table in ("projects", "snapshots", "blobs", "events", "changesets")}
+    manifest = {"created_at": utcnow(), "source": str(store.home), "schema_version": SCHEMA_VERSION, "counts": counts, "copied": copied, "seconds": round(time.time() - started, 3)}
+    (dest / "BACKUP.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+def cmd_backup_create(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="backup.create", object_id=args.dest, message="Only maintainers can back up the store.")
+    dest = Path(args.dest).expanduser().resolve()
+    if dest == store.home or store.home in dest.parents:
+        raise TriError("invalid_command", "A backup cannot live inside the store it copies.", object=str(dest))
+    lock = FileLock(dest.parent / f".{dest.name}.backup.lock") if dest.parent.exists() else None
+    if lock is not None:
+        lock.acquire(exclusive=True)
+    try:
+        cycles = 0
+        while True:
+            cycles += 1
+            manifest = backup_once(store, dest)
+            if not args.watch or (args.max_cycles and cycles >= args.max_cycles):
+                break
+            time.sleep(max(args.interval, 0.05))
+    finally:
+        if lock is not None:
+            lock.close()
+    with store.conn:
+        evt = store.create_event(kind="backup.created", actor=args.actor, object_refs={"dest": str(dest), "cycles": cycles})
+    return envelope("tri.backup.create", command, actor=args.actor, start=start, events=[evt], data={"dest": str(dest), "cycles": cycles, **manifest})
+
+
+def cmd_backup_verify(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="backup.verify", object_id=args.dest, message="Only maintainers can verify backups.")
+    dest = Path(args.dest).expanduser().resolve()
+    db = dest / "tri.sqlite3"
+    if not db.exists():
+        raise TriError("path_not_found", "No backup database here.", object=str(dest))
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    problems: list[dict[str, Any]] = []
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            problems.append({"kind": "database", "detail": integrity})
+        checked = 0
+        for blob_id, digest, size, object_path in conn.execute("SELECT id, hash, size, object_path FROM blobs WHERE purged_at IS NULL"):
+            checked += 1
+            path = dest / "objects" / "blobs" / (object_path if object_path and not Path(object_path).is_absolute() else f"{digest[:2]}/{digest}")
+            if not path.exists():
+                problems.append({"kind": "missing_blob", "blob": blob_id})
+                continue
+            if args.deep:
+                data = path.read_bytes()
+                if data.startswith(COMPRESSED_BLOB_MAGIC):
+                    data = zlib.decompress(data[len(COMPRESSED_BLOB_MAGIC):])
+                if hashlib.sha256(data).hexdigest() != digest:
+                    problems.append({"kind": "corrupt_blob", "blob": blob_id})
+        artifacts = 0
+        for artifact_id, path in conn.execute("SELECT id, path FROM artifacts"):
+            artifacts += 1
+            resolved = Path(path) if Path(path).is_absolute() else dest / path
+            if not resolved.exists():
+                problems.append({"kind": "missing_artifact", "artifact": artifact_id})
+    finally:
+        conn.close()
+    data = {"dest": str(dest), "ok": not problems, "blobs_checked": checked, "artifacts_checked": artifacts, "deep": bool(args.deep), "problems": problems[:100], "problem_count": len(problems)}
+    return envelope("tri.backup.verify", command, actor=args.actor, start=start, ok=not problems, data=data, diagnostics=[] if not problems else [TriError("backup_incomplete", "The backup is missing or has corrupt content.", problems=len(problems)).diagnostic])
+
+
 def cmd_cache_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     from tri.regional import serve_cache
 
@@ -17027,6 +17169,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
 
+    p = sub.add_parser("backup")
+    backup_sub = p.add_subparsers(dest="backup_cmd", required=True)
+    p_backup = backup_sub.add_parser("create")
+    p_backup.add_argument("dest")
+    p_backup.add_argument("--watch", action="store_true")
+    p_backup.add_argument("--interval", type=float, default=60.0)
+    p_backup.add_argument("--max-cycles", type=int)
+    p_backup.set_defaults(func=cmd_backup_create)
+    p_backup = backup_sub.add_parser("verify")
+    p_backup.add_argument("dest")
+    p_backup.add_argument("--deep", action="store_true")
+    p_backup.set_defaults(func=cmd_backup_verify)
+
     p = sub.add_parser("cache")
     cache_sub = p.add_subparsers(dest="cache_cmd", required=True)
     p_cache = cache_sub.add_parser("serve")
@@ -17467,7 +17622,7 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 # Commands that start servers or manage credentials never run on behalf of a remote client.
-API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache"})
+API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache", "backup"})
 
 
 def raise_actor_mismatch(claimed: str | None, authenticated: str) -> None:
