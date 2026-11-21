@@ -1,0 +1,101 @@
+{
+  "$id": "schemas/tri.response.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "actor": {
+      "type": "string",
+      "x-tri-type": "actor id"
+    },
+    "command": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "x-tri-type": "list<string>"
+    },
+    "cost": {
+      "properties": {
+        "external_cost": {
+          "type": "string"
+        },
+        "input_bytes": {
+          "type": "integer"
+        },
+        "output_bytes": {
+          "type": "integer"
+        },
+        "wall_ms": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "wall_ms"
+      ],
+      "type": "object",
+      "x-tri-type": "Cost"
+    },
+    "data": {
+      "type": "object",
+      "x-tri-type": "schema-specific object"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "diagnostic.json"
+      },
+      "type": "array",
+      "x-tri-type": "list<Diagnostic>"
+    },
+    "events": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "x-tri-type": "list<evt_ id>"
+    },
+    "links": {
+      "type": "object",
+      "x-tri-type": "object"
+    },
+    "ok": {
+      "type": "boolean",
+      "x-tri-type": "bool"
+    },
+    "refs": {
+      "type": "object",
+      "x-tri-type": "object"
+    },
+    "schema": {
+      "type": "string",
+      "x-tri-type": "string"
+    },
+    "schema_version": {
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "type": "string",
+      "x-tri-type": "semver"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "diagnostic.json"
+      },
+      "type": "array",
+      "x-tri-type": "list<Diagnostic>"
+    }
+  },
+  "required": [
+    "ok",
+    "schema",
+    "schema_version",
+    "command",
+    "actor",
+    "data",
+    "events",
+    "diagnostics",
+    "warnings",
+    "cost",
+    "refs",
+    "links"
+  ],
+  "title": "tri.response",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

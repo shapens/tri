@@ -1,0 +1,11 @@
+{
+  "$id": "schemas/tri.export.github_pr.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "export",
+    "record"
+  ],
+  "title": "tri.export.github_pr",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

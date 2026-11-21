@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.response.summary.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "ok",
+    "schema",
+    "schema_version",
+    "data",
+    "events"
+  ],
+  "title": "tri.response.summary",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

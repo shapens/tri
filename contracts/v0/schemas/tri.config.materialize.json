@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.config.materialize.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "workspace",
+    "artifact",
+    "labels"
+  ],
+  "title": "tri.config.materialize",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

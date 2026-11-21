@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.task.lifecycle.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "status",
+    "previous_status",
+    "transition",
+    "lifecycle"
+  ],
+  "title": "tri.task.lifecycle",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

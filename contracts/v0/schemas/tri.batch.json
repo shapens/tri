@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.batch.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "count",
+    "executed",
+    "ok_count",
+    "failed",
+    "results"
+  ],
+  "title": "tri.batch",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

@@ -1,0 +1,11 @@
+{
+  "$id": "schemas/tri.changeset.stack.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "changeset",
+    "stack"
+  ],
+  "title": "tri.changeset.stack",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

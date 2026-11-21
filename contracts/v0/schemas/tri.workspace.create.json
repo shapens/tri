@@ -1,0 +1,19 @@
+{
+  "$id": "schemas/tri.workspace.create.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "base_snapshot",
+    "head_snapshot",
+    "task",
+    "task_run",
+    "status",
+    "visibility",
+    "hidden_paths",
+    "advisory"
+  ],
+  "title": "tri.workspace.create",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

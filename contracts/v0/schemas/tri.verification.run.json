@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.verification.run.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "project",
+    "processed",
+    "pending",
+    "cycles"
+  ],
+  "title": "tri.verification.run",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

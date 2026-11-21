@@ -1,0 +1,16 @@
+{
+  "$id": "schemas/tri.search.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "project",
+    "query",
+    "scopes",
+    "matches",
+    "policy_denied_skipped",
+    "redacted_skipped",
+    "truncated"
+  ],
+  "title": "tri.search",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

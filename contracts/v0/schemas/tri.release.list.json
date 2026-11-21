@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.release.list.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "project",
+    "releases",
+    "redacted"
+  ],
+  "title": "tri.release.list",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

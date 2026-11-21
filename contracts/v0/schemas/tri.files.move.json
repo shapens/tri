@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.files.move.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "operation",
+    "snapshot",
+    "paths"
+  ],
+  "title": "tri.files.move",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

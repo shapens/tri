@@ -1,0 +1,17 @@
+{
+  "$id": "schemas/tri.policy.visibility.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "object",
+    "object_type",
+    "project",
+    "visibility",
+    "owner",
+    "actor_selectors",
+    "direct_grants",
+    "inherited_grants"
+  ],
+  "title": "tri.policy.visibility",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.files.stat.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "snapshot",
+    "path",
+    "exists",
+    "type",
+    "visible"
+  ],
+  "title": "tri.files.stat",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

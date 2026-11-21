@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.auth.token.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "actor",
+    "token",
+    "file",
+    "shown_once"
+  ],
+  "title": "tri.auth.token",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

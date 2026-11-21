@@ -1,0 +1,11 @@
+{
+  "$id": "schemas/tri.merge_rule.list.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "project",
+    "merge_rules"
+  ],
+  "title": "tri.merge_rule.list",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

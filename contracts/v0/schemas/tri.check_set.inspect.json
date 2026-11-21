@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.check_set.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "name",
+    "required_checks",
+    "created_by",
+    "created_at"
+  ],
+  "title": "tri.check_set.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

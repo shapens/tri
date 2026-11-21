@@ -1,0 +1,33 @@
+{
+  "$id": "schemas/tri.changeset.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "workspace",
+    "redacted_workspace",
+    "title",
+    "status",
+    "base_snapshot",
+    "head_snapshot",
+    "operations",
+    "operation_details",
+    "task_run",
+    "visibility",
+    "hidden_paths",
+    "touched_paths",
+    "redacted_touched_paths",
+    "checks",
+    "reviews",
+    "policy_decisions",
+    "export_status",
+    "advisory",
+    "replacement_changeset",
+    "lifecycle",
+    "suggested_split_points",
+    "stack"
+  ],
+  "title": "tri.changeset.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

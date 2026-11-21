@@ -1,0 +1,28 @@
+{
+  "$id": "schemas/tri.snapshot.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "root_tree",
+    "parents",
+    "source",
+    "content_fingerprint",
+    "created_by",
+    "created_at",
+    "metadata",
+    "file_count",
+    "byte_count",
+    "targets",
+    "workspaces",
+    "changesets",
+    "checks",
+    "releases",
+    "source_events",
+    "redacted",
+    "access"
+  ],
+  "title": "tri.snapshot.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

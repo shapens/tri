@@ -1,0 +1,22 @@
+{
+  "$id": "schemas/tri.workspace.materialization_lease.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "workspace",
+    "path",
+    "status",
+    "read_only",
+    "mounted_snapshot",
+    "last_sync_snapshot",
+    "owner",
+    "ignored_paths",
+    "generated_artifacts",
+    "expires_at",
+    "created_at",
+    "revoked_at"
+  ],
+  "title": "tri.workspace.materialization_lease",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

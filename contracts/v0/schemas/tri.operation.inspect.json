@@ -1,0 +1,26 @@
+{
+  "$id": "schemas/tri.operation.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "workspace",
+    "workspace_redacted",
+    "actor",
+    "kind",
+    "input_snapshot",
+    "output_snapshot",
+    "paths",
+    "redacted_paths",
+    "policy",
+    "metadata",
+    "changesets",
+    "redacted_changesets",
+    "source_events",
+    "redacted_source_events",
+    "access",
+    "created_at"
+  ],
+  "title": "tri.operation.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

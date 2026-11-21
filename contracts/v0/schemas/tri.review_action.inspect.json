@@ -1,0 +1,16 @@
+{
+  "$id": "schemas/tri.review_action.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "review",
+    "actor",
+    "kind",
+    "body",
+    "metadata",
+    "created_at"
+  ],
+  "title": "tri.review_action.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

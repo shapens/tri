@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.remote.sync.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "workspace",
+    "path",
+    "snapshot",
+    "remote",
+    "written",
+    "deleted"
+  ],
+  "title": "tri.remote.sync",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

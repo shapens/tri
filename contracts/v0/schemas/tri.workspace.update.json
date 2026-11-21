@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.workspace.update.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "workspace",
+    "base_snapshot",
+    "head_snapshot",
+    "conflicts"
+  ],
+  "title": "tri.workspace.update",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

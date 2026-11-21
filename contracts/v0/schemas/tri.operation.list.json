@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.operation.list.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "ref",
+    "operations",
+    "redacted"
+  ],
+  "title": "tri.operation.list",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

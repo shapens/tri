@@ -1,0 +1,27 @@
+{
+  "$id": "schemas/tri.export.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "status",
+    "project",
+    "changeset",
+    "workspace",
+    "redacted_workspace",
+    "export_kind",
+    "target_remote",
+    "target_ref",
+    "exported_object_ids",
+    "policy_decision",
+    "actor",
+    "artifact",
+    "diagnostics",
+    "source_events",
+    "determinism",
+    "created_at",
+    "completed_at"
+  ],
+  "title": "tri.export.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

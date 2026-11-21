@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.backup.verify.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "dest",
+    "ok",
+    "blobs_checked",
+    "artifacts_checked",
+    "problems"
+  ],
+  "title": "tri.backup.verify",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

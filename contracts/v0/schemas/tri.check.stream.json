@@ -1,0 +1,19 @@
+{
+  "$id": "schemas/tri.check.stream.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "check",
+    "log",
+    "artifact",
+    "offset",
+    "next_offset",
+    "limit",
+    "total_bytes",
+    "eof",
+    "encoding",
+    "text"
+  ],
+  "title": "tri.check.stream",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

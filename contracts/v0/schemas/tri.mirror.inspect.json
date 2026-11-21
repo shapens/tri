@@ -1,0 +1,22 @@
+{
+  "$id": "schemas/tri.mirror.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "target",
+    "remote",
+    "branch",
+    "audience",
+    "status",
+    "synced_snapshot",
+    "synced_git_commit",
+    "in_sync",
+    "last_result",
+    "created_by",
+    "created_at"
+  ],
+  "title": "tri.mirror.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

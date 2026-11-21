@@ -1,0 +1,48 @@
+{
+  "$id": "envelope-summary.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Envelope for --response summary: data is a compacted view, so only the envelope is contractual.",
+  "properties": {
+    "data": {
+      "type": "object"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "diagnostic.json"
+      },
+      "type": "array"
+    },
+    "events": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "diagnostic.json"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ok",
+    "schema",
+    "schema_version",
+    "data",
+    "events"
+  ],
+  "title": "tri.response.summary",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

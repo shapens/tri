@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.review.action.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "review",
+    "action",
+    "status"
+  ],
+  "title": "tri.review.action",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}
