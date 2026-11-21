@@ -20,7 +20,7 @@ class BackupTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         repo = self.root / "repo"
         (repo / "src").mkdir(parents=True)
-        (repo / "src" / "app.txt").write_text("v1\n")
+        (repo / "src" / "app.txt").write_bytes(("v1\n").encode())
         self.home = self.root / "home"
         self.tri("import", str(repo), "--name", "app", "--target", "main")
         self.ws = self.tri("workspace", "create", "app", "--from", "main")["data"]["id"]

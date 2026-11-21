@@ -36,7 +36,7 @@ class RegionalCacheTests(unittest.TestCase):
         repo = self.root / "repo"
         (repo / "src").mkdir(parents=True)
         for index in range(5):
-            (repo / "src" / f"f{index}.txt").write_text(f"content {index}\n" * 50)
+            (repo / "src" / f"f{index}.txt").write_bytes((f"content {index}\n" * 50).encode())
         self.env = {**os.environ, "TRI_HOME": str(self.root / "server-home"), "TRI_AUTO_REAP": "0"}
         for key in ("TRI_REMOTE", "TRI_ACTOR", "TRI_TOKEN", "TRI_TOKEN_FILE"):
             self.env.pop(key, None)

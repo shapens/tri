@@ -34,8 +34,8 @@ class PartialCheckoutTests(unittest.TestCase):
         for package in ("a", "b", "c"):
             (repo / package).mkdir(parents=True)
             for index in range(5):
-                (repo / package / f"f{index}.txt").write_text(f"{package}{index}\n")
-        (repo / "README.md").write_text("root\n")
+                (repo / package / f"f{index}.txt").write_bytes((f"{package}{index}\n").encode())
+        (repo / "README.md").write_bytes(("root\n").encode())
         env = {"TRI_HOME": str(self.root / "tri-home"), "TRI_AUTO_REAP": "0"}
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
@@ -85,7 +85,7 @@ class PartialCheckoutTests(unittest.TestCase):
         self.assertTrue((mount / "a" / "f0.txt").exists())
         self.assertFalse((mount / "a" / "f1.txt").exists())
         self.assertFalse((mount / "b").exists())
-        (mount / "c" / "f0.txt").write_text("edited\n")
+        (mount / "c" / "f0.txt").write_bytes(("edited\n").encode())
         (mount / "c" / "f1.txt").unlink()
         self.tri("workspace", "sync", ws)
         self.assertEqual(self.read(ws, "c/f0.txt"), "edited\n")
@@ -115,7 +115,7 @@ class PartialCheckoutTests(unittest.TestCase):
         trash = Path(os.environ["TRI_HOME"]) / "trash"
         stale = trash / "1-old-run-deadbeef" / "work"
         stale.mkdir(parents=True)
-        (stale / "file.txt").write_text("x")
+        (stale / "file.txt").write_bytes(("x").encode())
         fresh = trash / f"{int(time.time())}-fresh-run-cafebabe"
         fresh.mkdir()
         data = self.tri("gc", "--reap")["data"]

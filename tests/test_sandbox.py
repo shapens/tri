@@ -31,7 +31,10 @@ def attempt(name, fn):
     except Exception as exc:
         results[name] = "blocked"
 attempt("read_store", lambda: open(sys.argv[1], "rb").read(1))
-attempt("list_home", lambda: os.listdir(sys.argv[2]))
+try:
+    results["list_home"] = "leaked" if "tri.sqlite3" in os.listdir(sys.argv[2]) else "hidden"
+except Exception:
+    results["list_home"] = "hidden"
 attempt("write_outside", lambda: open(sys.argv[3], "w").write("x"))
 attempt("network", lambda: socket.create_connection(("127.0.0.1", int(sys.argv[4])), timeout=2).close())
 results["env_secret"] = "visible" if os.environ.get("TRI_TEST_CANARY_SECRET") else "hidden"
@@ -46,7 +49,7 @@ class SandboxTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         repo = self.root / "repo"
         repo.mkdir()
-        (repo / "app.txt").write_text("app\n")
+        (repo / "app.txt").write_bytes(("app\n").encode())
         self.home = self.root / "tri-home"
         env = {"TRI_HOME": str(self.home), "TRI_AUTO_REAP": "0", "TRI_TEST_CANARY_SECRET": "canary-value"}
         patcher = mock.patch.dict(os.environ, env)
@@ -103,7 +106,7 @@ class SandboxTests(unittest.TestCase):
         policy = check["environment_policy"]["sandbox"]
         self.assertTrue(policy["isolated"], policy)
         self.assertEqual(results["read_store"], "blocked")
-        self.assertEqual(results["list_home"], "blocked")
+        self.assertEqual(results["list_home"], "hidden")  # bwrap shows an empty tmpfs, seatbelt refuses
         self.assertEqual(results["write_outside"], "blocked")
         self.assertEqual(results["network"], "blocked")
         self.assertEqual(results["env_secret"], "hidden")
@@ -143,6 +146,7 @@ class SandboxTests(unittest.TestCase):
         self.assertIn(self.tri("doctor")["data"]["sandbox"]["kind"], ("bwrap", "seatbelt", "none"))
 
 
+@unittest.skipIf(os.name == "nt", "bubblewrap and seatbelt profiles use POSIX paths")
 class SandboxWrapTests(unittest.TestCase):
     def test_bwrap_hides_the_store_and_binds_only_the_run_directory(self) -> None:
         box = sandbox.Sandbox(kind="bwrap", network=False, writable=[Path("/srv/tri/runs/c1")], readable=[Path("/srv/tri/envs")], hidden=[Path("/srv/tri")])

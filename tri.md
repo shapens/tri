@@ -283,14 +283,14 @@ Being the best agent-native source control means closing the gaps that Scion and
 
 These are ordered by how much they block the goal.
 
-1. **Replicated storage behind the service.** Clients now treat one `tri serve` as the authority, but that service is a single process on one machine with SQLite and local blob files: no replication, failover, or horizontal scale. The target is Scion's shape: a transactional metadata store (Postgres or Spanner class) and object storage behind stateless API nodes.
+1. **Replicated storage behind the service.** Clients now treat one `tri serve` as the authority, but that service is a single process on one machine with SQLite and local blob files: no replication, failover, or horizontal scale. `tri backup create --watch` keeps a consistent warm standby that is itself a Tri home, which covers disaster recovery but not failover. The target is Scion's shape: a transactional metadata store (Postgres or Spanner class) and object storage behind stateless API nodes.
 2. **Virtual checkouts.** Partial checkouts (`--paths`), derived bases, remote partial mounts, a per-machine blob cache, and a regional cache shipped, but the caller still names the paths up front. Agents should fault in trees and blobs on first access through a FUSE (Linux, macFUSE) or ProjFS (Windows) view; that needs a native filesystem driver, which this stdlib-only prototype does not ship.
 3. **Runner hardening.** Remote runners execute in bubblewrap or the macOS sandbox; microVM isolation (Firecracker), secret leases for remote jobs (refused today), autoscaling, and a Windows isolation backend are not built.
 4. **Production runtime.** The prototype is one large Python module. It is the right tool for proving the object model; the server should be rewritten once the object model stops changing, keeping the JSON contracts as the compatibility boundary.
 
 ## Agent-Scale Scorecard
 
-Tri is the best agent-native source control only when it wins these measurements against Git worktrees plus GitHub, GitButler, and Entire, and stays within reach of Scion's published numbers. `tri-bench` already compares Tri with Git, GitButler, and Entire on the workflow loop, and `tri-bench-contention` covers the merge rows; the remaining rows need new scenarios.
+Tri is the best agent-native source control only when it wins these measurements against Git worktrees plus GitHub, GitButler, and Entire, and stays within reach of Scion's published numbers. Every row now has a measurement: `tri-bench` covers the workflow loop, `tri-bench-fanout` parallel attempts, `tri-bench-contention` the merge rows, and `tests/test_leak_sweep.py` the leak row. Scion publishes scale (30,000 merges a day on one monorepo) rather than per-merge numbers, so the comparison with it is shape, not a race.
 
 | Measurement | Bar | Status |
 | --- | --- | --- |

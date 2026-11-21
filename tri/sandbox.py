@@ -183,6 +183,13 @@ class Completed:
 
 def run(sandbox: Sandbox | None, argv: list[str], *, cwd: Path, env: dict[str, str]) -> Completed:
     """Run argv inside the sandbox (or directly when sandbox is None)."""
+    try:
+        return _run(sandbox, argv, cwd=cwd, env=env)
+    except OSError as exc:  # command not found or not executable: report it like a shell would
+        return Completed(127, b"", f"[tri] cannot start {argv[0] if argv else 'command'}: {exc}\n".encode())
+
+
+def _run(sandbox: Sandbox | None, argv: list[str], *, cwd: Path, env: dict[str, str]) -> Completed:
     if sandbox is None:
         proc = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
         return Completed(proc.returncode, proc.stdout, proc.stderr)

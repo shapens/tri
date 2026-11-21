@@ -31,8 +31,8 @@ class RunnerPoolTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         repo = self.root / "repo"
         (repo / "src").mkdir(parents=True)
-        (repo / "src" / "app.py").write_text("print('v1')\n")
-        (repo / ".env").write_text("SECRET=server-only\n")
+        (repo / "src" / "app.py").write_bytes(("print('v1')\n").encode())
+        (repo / ".env").write_bytes(("SECRET=server-only\n").encode())
         self.server_env = {**os.environ, "TRI_HOME": str(self.root / "server-home"), "TRI_AUTO_REAP": "0"}
         for key in ("TRI_REMOTE", "TRI_ACTOR", "TRI_TOKEN", "TRI_TOKEN_FILE"):
             self.server_env.pop(key, None)

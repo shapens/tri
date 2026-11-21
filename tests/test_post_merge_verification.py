@@ -17,7 +17,7 @@ from tri import cli  # noqa: E402
 from tri.cli import SCHEMA_CATALOG  # noqa: E402
 
 # The project's test: every file under src/ must not contain the word BROKEN.
-CHECK = f"{sys.executable} -c \"import pathlib,sys; sys.exit(any('BROKEN' in p.read_text() for p in pathlib.Path('src').rglob('*.txt')))\""
+CHECK = f"{sys.executable.replace(chr(92), '/')} -c \"import pathlib,sys; sys.exit(any('BROKEN' in p.read_text() for p in pathlib.Path('src').rglob('*.txt')))\""
 
 
 class PostMergeVerificationTests(unittest.TestCase):
@@ -27,11 +27,11 @@ class PostMergeVerificationTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         repo = self.root / "repo"
         (repo / "src").mkdir(parents=True)
-        (repo / "src" / "a.txt").write_text("a\n")
-        (repo / "src" / "b.txt").write_text("b\n")
-        (repo / "src" / "shared.txt").write_text("1\n2\n3\n4\n5\n6\n7\n")
+        (repo / "src" / "a.txt").write_bytes(("a\n").encode())
+        (repo / "src" / "b.txt").write_bytes(("b\n").encode())
+        (repo / "src" / "shared.txt").write_bytes(("1\n2\n3\n4\n5\n6\n7\n").encode())
         (repo / "ops").mkdir()
-        (repo / "ops" / "deploy.txt").write_text("deploy\n")
+        (repo / "ops" / "deploy.txt").write_bytes(("deploy\n").encode())
         patcher = mock.patch.dict(os.environ, {"TRI_HOME": str(self.root / "tri-home"), "TRI_AUTO_REAP": "0"})
         patcher.start()
         self.addCleanup(patcher.stop)

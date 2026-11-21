@@ -31,9 +31,9 @@ class RemoteModeTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         repo = self.root / "repo"
         (repo / "src").mkdir(parents=True)
-        (repo / "src" / "app.py").write_text("print('v1')\n")
+        (repo / "src" / "app.py").write_bytes(("print('v1')\n").encode())
         (repo / "docs").mkdir()
-        (repo / "docs" / "guide.md").write_text("guide\n")
+        (repo / "docs" / "guide.md").write_bytes(("guide\n").encode())
         (repo / "logo.bin").write_bytes(bytes(range(256)))
         self.server_env = {**os.environ, "TRI_HOME": str(self.root / "server-home"), "TRI_AUTO_REAP": "0"}
         self.server_env.pop("TRI_REMOTE", None)
@@ -106,7 +106,7 @@ class RemoteModeTests(unittest.TestCase):
     def test_local_body_files_are_uploaded_not_read_on_the_server(self) -> None:
         ws = self.tri("workspace", "create", "app", "--from", "main")["data"]["id"]
         local = self.root / "local-only.txt"
-        local.write_text("from the client\n")
+        local.write_bytes(("from the client\n").encode())
         self.tri("files", "write", ws, "notes.txt", "--body", str(local))
         self.assertEqual(self.read(ws, "notes.txt"), "from the client\n")
 
@@ -140,9 +140,9 @@ class RemoteModeTests(unittest.TestCase):
         ws = self.tri("workspace", "create", "app", "--from", "main")["data"]["id"]
         mount = self.root / "mnt"
         self.tri("workspace", "mount", ws, str(mount))
-        (mount / "src" / "app.py").write_text("print('edited')\n")
+        (mount / "src" / "app.py").write_bytes(("print('edited')\n").encode())
         (mount / "docs" / "guide.md").unlink()
-        (mount / "src" / "new.py").write_text("new\n")
+        (mount / "src" / "new.py").write_bytes(("new\n").encode())
         synced = self.tri("workspace", "sync", ws)["data"]
         self.assertEqual(synced["written"], ["src/app.py", "src/new.py"])
         self.assertEqual(synced["deleted"], ["docs/guide.md"])
@@ -155,7 +155,7 @@ class RemoteModeTests(unittest.TestCase):
         mount = self.root / "mnt"
         self.tri("workspace", "mount", ws, str(mount))
         self.tri("files", "write", ws, "src/app.py", "--text", "server side\n")
-        (mount / "src" / "app.py").write_text("client side\n")
+        (mount / "src" / "app.py").write_bytes(("client side\n").encode())
         stale = self.tri("workspace", "sync", ws, ok=False)
         self.assertEqual(stale["diagnostics"][0]["code"], "stale_materialization")
         self.assertEqual(self.read(ws, "src/app.py"), "server side\n")
@@ -165,7 +165,7 @@ class RemoteModeTests(unittest.TestCase):
         mounted = self.tri("workspace", "mount", ws, str(self.root / "part"), "--paths", "src")["data"]
         self.assertEqual(mounted["files"], 1)
         self.assertFalse((self.root / "part" / "docs").exists())
-        (self.root / "part" / "src" / "app.py").write_text("partial edit\n")
+        (self.root / "part" / "src" / "app.py").write_bytes(("partial edit\n").encode())
         self.tri("workspace", "sync", ws)
         self.assertEqual(self.read(ws, "docs/guide.md"), "guide\n")
         self.assertEqual(self.read(ws, "src/app.py"), "partial edit\n")

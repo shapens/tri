@@ -30,9 +30,9 @@ class GitMirrorTests(unittest.TestCase):
         self.git(self.source, "init", "-q", "-b", "main")
         (self.source / "docs").mkdir()
         (self.source / "vendor" / "secret_sdk").mkdir(parents=True)
-        (self.source / "docs" / "guide.md").write_text(GUIDE)
-        (self.source / "src.txt").write_text("one\n")
-        (self.source / "vendor" / "secret_sdk" / "core.txt").write_text("private v1\n")
+        (self.source / "docs" / "guide.md").write_bytes((GUIDE).encode())
+        (self.source / "src.txt").write_bytes(("one\n").encode())
+        (self.source / "vendor" / "secret_sdk" / "core.txt").write_bytes(("private v1\n").encode())
         self.git(self.source, "add", ".")
         self.git(self.source, "commit", "-q", "-m", "initial")
         self.remote = self.root / "remote.git"
@@ -84,7 +84,7 @@ class GitMirrorTests(unittest.TestCase):
         self.git(self.clone, "pull", "-q", "--rebase")
         target = self.clone / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text)
+        target.write_bytes((text).encode())
         self.git(self.clone, "add", "-A")
         self.git(self.clone, "commit", "-q", "-m", message)
         self.git(self.clone, "push", "-q")
