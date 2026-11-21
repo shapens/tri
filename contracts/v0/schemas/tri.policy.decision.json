@@ -1,0 +1,42 @@
+{
+  "$id": "schemas/tri.policy.decision.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "required": [
+        "object_type",
+        "visibility",
+        "owner",
+        "actor_selectors",
+        "matched_grants",
+        "reason"
+      ]
+    },
+    {
+      "required": [
+        "checks",
+        "review",
+        "stack",
+        "changeset_lifecycle",
+        "object_access",
+        "override"
+      ]
+    }
+  ],
+  "required": [
+    "id",
+    "allowed",
+    "actor",
+    "action",
+    "object",
+    "policies",
+    "grants",
+    "denials",
+    "redactions",
+    "reason_code",
+    "event"
+  ],
+  "title": "tri.policy.decision",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

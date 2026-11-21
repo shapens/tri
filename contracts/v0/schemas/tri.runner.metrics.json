@@ -1,0 +1,18 @@
+{
+  "$id": "schemas/tri.runner.metrics.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "queued",
+    "claimed",
+    "completed",
+    "failed",
+    "oldest_queued_age_seconds",
+    "claims",
+    "leases",
+    "secret_grants",
+    "generated_at"
+  ],
+  "title": "tri.runner.metrics",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

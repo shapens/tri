@@ -1,0 +1,83 @@
+{
+  "$id": "diagnostic.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "code": {
+      "enum": [
+        "actor_mismatch",
+        "advisory_embargo_active",
+        "backup_incomplete",
+        "changeset_lifecycle_blocked",
+        "conflict_required",
+        "content_mismatch",
+        "content_purged",
+        "env_build_failed",
+        "env_output_missing",
+        "gc_in_progress",
+        "git_export_failed",
+        "git_mirror_failed",
+        "git_mirror_unreachable",
+        "invalid_command",
+        "invalid_path",
+        "lease_already_reaped",
+        "materialization_degraded",
+        "mirror_conflict",
+        "mirror_diverged",
+        "mirror_history_rewritten",
+        "mirror_push_rejected",
+        "missing_required_check",
+        "missing_review_approval",
+        "mount_path_in_use",
+        "non_exportable_artifact",
+        "object_store_unavailable",
+        "path_escaped_mount",
+        "path_not_found",
+        "policy_denied",
+        "redacted_changeset",
+        "remote_unreachable",
+        "request_timeout",
+        "review_closed",
+        "reviewer_not_assigned",
+        "salvage_already_adopted",
+        "sandbox_unavailable",
+        "secret_export_blocked",
+        "secret_in_output",
+        "server_busy",
+        "stale_materialization",
+        "stale_target_snapshot",
+        "stale_workspace_head",
+        "store_unavailable",
+        "task_lifecycle_blocked",
+        "unauthenticated",
+        "unknown_actor",
+        "unresolved_conflict",
+        "unsatisfied_changeset_dependency",
+        "unsynced_changes",
+        "virtual_checkout_unavailable",
+        "virtual_mount_failed",
+        "visibility_export_blocked",
+        "worker_failed",
+        "workspace_lifecycle_blocked"
+      ],
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "severity": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "severity",
+    "message",
+    "retryable"
+  ],
+  "title": "tri.diagnostic",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

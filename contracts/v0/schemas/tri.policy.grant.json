@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.policy.grant.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "object",
+    "principal",
+    "actions",
+    "status"
+  ],
+  "title": "tri.policy.grant",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

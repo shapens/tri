@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.storage.status.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "metadata",
+    "objects",
+    "multi_node",
+    "node_id"
+  ],
+  "title": "tri.storage.status",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

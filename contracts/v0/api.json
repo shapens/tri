@@ -1,0 +1,550 @@
+{
+  "$id": "api.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "api_blocked_commands": [
+    "auth",
+    "backup",
+    "cache",
+    "mcp",
+    "serve",
+    "storage",
+    "worker"
+  ],
+  "auth": {
+    "errors": {
+      "missing_or_unknown_token": {
+        "code": "unauthenticated",
+        "status": 401
+      },
+      "x_tri_actor_or_payload_actor_differs": {
+        "code": "actor_mismatch",
+        "note": "403 for the X-Tri-Actor header; 200 with a tri.error envelope for a payload or argv actor",
+        "status": 403
+      }
+    },
+    "scheme": "bearer",
+    "token_file": "{\"tokens\": [{\"id\", \"actor\", \"sha256\", \"label\", \"created_at\"}]}; sha256 is the hex SHA-256 of the token",
+    "unauthenticated_routes": [
+      "/health",
+      "/v0/health",
+      "/ready",
+      "/v0/ready"
+    ]
+  },
+  "description": "Routes served by `tri serve` and `tri-server`. Every response body is a JSON envelope (envelope.json). GET object routes map onto the command of the same name.",
+  "limits": {
+    "max_body_bytes": 10485760,
+    "oversize_body": {
+      "code": "invalid_command",
+      "status": 200
+    }
+  },
+  "routes": [
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "root",
+      "path": "/v0",
+      "response_schema": "tri.api.server"
+    },
+    {
+      "authenticated": false,
+      "method": "GET",
+      "name": "health",
+      "path": "/v0/health",
+      "response_schema": "tri.api.health"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "commands",
+      "path": "/v0/commands"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "schema",
+      "path": "/v0/schema"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "schema_named",
+      "path": "/v0/schema/<schema>"
+    },
+    {
+      "authenticated": true,
+      "method": "POST",
+      "name": "command",
+      "path": "/v0/command",
+      "request": {
+        "anyOf": [
+          {
+            "required": [
+              "argv"
+            ]
+          },
+          {
+            "required": [
+              "command"
+            ]
+          }
+        ],
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response_schema": "per-command (commands.json) or tri.error"
+    },
+    {
+      "authenticated": true,
+      "method": "POST",
+      "name": "batch",
+      "path": "/v0/batch",
+      "request": {
+        "anyOf": [
+          {
+            "required": [
+              "commands"
+            ]
+          },
+          {
+            "required": [
+              "batch"
+            ]
+          }
+        ],
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "commands": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "continue_on_error": {
+            "type": "boolean"
+          },
+          "report": {
+            "enum": [
+              "results",
+              "returns"
+            ]
+          },
+          "response": {
+            "enum": [
+              "full",
+              "summary"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "response_schema": "tri.api.batch"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "object_inspect",
+      "path": "/v0/objects/<object>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "actor",
+      "path": "/v0/actors/<actor>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "projects",
+      "path": "/v0/projects"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project",
+      "path": "/v0/projects/<project>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_packages",
+      "path": "/v0/projects/<project>/packages"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "package",
+      "path": "/v0/packages/<package>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_targets",
+      "path": "/v0/projects/<project>/targets"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_target",
+      "path": "/v0/projects/<project>/targets/<target-or-id>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "target",
+      "path": "/v0/targets/<target>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_snapshots",
+      "path": "/v0/projects/<project>/snapshots"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_workspaces",
+      "path": "/v0/projects/<project>/workspaces"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_search",
+      "path": "/v0/projects/<project>/search?q=<query>&scope=workspaces&include_history=true"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_check_sets",
+      "path": "/v0/projects/<project>/check-sets"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "check_set",
+      "path": "/v0/check-sets/<check-set>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_advisories",
+      "path": "/v0/projects/<project>/advisories"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "advisory",
+      "path": "/v0/advisories/<advisory>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_releases",
+      "path": "/v0/projects/<project>/releases"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "release",
+      "path": "/v0/releases/<release>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_exports",
+      "path": "/v0/projects/<project>/exports?changeset=<changeset>&kind=github_pr"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "export",
+      "path": "/v0/exports/<export>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_secrets",
+      "path": "/v0/projects/<project>/secrets"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "secret",
+      "path": "/v0/secrets/<secret>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_events",
+      "path": "/v0/projects/<project>/events?kind=workspace.created&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "task",
+      "path": "/v0/tasks/<task>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "task_run",
+      "path": "/v0/task-runs/<run>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "task_attempts",
+      "path": "/v0/tasks/<task>/attempts"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "snapshot",
+      "path": "/v0/snapshots/<snapshot>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "snapshot_files",
+      "path": "/v0/snapshots/<snapshot>/files"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "snapshot_file",
+      "path": "/v0/snapshots/<snapshot>/files/<path>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "tree",
+      "path": "/v0/trees/<tree>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "blob",
+      "path": "/v0/blobs/<blob>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "operation",
+      "path": "/v0/operations/<operation>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace",
+      "path": "/v0/workspaces/<workspace>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_files",
+      "path": "/v0/workspaces/<workspace>/files"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_file",
+      "path": "/v0/workspaces/<workspace>/files/<path>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_search",
+      "path": "/v0/workspaces/<workspace>/search?q=<query>&glob=src/**"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_diff",
+      "path": "/v0/workspaces/<workspace>/diff?mode=summary&path=src/**"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_operations",
+      "path": "/v0/workspaces/<workspace>/operations"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_checks",
+      "path": "/v0/workspaces/<workspace>/checks"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_conflicts",
+      "path": "/v0/workspaces/<workspace>/conflicts?status=open"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_leases",
+      "path": "/v0/workspaces/<workspace>/leases"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "lease",
+      "path": "/v0/leases/<lease>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "changeset",
+      "path": "/v0/changesets/<changeset>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "changeset_operations",
+      "path": "/v0/changesets/<changeset>/operations"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "changeset_checks",
+      "path": "/v0/changesets/<changeset>/checks"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "changeset_diff",
+      "path": "/v0/changesets/<changeset>/diff?mode=patch&path=src/app.ts"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "review",
+      "path": "/v0/reviews/<review>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "review_action",
+      "path": "/v0/review-actions/<review-action>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "check",
+      "path": "/v0/checks/<check>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "check_artifacts",
+      "path": "/v0/checks/<check>/artifacts"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "check_log",
+      "path": "/v0/checks/<check>/logs/stdout?offset=0&limit=4096"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "check_logs",
+      "path": "/v0/checks/<check>/logs/stdout"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "conflicts",
+      "path": "/v0/conflicts?workspace=<workspace>&status=open"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "conflict",
+      "path": "/v0/conflicts/<conflict>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "grant",
+      "path": "/v0/grants/<grant>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "artifacts",
+      "path": "/v0/artifacts?kind=stdout&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "artifact",
+      "path": "/v0/artifacts/<artifact>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "artifact_content",
+      "path": "/v0/artifacts/<artifact>/content"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "events",
+      "path": "/v0/events?project=<project>&workspace=<workspace>&kind=<kind>&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "event",
+      "path": "/v0/events/<event>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "policy_decision",
+      "path": "/v0/policy/decisions/<decision>"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "runner_metrics",
+      "path": "/v0/runners/metrics?format=prometheus"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "object",
+      "path": "/v0/<collection>/<id>"
+    },
+    {
+      "authenticated": false,
+      "description": "200 when the server can take requests, 503 while it is starting or draining.",
+      "method": "GET",
+      "name": "ready",
+      "path": "/v0/ready",
+      "response_schema": "tri.api.ready"
+    }
+  ],
+  "schema_version": "0.1.0",
+  "server_paths": "Authenticated or non-loopback servers refuse arguments naming server files for non-maintainers: policy_denied with reason server_path.",
+  "title": "Tri HTTP API v0",
+  "unknown_route": {
+    "code": "path_not_found",
+    "status": 404
+  }
+}

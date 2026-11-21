@@ -1,0 +1,19 @@
+{
+  "$id": "schemas/tri.verification.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "changeset",
+    "target",
+    "merged_snapshot",
+    "pre_merge_snapshot",
+    "check_set",
+    "status",
+    "checks",
+    "created_at"
+  ],
+  "title": "tri.verification.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

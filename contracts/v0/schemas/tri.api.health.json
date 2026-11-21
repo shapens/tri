@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.api.health.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "status",
+    "home",
+    "schema_version"
+  ],
+  "title": "tri.api.health",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

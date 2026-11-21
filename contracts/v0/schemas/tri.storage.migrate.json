@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.storage.migrate.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "database",
+    "schema",
+    "tables",
+    "objects"
+  ],
+  "title": "tri.storage.migrate",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

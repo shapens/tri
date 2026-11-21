@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.conflicts.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "workspace",
+    "status",
+    "conflicts"
+  ],
+  "title": "tri.conflicts.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

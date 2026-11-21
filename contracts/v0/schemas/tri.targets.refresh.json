@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.targets.refresh.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "target",
+    "name",
+    "snapshot",
+    "source"
+  ],
+  "title": "tri.targets.refresh",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

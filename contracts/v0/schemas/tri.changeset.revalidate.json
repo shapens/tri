@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.changeset.revalidate.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "changeset",
+    "head_snapshot",
+    "checks",
+    "stack"
+  ],
+  "title": "tri.changeset.revalidate",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

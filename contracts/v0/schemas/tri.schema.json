@@ -1,0 +1,22 @@
+{
+  "$id": "schemas/tri.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "required": [
+        "schema_version",
+        "schemas"
+      ]
+    },
+    {
+      "required": [
+        "schema_version",
+        "name",
+        "schema"
+      ]
+    }
+  ],
+  "title": "tri.schema",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

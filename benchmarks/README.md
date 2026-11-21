@@ -174,3 +174,14 @@ Use `--keep-workdir` with either runner when debugging generated repositories or
 
 `tri-bench-virtual` (`benchmarks/virtual.py`) measures time to first read and bytes fetched for a full checkout, a `--paths` partial checkout of one package, and a `--virtual` FUSE view (Linux only), through the local store and through a loopback `tri serve` with an empty per-machine cache. Defaults: `--files 50000` x `--file-size 1024` in `--packages 200`; `--modes full,paths,virtual`, `--transports local,remote`. For the view it also times a walk of one whole package and reports how many bytes that fetched. Results go to `benchmark-results/virtual-<timestamp>/` (`--output-dir` to choose); the recorded 50,000-file run is `benchmark-results/virtual-50k/`.
 
+## Serving Benchmark
+
+`tri-bench-serving` measures requests per second and p50/p99 latency through the HTTP API for files read, files write, workspace create, and changeset propose at 1, 8, and 32 concurrent authenticated clients, comparing `tri serve` with `tri-server` (the Go front server over persistent Python workers). Build the server first (`cd native/tri-server && go build -o tri-server .`).
+
+```sh
+tri-bench-serving --output benchmark-results/serving                  # default SQLite journal (DELETE)
+tri-bench-serving --journal WAL --no-profile --output benchmark-results/serving-wal
+tri-bench-serving --concurrency 1,8 --requests files-read=200,files-write=80   # quick run
+```
+
+It also profiles the per-request cost inside Python (Store open, schema creation and migrations, one read with a per-request versus a kept-open store) unless `--no-profile` is passed. The client runs in the same process tree on the same machine, so it shares CPU with the server.

@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.doctor.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "home",
+    "db",
+    "schema_version",
+    "counts",
+    "git_available",
+    "command_count"
+  ],
+  "title": "tri.doctor",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

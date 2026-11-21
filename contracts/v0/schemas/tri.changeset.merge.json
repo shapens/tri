@@ -1,0 +1,16 @@
+{
+  "$id": "schemas/tri.changeset.merge.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "changeset",
+    "target",
+    "status",
+    "previous_snapshot",
+    "snapshot",
+    "changed_paths",
+    "conflicts"
+  ],
+  "title": "tri.changeset.merge",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

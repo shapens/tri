@@ -1,0 +1,22 @@
+{
+  "$id": "schemas/tri.project.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "name",
+    "root_path",
+    "default_target",
+    "targets",
+    "package_boundaries",
+    "redacted_package_boundaries",
+    "visibility_defaults",
+    "policy_set",
+    "import_settings",
+    "export_settings",
+    "counts",
+    "created_at"
+  ],
+  "title": "tri.project.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

@@ -71,6 +71,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "batch", "usage": "tri batch <plan.json> [--continue-on-error]", "schema": "tri.batch", "description": "Run a dependent JSON command batch in one local agent round trip."},
     {"name": "doctor", "usage": "tri doctor", "schema": "tri.doctor", "description": "Inspect local Tri store health and command availability."},
     {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs] [--run-executor local|remote]", "schema": "tri.api.server", "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor. Beyond loopback, runs are sandboxed by default (--run-sandbox required)."},
+    {"name": "worker", "usage": "tri worker --stdio [--host 127.0.0.1] [--port 8765] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs] [--run-executor local|remote]", "schema": "tri.worker", "description": "Serve API requests from a native front server (tri-server) over length-framed JSON on stdin/stdout, keeping one interpreter and store open; takes the same policy flags as tri serve."},
     {"name": "auth-issue", "usage": "tri auth issue <actor> --file <tokens.json> [--label <text>]", "schema": "tri.auth.token", "description": "Issue a bearer token bound to one actor; the token is shown once and only its hash is stored."},
     {"name": "auth-list", "usage": "tri auth list --file <tokens.json>", "schema": "tri.auth.list", "description": "List issued tokens without their secrets."},
     {"name": "auth-revoke", "usage": "tri auth revoke <token-id-or-actor> --file <tokens.json>", "schema": "tri.auth.list", "description": "Revoke tokens; a running server stops accepting them on its next request."},
@@ -262,6 +263,9 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.api.command": {"required": ["argv"]},
     "tri.api.batch": {"required": ["count", "executed", "ok_count", "failed", "results"]},
     "tri.api.server": {"required": ["host", "port", "endpoints"]},
+    "tri.api.ready": {"required": ["status", "ready"]},
+    "tri.response.summary": {"required": ["ok", "schema", "schema_version", "data", "events"]},
+    "tri.worker": {"required": ["protocol", "requests"]},
     "tri.diagnostic": {
         "required": ["code", "severity", "message", "retryable"],
         "codes": [
@@ -316,6 +320,10 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
             "invalid_command",
             "unauthenticated",
             "actor_mismatch",
+            # Emitted by the native front server (native/tri-server), not by Python.
+            "server_busy",
+            "request_timeout",
+            "worker_failed",
         ],
     },
     "tri.commands": {"required": ["schema_version", "commands"]},
@@ -605,12 +613,17 @@ def decision_denial(code: str, message: str, **fields: Any) -> dict[str, Any]:
 _POSTGRES_READY: set[tuple[str, str]] = set()
 
 
+_SCHEMA_FINGERPRINT: list[str] = []
+
+
 def store_schema_fingerprint() -> str:
     """Changes whenever the schema DDL or the migrations change."""
-    import inspect
+    if not _SCHEMA_FINGERPRINT:
+        import inspect
 
-    source = inspect.getsource(Store.init_db) + inspect.getsource(Store.migrate_db)
-    return hashlib.sha256(source.encode()).hexdigest()[:24]
+        source = inspect.getsource(Store.init_db) + inspect.getsource(Store.migrate_db)
+        _SCHEMA_FINGERPRINT.append(hashlib.sha256(source.encode()).hexdigest()[:24])
+    return _SCHEMA_FINGERPRINT[0]
 
 
 class Store:
@@ -685,7 +698,24 @@ class Store:
             if page_size not in {512, 1024, 2048, 4096, 8192, 16384, 32768, 65536}:
                 page_size = 512
             self.conn.execute(f"PRAGMA page_size={page_size}")
+        elif self._schema_current():
+            # Schema creation and migration checks were about half the cost of
+            # opening a store per request; skip them when nothing changed.
+            self.set_journal()
+            return
         self.init_db()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("schema_fingerprint", store_schema_fingerprint()),
+            )
+
+    def _schema_current(self) -> bool:
+        try:
+            row = self.conn.execute("SELECT value FROM store_meta WHERE key = 'schema_fingerprint'").fetchone()
+        except sqlite3.Error:
+            return False
+        return row is not None and row["value"] == store_schema_fingerprint()
 
     def _open_postgres(self) -> None:
         """Metadata in PostgreSQL (one schema per store), shared by every node.
@@ -743,12 +773,15 @@ class Store:
             self._materializer = Materializer(self.home, CheckoutCache(self.checkout, self.read_blob), read_blob=self.read_blob, load_tree=self.load_tree)
         return self._materializer
 
-    def init_db(self) -> None:
+    def set_journal(self) -> None:
         journal_mode = os.environ.get("TRI_SQLITE_JOURNAL", "DELETE").upper()
         if journal_mode not in {"DELETE", "WAL", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
             journal_mode = "DELETE"
         self.conn.execute(f"PRAGMA journal_mode={journal_mode}")
         self.conn.execute("PRAGMA journal_size_limit=0")
+
+    def init_db(self) -> None:
+        self.set_journal()
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -16496,6 +16529,19 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             raise TriError("invalid_command", f"Invalid JSON body: {exc.msg}")
 
     pinned_actor: str | None = None
+    # `tri worker` keeps one store open across requests; `tri serve` opens one per request.
+    shared_store: Store | None = None
+
+    def execute(self, argv: list[str], start: float, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, store=self.shared_store, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
+        return output
+
+    def request_store(self) -> Store:
+        return self.shared_store or Store(pack_on_close=False)
+
+    def release_store(self, store: Store) -> None:
+        if store is not self.shared_store:
+            store.close()
 
     @property
     def server_paths_allowed(self) -> bool:
@@ -16555,8 +16601,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
         return header if header else None
 
     def run_get_command(self, start: float, argv: list[str]) -> bool:
-        output, _ = execute_argv(argv, actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
-        self.write_json(200, output)
+        self.write_json(200, self.execute(argv, start))
         return True
 
     def runner_metrics_get(self, start: float, parsed: Any) -> None:
@@ -16811,7 +16856,10 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         start = time.time()
         parsed = urlparse(self.path)
-        if parsed.path not in ("/health", "/v0/health") and not self.authenticate(start):
+        if parsed.path not in ("/health", "/v0/health", "/ready", "/v0/ready") and not self.authenticate(start):
+            return
+        if parsed.path in ("/ready", "/v0/ready"):
+            self.write_json(200, envelope("tri.api.ready", ["tri", "serve", "ready"], actor=self.actor_from_request() or "actor_local", start=start, data={"status": "ready", "ready": True}))
             return
         if parsed.path in ("/v0", "/v0/"):
             host, port = self.server.server_address
@@ -16828,7 +16876,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path in ("/health", "/v0/health"):
             try:
-                store = Store(pack_on_close=False)
+                store = self.request_store()
             except sqlite3.Error as exc:
                 diagnostic = TriError("store_unavailable", f"The metadata store is unavailable: {exc}", retryable=True).diagnostic
                 self.write_json(503, envelope("tri.error", ["tri", "serve", "health"], ok=False, actor="actor_local", start=start, diagnostics=[diagnostic]))
@@ -16841,21 +16889,18 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 self.write_json(503, envelope("tri.error", ["tri", "serve", "health"], ok=False, actor="actor_local", start=start, diagnostics=[diagnostic]))
                 return
             finally:
-                store.close()
+                self.release_store(store)
             self.write_json(200, envelope("tri.api.health", ["tri", "serve", "health"], actor=self.actor_from_request() or "actor_local", start=start, data=data))
             return
         if parsed.path == "/v0/commands":
-            output, _ = execute_argv(["commands"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
-            self.write_json(200, output)
+            self.write_json(200, self.execute(["commands"], start))
             return
         if parsed.path == "/v0/schema":
-            output, _ = execute_argv(["schema"], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
-            self.write_json(200, output)
+            self.write_json(200, self.execute(["schema"], start))
             return
         if parsed.path.startswith("/v0/schema/"):
             name = unquote(parsed.path.removeprefix("/v0/schema/"))
-            output, _ = execute_argv(["schema", name], actor=self.actor_from_request(), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
-            self.write_json(200, output)
+            self.write_json(200, self.execute(["schema", name], start))
             return
         if parsed.path == "/v0/runners/metrics":
             self.runner_metrics_get(start, parsed)
@@ -16898,14 +16943,14 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 raise TriError("invalid_command", "Command request must be a JSON object.")
             if parsed.path == "/v0/batch":
                 try:
-                    store = Store(pack_on_close=False)
+                    store = self.request_store()
                 except sqlite3.Error as exc:
                     raise TriError("store_unavailable", f"The metadata store is unavailable: {exc}", retryable=True) from None
                 try:
                     actor = self.actor_from_request(payload) or "actor_local"
                     data, ok = run_batch_payload(store, payload, default_actor=actor, start=start, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed)
                 finally:
-                    store.close()
+                    self.release_store(store)
                 self.write_json(
                     200,
                     envelope(
@@ -16927,7 +16972,7 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 argv = argv[1:]
             if argv and argv[0] in API_BLOCKED_COMMANDS:
                 raise TriError("invalid_command", "This command is not available through the API.", object=argv[0])
-            output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
+            output = self.execute(argv, start, payload)
             unavailable = not output.get("ok") and any(d.get("code") == "store_unavailable" for d in output.get("diagnostics", []))
             self.write_json(503 if unavailable else 200, output)
         except TriError as exc:
@@ -17258,7 +17303,10 @@ def cmd_cache_serve(store: Store, args: argparse.Namespace, command: list[str], 
     return serve_cache(args, command=command, start=start)
 
 
-def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+def configure_serve_runtime(args: argparse.Namespace) -> str | None:
+    """Apply the serving policy shared by `tri serve` and `tri worker`: refuse to
+    serve beyond loopback without tokens or without sandboxed runs, and set the
+    run sandbox and executor for this process. Returns the token file, if any."""
     auth_file = args.auth_file or os.environ.get("TRI_SERVE_AUTH_FILE")
     if not auth_file and args.host not in LOOPBACK_HOSTS and not args.allow_unauthenticated:
         raise TriError(
@@ -17279,6 +17327,17 @@ def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start:
     os.environ[sandbox.MODE_ENV] = "auto" if run_sandbox == "required" and args.allow_unsandboxed_runs else run_sandbox
     if args.run_executor:
         os.environ["TRI_RUN_EXECUTOR"] = args.run_executor
+    return auth_file
+
+
+def cmd_worker(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    from tri.worker import serve_worker
+
+    return serve_worker(store, args, command=command, start=start)
+
+
+def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    auth_file = configure_serve_runtime(args)
     server = TriHTTPServer((args.host, args.port), TriAPIHandler)
     server.authority = TokenAuthority(Path(auth_file).resolve()) if auth_file else None
     host, port = server.server_address
@@ -17387,6 +17446,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-unsandboxed-runs", action="store_true")
     p.add_argument("--run-executor", choices=["local", "remote"])
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("worker")
+    p.add_argument("--stdio", action="store_true", required=True)
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--auth-file")
+    p.add_argument("--allow-unauthenticated", action="store_true")
+    p.add_argument("--run-sandbox", choices=list(sandbox.MODES))
+    p.add_argument("--allow-unsandboxed-runs", action="store_true")
+    p.add_argument("--run-executor", choices=["local", "remote"])
+    p.set_defaults(func=cmd_worker)
 
     p = sub.add_parser("mcp")
     p.add_argument("--run-sandbox", choices=list(sandbox.MODES))
@@ -18219,7 +18289,7 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 # Commands that start servers or manage credentials never run on behalf of a remote client.
-API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache", "backup", "storage"})
+API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache", "backup", "storage", "worker"})
 
 
 def raise_actor_mismatch(claimed: str | None, authenticated: str) -> None:
@@ -18358,7 +18428,7 @@ def execute_argv(
 
 def main(argv: list[str] | None = None) -> None:
     output, status = execute_argv(list(sys.argv[1:] if argv is None else argv), start=time.time())
-    if output["schema"] not in ("tri.api.server", "tri.mcp.server", "tri.cache.server"):
+    if output["schema"] not in ("tri.api.server", "tri.mcp.server", "tri.cache.server", "tri.worker"):
         print_json(output)
     if status:
         raise SystemExit(status)

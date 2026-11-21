@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.workspace.list.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "project",
+    "workspaces",
+    "redacted"
+  ],
+  "title": "tri.workspace.list",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

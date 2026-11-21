@@ -1,0 +1,23 @@
+{
+  "$id": "schemas/tri.policy.embargo.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "title",
+    "body",
+    "status",
+    "disclosure_state",
+    "embargoed",
+    "affected_packages",
+    "trusted_reviewers",
+    "private_changesets",
+    "redacted",
+    "created_by",
+    "created_at",
+    "disclosed_at"
+  ],
+  "title": "tri.policy.embargo",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

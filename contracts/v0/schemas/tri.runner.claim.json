@@ -1,0 +1,10 @@
+{
+  "$id": "schemas/tri.runner.claim.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "job"
+  ],
+  "title": "tri.runner.claim",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

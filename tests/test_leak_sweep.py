@@ -68,6 +68,11 @@ if str(ROOT) not in sys.path:
 
 from tri import cli  # noqa: E402
 
+try:  # run through `discover -s tests`, or as tests.test_leak_sweep
+    from conformance.harness import server_argv  # noqa: E402
+except ImportError:  # pragma: no cover
+    from tests.conformance.harness import server_argv  # noqa: E402
+
 OUTSIDER = "agent:outsider"
 RUNNER = "service:sweep-runner"
 OWNER = "agent:owner"
@@ -904,14 +909,23 @@ class LeakSweepTests(unittest.TestCase):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate(timeout=5)
+        if os.name == "nt" and os.environ.get("TRI_CONFORMANCE_NATIVE"):
+            time.sleep(2)  # tri-server's workers exit on end of input after it is terminated
 
     def start_server(self, *extra: str) -> int:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         env = os.environ.copy()
+        # TRI_CONFORMANCE_NATIVE (a tri-server binary) or TRI_CONFORMANCE_SERVER
+        # sweeps another server implementation; the default is `tri serve`.
+        auth_file = extra[extra.index("--auth-file") + 1] if "--auth-file" in extra else None
+        if os.environ.get("TRI_CONFORMANCE_NATIVE") or os.environ.get("TRI_CONFORMANCE_SERVER"):
+            argv = server_argv("127.0.0.1", port, auth_file)
+        else:
+            argv = [sys.executable, "-m", "tri", "serve", "--host", "127.0.0.1", "--port", str(port), "--quiet", *extra]
         proc = subprocess.Popen(
-            [sys.executable, "-m", "tri", "serve", "--host", "127.0.0.1", "--port", str(port), "--quiet", *extra],
+            argv,
             cwd=ROOT,
             env=env,
             text=True,
@@ -919,11 +933,14 @@ class LeakSweepTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         self.addCleanup(self.stop_server, proc)
-        deadline = time.time() + 15
+        deadline = time.time() + 60
         while time.time() < deadline:
             try:
                 status, _ = self.call(port, "/v0/health")
                 if status == 200:
+                    if os.environ.get("TRI_CONFORMANCE_NATIVE"):
+                        _, ready = self.call(port, "/v0/ready")
+                        self.assertIn("workers", json.loads(ready)["data"], "expected tri-server to be the server under test")
                     return port
             except (ConnectionError, URLError, TimeoutError):
                 time.sleep(0.05)

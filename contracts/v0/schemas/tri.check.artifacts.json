@@ -1,0 +1,11 @@
+{
+  "$id": "schemas/tri.check.artifacts.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "check",
+    "artifacts"
+  ],
+  "title": "tri.check.artifacts",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

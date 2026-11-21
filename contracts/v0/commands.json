@@ -1,0 +1,1223 @@
+{
+  "$id": "commands.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "api_blocked_commands": [
+    "auth",
+    "backup",
+    "cache",
+    "mcp",
+    "serve",
+    "storage",
+    "worker"
+  ],
+  "commands": [
+    {
+      "data_schema": "schemas/tri.commands.json",
+      "description": "List machine-readable command contracts.",
+      "name": "commands",
+      "schema": "tri.commands",
+      "usage": "tri commands"
+    },
+    {
+      "data_schema": "schemas/tri.schema.json",
+      "description": "Show first JSON schemas used by agent clients.",
+      "name": "schema",
+      "schema": "tri.schema",
+      "usage": "tri schema [name]"
+    },
+    {
+      "data_schema": "schemas/tri.batch.json",
+      "description": "Run a dependent JSON command batch in one local agent round trip.",
+      "name": "batch",
+      "schema": "tri.batch",
+      "usage": "tri batch <plan.json> [--continue-on-error]"
+    },
+    {
+      "data_schema": "schemas/tri.doctor.json",
+      "description": "Inspect local Tri store health and command availability.",
+      "name": "doctor",
+      "schema": "tri.doctor",
+      "usage": "tri doctor"
+    },
+    {
+      "data_schema": "schemas/tri.api.server.json",
+      "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor. Beyond loopback, runs are sandboxed by default (--run-sandbox required).",
+      "name": "serve",
+      "schema": "tri.api.server",
+      "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs] [--run-executor local|remote]"
+    },
+    {
+      "data_schema": "schemas/tri.worker.json",
+      "description": "Serve API requests from a native front server (tri-server) over length-framed JSON on stdin/stdout, keeping one interpreter and store open; takes the same policy flags as tri serve.",
+      "name": "worker",
+      "schema": "tri.worker",
+      "usage": "tri worker --stdio [--host 127.0.0.1] [--port 8765] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs] [--run-executor local|remote]"
+    },
+    {
+      "data_schema": "schemas/tri.auth.token.json",
+      "description": "Issue a bearer token bound to one actor; the token is shown once and only its hash is stored.",
+      "name": "auth-issue",
+      "schema": "tri.auth.token",
+      "usage": "tri auth issue <actor> --file <tokens.json> [--label <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.auth.list.json",
+      "description": "List issued tokens without their secrets.",
+      "name": "auth-list",
+      "schema": "tri.auth.list",
+      "usage": "tri auth list --file <tokens.json>"
+    },
+    {
+      "data_schema": "schemas/tri.auth.list.json",
+      "description": "Revoke tokens; a running server stops accepting them on its next request.",
+      "name": "auth-revoke",
+      "schema": "tri.auth.list",
+      "usage": "tri auth revoke <token-id-or-actor> --file <tokens.json>"
+    },
+    {
+      "data_schema": "schemas/tri.mcp.server.json",
+      "description": "Serve Tri to agent harnesses over the Model Context Protocol (stdio); every call runs as the startup actor.",
+      "name": "mcp",
+      "schema": "tri.mcp.server",
+      "usage": "tri mcp [--run-sandbox off|auto|required]"
+    },
+    {
+      "data_schema": "schemas/tri.object.inspect.json",
+      "description": "Inspect any supported typed Tri object id through its policy-aware command.",
+      "name": "objects-inspect",
+      "schema": "tri.object.inspect",
+      "usage": "tri objects inspect <object>"
+    },
+    {
+      "data_schema": "schemas/tri.actor.inspect.json",
+      "description": "Inspect an actor identity, derived roles, and policy selectors.",
+      "name": "actors-inspect",
+      "schema": "tri.actor.inspect",
+      "usage": "tri actors inspect <actor>"
+    },
+    {
+      "data_schema": "schemas/tri.import.json",
+      "description": "Import a Git repo or directory into Tri snapshots.",
+      "name": "import",
+      "schema": "tri.import",
+      "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]"
+    },
+    {
+      "data_schema": "schemas/tri.project.list.json",
+      "description": "List projects in the local Tri store.",
+      "name": "projects-list",
+      "schema": "tri.project.list",
+      "usage": "tri projects list"
+    },
+    {
+      "data_schema": "schemas/tri.project.inspect.json",
+      "description": "Inspect project metadata and child object counts.",
+      "name": "projects-inspect",
+      "schema": "tri.project.inspect",
+      "usage": "tri projects inspect <project>"
+    },
+    {
+      "data_schema": "schemas/tri.gc.json",
+      "description": "Plan (default) or apply garbage collection: --reap reaps leases and evicts caches over budget; --apply also purges content no live object references.",
+      "name": "gc",
+      "schema": "tri.gc",
+      "usage": "tri gc [--reap] [--apply] [--retention-days <n>] [--grace-seconds <n>] [--unsafe-no-grace] [--clear-caches]"
+    },
+    {
+      "data_schema": "schemas/tri.env.recipe.json",
+      "description": "Declare a dependency environment built once per key (key files + key commands + platform) and shared read-only by runs and mounts.",
+      "name": "env-define",
+      "schema": "tri.env.recipe",
+      "usage": "tri env define <project> <name> --install <cmd> --output <path> [--output <path>] [--key-file <glob>] [--key-command <cmd>] [--mode auto|copy|link|private]"
+    },
+    {
+      "data_schema": "schemas/tri.env.list.json",
+      "description": "List environment recipes.",
+      "name": "env-list",
+      "schema": "tri.env.list",
+      "usage": "tri env list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.env.inspect.json",
+      "description": "Inspect an environment recipe and its cached builds.",
+      "name": "env-inspect",
+      "schema": "tri.env.inspect",
+      "usage": "tri env inspect <project> <name>"
+    },
+    {
+      "data_schema": "schemas/tri.env.list.json",
+      "description": "Remove an environment recipe; cached builds age out through GC.",
+      "name": "env-remove",
+      "schema": "tri.env.list",
+      "usage": "tri env remove <project> <name>"
+    },
+    {
+      "data_schema": "schemas/tri.ignore.list.json",
+      "description": "Add project ignore patterns: matching new files are never imported from runs, syncs, or salvage.",
+      "name": "ignore-add",
+      "schema": "tri.ignore.list",
+      "usage": "tri ignore add <project> <glob...>"
+    },
+    {
+      "data_schema": "schemas/tri.ignore.list.json",
+      "description": "Remove project ignore patterns.",
+      "name": "ignore-remove",
+      "schema": "tri.ignore.list",
+      "usage": "tri ignore remove <project> <glob...>"
+    },
+    {
+      "data_schema": "schemas/tri.ignore.list.json",
+      "description": "List project ignore patterns (applied on top of the snapshot's .gitignore files).",
+      "name": "ignore-list",
+      "schema": "tri.ignore.list",
+      "usage": "tri ignore list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.package.inspect.json",
+      "description": "Declare an inspectable package boundary for project policy and splitting.",
+      "name": "packages-declare",
+      "schema": "tri.package.inspect",
+      "usage": "tri packages declare <project> <name> --path <glob> [--visibility <selector>] [--owner <principal>]"
+    },
+    {
+      "data_schema": "schemas/tri.package.list.json",
+      "description": "List project package boundaries.",
+      "name": "packages-list",
+      "schema": "tri.package.list",
+      "usage": "tri packages list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.package.inspect.json",
+      "description": "Inspect one project package boundary.",
+      "name": "packages-inspect",
+      "schema": "tri.package.inspect",
+      "usage": "tri packages inspect <project> <name-or-id> | <package>"
+    },
+    {
+      "data_schema": "schemas/tri.targets.list.json",
+      "description": "List project target pointers.",
+      "name": "targets-list",
+      "schema": "tri.targets.list",
+      "usage": "tri targets list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.targets.inspect.json",
+      "description": "Inspect one project target pointer.",
+      "name": "targets-inspect",
+      "schema": "tri.targets.inspect",
+      "usage": "tri targets inspect <project> <target-or-id> | <target>"
+    },
+    {
+      "data_schema": "schemas/tri.targets.refresh.json",
+      "description": "Refresh a target from the imported project root.",
+      "name": "targets-refresh",
+      "schema": "tri.targets.refresh",
+      "usage": "tri targets refresh <project> <target> [--ref <ref>] [--expect-snapshot <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.snapshot.list.json",
+      "description": "List policy-readable snapshots for a project.",
+      "name": "snapshots-list",
+      "schema": "tri.snapshot.list",
+      "usage": "tri snapshots list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.snapshot.merge_base.json",
+      "description": "Nearest common ancestor snapshot of two workspaces, changesets, targets, or snapshots.",
+      "name": "snapshots-merge-base",
+      "schema": "tri.snapshot.merge_base",
+      "usage": "tri snapshots merge-base <ref> <ref>"
+    },
+    {
+      "data_schema": "schemas/tri.snapshot.inspect.json",
+      "description": "Inspect immutable snapshot provenance.",
+      "name": "snapshots-inspect",
+      "schema": "tri.snapshot.inspect",
+      "usage": "tri snapshots inspect <snapshot>"
+    },
+    {
+      "data_schema": "schemas/tri.tree.inspect.json",
+      "description": "Inspect a policy-visible content tree and its readable file entries.",
+      "name": "trees-inspect",
+      "schema": "tri.tree.inspect",
+      "usage": "tri trees inspect <tree>"
+    },
+    {
+      "data_schema": "schemas/tri.blob.inspect.json",
+      "description": "Inspect a policy-visible content blob without reading raw bytes by id.",
+      "name": "blobs-inspect",
+      "schema": "tri.blob.inspect",
+      "usage": "tri blobs inspect <blob>"
+    },
+    {
+      "data_schema": "schemas/tri.task.inspect.json",
+      "description": "Create an executable work task.",
+      "name": "task-create",
+      "schema": "tri.task.inspect",
+      "usage": "tri task create <project> --title <title> [--body <text>] [--body-file <path>] [--acceptance <text>] [--required-check <cmd>] [--check-set <name>]"
+    },
+    {
+      "data_schema": "schemas/tri.task.inspect.json",
+      "description": "Inspect an executable task spec.",
+      "name": "task-inspect",
+      "schema": "tri.task.inspect",
+      "usage": "tri task inspect <task>"
+    },
+    {
+      "data_schema": "schemas/tri.task_run.inspect.json",
+      "description": "Inspect one task-run attempt.",
+      "name": "task-run-inspect",
+      "schema": "tri.task_run.inspect",
+      "usage": "tri task run-inspect <run>"
+    },
+    {
+      "data_schema": "schemas/tri.task_run.inspect.json",
+      "description": "Complete a task run with a final recommendation.",
+      "name": "task-complete-run",
+      "schema": "tri.task_run.inspect",
+      "usage": "tri task complete-run <run> --recommendation <text> [--status completed|failed|cancelled]"
+    },
+    {
+      "data_schema": "schemas/tri.task.lifecycle.json",
+      "description": "Mark a running task blocked with a machine-readable reason.",
+      "name": "task-block",
+      "schema": "tri.task.lifecycle",
+      "usage": "tri task block <task> --reason <text>"
+    },
+    {
+      "data_schema": "schemas/tri.task.lifecycle.json",
+      "description": "Resume a blocked or rejected task.",
+      "name": "task-resume",
+      "schema": "tri.task.lifecycle",
+      "usage": "tri task resume <task> [--reason <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.task.lifecycle.json",
+      "description": "Accept a reviewed task with accepted changesets or a no-change resolution.",
+      "name": "task-accept",
+      "schema": "tri.task.lifecycle",
+      "usage": "tri task accept <task> (--changeset <changeset> | --no-change <text>)"
+    },
+    {
+      "data_schema": "schemas/tri.task.lifecycle.json",
+      "description": "Reject a task in review with a recorded reason.",
+      "name": "task-reject",
+      "schema": "tri.task.lifecycle",
+      "usage": "tri task reject <task> --reason <text>"
+    },
+    {
+      "data_schema": "schemas/tri.task.lifecycle.json",
+      "description": "Close an accepted or rejected task.",
+      "name": "task-close",
+      "schema": "tri.task.lifecycle",
+      "usage": "tri task close <task> [--reason <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.task.attempts.json",
+      "description": "List workspaces, runs, and changesets for a task.",
+      "name": "task-attempts",
+      "schema": "tri.task.attempts",
+      "usage": "tri task attempts <task>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.create.json",
+      "description": "Create an isolated workspace from a target.",
+      "name": "workspace-create",
+      "schema": "tri.workspace.create",
+      "usage": "tri workspace create <project> --from <target> [--task <task-or-title>] [--visibility <selector>] [--advisory <advisory>] [--hide-path <glob>] [--hide-package <pkg>]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.list.json",
+      "description": "List workspaces for a project or local store.",
+      "name": "workspace-list",
+      "schema": "tri.workspace.list",
+      "usage": "tri workspace list [project]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.inspect.json",
+      "description": "Inspect workspace state.",
+      "name": "workspace-inspect",
+      "schema": "tri.workspace.inspect",
+      "usage": "tri workspace inspect <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.update.json",
+      "description": "Merge a workspace onto the current target snapshot.",
+      "name": "workspace-update",
+      "schema": "tri.workspace.update",
+      "usage": "tri workspace update <workspace> --from <target> [--expect-head <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.snapshot.json",
+      "description": "Create an explicit workspace checkpoint snapshot.",
+      "name": "workspace-snapshot",
+      "schema": "tri.workspace.snapshot",
+      "usage": "tri workspace snapshot <workspace> [--expect-head <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.mount.json",
+      "description": "Materialize a workspace into a local directory and create a materialization lease. --paths mounts only matching files; sync keeps the rest of the tree. --virtual mounts the whole tree as a FUSE view (Linux) whose content is fetched on first read; it runs as a detached daemon unless --foreground.",
+      "name": "workspace-mount",
+      "schema": "tri.workspace.mount",
+      "usage": "tri workspace mount <workspace> <path> [--paths <glob> | --virtual [--foreground]] [--ttl-seconds <n> | --no-ttl] [--ignore-path <glob>] [--no-env] [--env-link]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.unmount.json",
+      "description": "Stop a virtual checkout and release its lease. Refuses while the view has unsynced edits unless --force (locally they are kept as a salvage).",
+      "name": "workspace-unmount",
+      "schema": "tri.workspace.unmount",
+      "usage": "tri workspace unmount <workspace> [--lease <lease>] [--path <dir>] [--force]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.sync.json",
+      "description": "Import mounted filesystem edits back into Tri through a materialization lease.",
+      "name": "workspace-sync",
+      "schema": "tri.workspace.sync",
+      "usage": "tri workspace sync <workspace> [--lease <lease>]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.materialization_leases.json",
+      "description": "List materialization leases for a workspace.",
+      "name": "workspace-leases",
+      "schema": "tri.workspace.materialization_leases",
+      "usage": "tri workspace leases <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.materialization_lease.json",
+      "description": "Inspect a materialization lease.",
+      "name": "workspace-lease-inspect",
+      "schema": "tri.workspace.materialization_lease",
+      "usage": "tri workspace lease-inspect <lease>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.materialization_lease.json",
+      "description": "Revoke a materialization lease.",
+      "name": "workspace-lease-revoke",
+      "schema": "tri.workspace.materialization_lease",
+      "usage": "tri workspace lease-revoke <lease>"
+    },
+    {
+      "data_schema": "schemas/tri.lease.inspect.json",
+      "description": "Inspect a secret or materialization lease by id.",
+      "name": "leases-inspect",
+      "schema": "tri.lease.inspect",
+      "usage": "tri leases inspect <lease>"
+    },
+    {
+      "data_schema": "schemas/tri.lease.list.json",
+      "description": "List mount leases and run/env-build directory leases with backend and lifecycle state.",
+      "name": "leases-list",
+      "schema": "tri.lease.list",
+      "usage": "tri leases list [--workspace <workspace>] [--status <status>]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.materialization_lease.json",
+      "description": "Extend a mount lease (sync also renews it).",
+      "name": "leases-renew",
+      "schema": "tri.workspace.materialization_lease",
+      "usage": "tri leases renew <lease> [--ttl-seconds <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.lease.reap.json",
+      "description": "Reap expired, revoked, discarded, and orphaned directories, salvaging unsynced edits first.",
+      "name": "leases-reap",
+      "schema": "tri.lease.reap",
+      "usage": "tri leases reap [<lease> --force]"
+    },
+    {
+      "data_schema": "schemas/tri.salvage.list.json",
+      "description": "List snapshots salvaged from reaped directories.",
+      "name": "salvage-list",
+      "schema": "tri.salvage.list",
+      "usage": "tri salvage list <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.salvage.adopt.json",
+      "description": "Make a salvage snapshot the workspace head when the head has not moved since.",
+      "name": "salvage-adopt",
+      "schema": "tri.salvage.adopt",
+      "usage": "tri salvage adopt <salvage> [--expect-head <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.lifecycle.json",
+      "description": "Pause an active workspace so it remains readable but rejects mutation.",
+      "name": "workspace-pause",
+      "schema": "tri.workspace.lifecycle",
+      "usage": "tri workspace pause <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.lifecycle.json",
+      "description": "Resume a paused workspace.",
+      "name": "workspace-resume",
+      "schema": "tri.workspace.lifecycle",
+      "usage": "tri workspace resume <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.lifecycle.json",
+      "description": "Mark an active workspace as discarded.",
+      "name": "workspace-discard",
+      "schema": "tri.workspace.lifecycle",
+      "usage": "tri workspace discard <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.workspace.lifecycle.json",
+      "description": "Archive a workspace after use.",
+      "name": "workspace-archive",
+      "schema": "tri.workspace.lifecycle",
+      "usage": "tri workspace archive <workspace>"
+    },
+    {
+      "data_schema": "schemas/tri.conflicts.list.json",
+      "description": "List persisted workspace conflicts.",
+      "name": "conflicts-list",
+      "schema": "tri.conflicts.list",
+      "usage": "tri conflicts list [--workspace <workspace>] [--status open|resolved]"
+    },
+    {
+      "data_schema": "schemas/tri.conflicts.inspect.json",
+      "description": "Inspect a persisted workspace conflict.",
+      "name": "conflicts-inspect",
+      "schema": "tri.conflicts.inspect",
+      "usage": "tri conflicts inspect <conflict>"
+    },
+    {
+      "data_schema": "schemas/tri.conflicts.resolve.json",
+      "description": "Resolve a workspace conflict with an explicit strategy.",
+      "name": "conflicts-resolve",
+      "schema": "tri.conflicts.resolve",
+      "usage": "tri conflicts resolve <conflict> --strategy ours|theirs|base"
+    },
+    {
+      "data_schema": "schemas/tri.files.list.json",
+      "description": "List files in a workspace or snapshot.",
+      "name": "files-list",
+      "schema": "tri.files.list",
+      "usage": "tri files list <workspace-or-snapshot>"
+    },
+    {
+      "data_schema": "schemas/tri.files.stat.json",
+      "description": "Inspect path metadata without reading file contents.",
+      "name": "files-stat",
+      "schema": "tri.files.stat",
+      "usage": "tri files stat <workspace-or-snapshot> <path>"
+    },
+    {
+      "data_schema": "schemas/tri.files.read.json",
+      "description": "Read a file through the Tri file API.",
+      "name": "files-read",
+      "schema": "tri.files.read",
+      "usage": "tri files read <workspace-or-snapshot> <path> [--offset <n>] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.files.fetch.json",
+      "description": "Read several files in one call as base64 (remote mounts); paths beyond the byte budget come back in deferred.",
+      "name": "files-fetch",
+      "schema": "tri.files.fetch",
+      "usage": "tri files fetch <workspace-or-snapshot> --path <path> [--path <path>] [--max-bytes <n>] [--hashes-only]"
+    },
+    {
+      "data_schema": "schemas/tri.files.write.json",
+      "description": "Write a file through the Tri file API.",
+      "name": "files-write",
+      "schema": "tri.files.write",
+      "usage": "tri files write <workspace> <path> (--text <text> | --base64 <data> | --body <file>) [--expect-head <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.files.delete.json",
+      "description": "Delete a file through the Tri file API.",
+      "name": "files-delete",
+      "schema": "tri.files.delete",
+      "usage": "tri files delete <workspace> <path> [--expect-head <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.files.move.json",
+      "description": "Move a file through the Tri file API.",
+      "name": "files-move",
+      "schema": "tri.files.move",
+      "usage": "tri files move <workspace> <src> <dest> [--expect-head <snapshot>]"
+    },
+    {
+      "data_schema": "schemas/tri.files.log.json",
+      "description": "Path history along the first-parent snapshot chain, with change provenance and no checkout.",
+      "name": "files-log",
+      "schema": "tri.files.log",
+      "usage": "tri files log <ref> <path> [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.files.blame.json",
+      "description": "Attribute each line of a text file to the snapshot, actor, and changeset that introduced it, with no checkout.",
+      "name": "files-blame",
+      "schema": "tri.files.blame",
+      "usage": "tri files blame <ref> <path>"
+    },
+    {
+      "data_schema": "schemas/tri.files.search.json",
+      "description": "Search visible text files through the Tri file API.",
+      "name": "files-search",
+      "schema": "tri.files.search",
+      "usage": "tri files search <workspace-or-snapshot> <query> [--glob <glob>] [--limit <n>] [--case-sensitive]"
+    },
+    {
+      "data_schema": "schemas/tri.operation.list.json",
+      "description": "List policy-readable workspace mutation operations.",
+      "name": "operations-list",
+      "schema": "tri.operation.list",
+      "usage": "tri operations list <workspace-or-changeset>"
+    },
+    {
+      "data_schema": "schemas/tri.operation.inspect.json",
+      "description": "Inspect one policy-gated operation provenance record.",
+      "name": "operations-inspect",
+      "schema": "tri.operation.inspect",
+      "usage": "tri operations inspect <operation>"
+    },
+    {
+      "data_schema": "schemas/tri.search.json",
+      "description": "Search authorized project work with provenance across files and Tri objects.",
+      "name": "search",
+      "schema": "tri.search",
+      "usage": "tri search <project> <query> [--scope <scope>] [--glob <glob>] [--include-history] [--limit <n>] [--case-sensitive]"
+    },
+    {
+      "data_schema": "schemas/tri.diff.json",
+      "description": "Diff workspace, changeset, or explicit snapshots.",
+      "name": "diff",
+      "schema": "tri.diff",
+      "usage": "tri diff <workspace-or-changeset> | tri diff <base-snapshot> <head-snapshot> [--mode summary|files|patch|machine] [--path <glob>]"
+    },
+    {
+      "data_schema": "schemas/tri.check.inspect.json",
+      "description": "Run a command as a structured check run. --sandbox requires isolation (no network, writes only in the run directory, no Tri home or credential reads, scrubbed environment); --timeout kills the command's process group. --paths lays out only matching files (a partial checkout); changes anywhere are still imported, and only files that were laid out can be deleted.",
+      "name": "run",
+      "schema": "tri.check.inspect",
+      "usage": "tri run <workspace> [--paths <glob>] [--sandbox] [--timeout <seconds>] [--runner local|remote [--wait <seconds>]] [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>"
+    },
+    {
+      "data_schema": "schemas/tri.check.list.json",
+      "description": "List check runs for a workspace or changeset.",
+      "name": "checks-list",
+      "schema": "tri.check.list",
+      "usage": "tri checks list <workspace-or-changeset>"
+    },
+    {
+      "data_schema": "schemas/tri.check.inspect.json",
+      "description": "Inspect one structured check run.",
+      "name": "checks-inspect",
+      "schema": "tri.check.inspect",
+      "usage": "tri checks inspect <check>"
+    },
+    {
+      "data_schema": "schemas/tri.check_set.inspect.json",
+      "description": "Create a reusable project required-check set.",
+      "name": "checks-set-create",
+      "schema": "tri.check_set.inspect",
+      "usage": "tri checks set-create <project> <name> --required-check <cmd>"
+    },
+    {
+      "data_schema": "schemas/tri.merge_rule.inspect.json",
+      "description": "Maintainer rule letting checked changesets that only touch matching paths merge without a human review. With --verify-after, matching changesets may merge before their checks run; the check set runs after merge and a failure reverts the change.",
+      "name": "merge-rules-add",
+      "schema": "tri.merge_rule.inspect",
+      "usage": "tri merge-rules add <project> <name> --path <glob> [--path <glob>] [--exclude <glob>] [--allow <selector>] [--max-files <n>] [--verify-after <check-set>]"
+    },
+    {
+      "data_schema": "schemas/tri.merge_rule.list.json",
+      "description": "List project merge rules.",
+      "name": "merge-rules-list",
+      "schema": "tri.merge_rule.list",
+      "usage": "tri merge-rules list <project> [--all]"
+    },
+    {
+      "data_schema": "schemas/tri.merge_rule.inspect.json",
+      "description": "Inspect one merge rule.",
+      "name": "merge-rules-inspect",
+      "schema": "tri.merge_rule.inspect",
+      "usage": "tri merge-rules inspect <project> <name-or-id>"
+    },
+    {
+      "data_schema": "schemas/tri.mirror.inspect.json",
+      "description": "Maintainer two-way mirror between a Tri target and a Git branch; paths the audience cannot read and secret-like paths never leave Tri.",
+      "name": "mirror-add",
+      "schema": "tri.mirror.inspect",
+      "usage": "tri mirror add <project> --remote <url-or-path> [--target <target>] [--branch <branch>] [--audience <actor>] [--prefer git|tri] [--retry <n>] [--no-sync]"
+    },
+    {
+      "data_schema": "schemas/tri.mirror.list.json",
+      "description": "List Git mirrors.",
+      "name": "mirror-list",
+      "schema": "tri.mirror.list",
+      "usage": "tri mirror list [<project>] [--all]"
+    },
+    {
+      "data_schema": "schemas/tri.mirror.inspect.json",
+      "description": "Inspect one Git mirror and its last sync.",
+      "name": "mirror-inspect",
+      "schema": "tri.mirror.inspect",
+      "usage": "tri mirror inspect <mirror-or-project>"
+    },
+    {
+      "data_schema": "schemas/tri.mirror.sync.json",
+      "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits.",
+      "name": "mirror-sync",
+      "schema": "tri.mirror.sync",
+      "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]"
+    },
+    {
+      "data_schema": "schemas/tri.mirror.inspect.json",
+      "description": "Stop mirroring a target.",
+      "name": "mirror-remove",
+      "schema": "tri.mirror.inspect",
+      "usage": "tri mirror remove <mirror-or-project>"
+    },
+    {
+      "data_schema": "schemas/tri.backup.create.json",
+      "description": "Maintainer: consistent online backup that is itself a Tri home (restore by pointing TRI_HOME at it); repeats copy only new objects, --watch keeps a warm standby.",
+      "name": "backup-create",
+      "schema": "tri.backup.create",
+      "usage": "tri backup create <dir> [--watch [--interval <seconds>] [--max-cycles <n>]]"
+    },
+    {
+      "data_schema": "schemas/tri.storage.status.json",
+      "description": "Where this node keeps metadata (SQLite or PostgreSQL) and content (local files or shared object storage), and whether several nodes can serve the store.",
+      "name": "storage-status",
+      "schema": "tri.storage.status",
+      "usage": "tri storage status"
+    },
+    {
+      "data_schema": "schemas/tri.storage.migrate.json",
+      "description": "Maintainer: copy this SQLite store into PostgreSQL (and its blobs, artifacts and secret values into shared object storage), so stateless nodes can serve it with TRI_DATABASE_URL, TRI_DATABASE_SCHEMA and TRI_OBJECT_STORE.",
+      "name": "storage-migrate",
+      "schema": "tri.storage.migrate",
+      "usage": "tri storage migrate --database <postgres-url> [--schema <name>] [--objects <file:///dir|s3://bucket/prefix>] [--replace]"
+    },
+    {
+      "data_schema": "schemas/tri.backup.verify.json",
+      "description": "Maintainer: check a backup's database integrity and that every live object and artifact is present (--deep rehashes content).",
+      "name": "backup-verify",
+      "schema": "tri.backup.verify",
+      "usage": "tri backup verify <dir> [--deep]"
+    },
+    {
+      "data_schema": "schemas/tri.cache.server.json",
+      "description": "Regional read-through cache in front of a Tri service: forwards every request with the caller's token, and serves file content the service has authorized from a shared content-addressed cache.",
+      "name": "cache-serve",
+      "schema": "tri.cache.server",
+      "usage": "tri cache serve --upstream <url> [--host 127.0.0.1] [--port 8766] [--dir <path>] [--quiet]"
+    },
+    {
+      "data_schema": "schemas/tri.runner.claim.json",
+      "description": "Runner service: claim the oldest queued run job, with its file manifest.",
+      "name": "runner-claim",
+      "schema": "tri.runner.claim",
+      "usage": "tri runner claim [--wait <seconds>]"
+    },
+    {
+      "data_schema": "schemas/tri.files.fetch.json",
+      "description": "Runner service: read files of a claimed job (only paths the requester can see).",
+      "name": "runner-fetch",
+      "schema": "tri.files.fetch",
+      "usage": "tri runner fetch <job> --path <path> [--path <path>] [--hashes-only]"
+    },
+    {
+      "data_schema": "schemas/tri.check.inspect.json",
+      "description": "Runner service: report exit status, output, and file changes; the server records the check run.",
+      "name": "runner-complete",
+      "schema": "tri.check.inspect",
+      "usage": "tri runner complete <job> --result <json>"
+    },
+    {
+      "data_schema": "schemas/tri.run_job.list.json",
+      "description": "Runner service: list run jobs.",
+      "name": "runner-jobs",
+      "schema": "tri.run_job.list",
+      "usage": "tri runner jobs [--status queued|claimed|completed|failed] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.runner.work.json",
+      "description": "Run queued jobs from TRI_REMOTE on this machine, each in a sandbox, until stopped. Jobs that carry secret leases fetch their values with tri runner secrets and redact them from output. --control-dir writes status.json (idle or busy) there and drains (finishes the current job, then exits) when a file named drain appears.",
+      "name": "runner-work",
+      "schema": "tri.runner.work",
+      "usage": "tri runner work [--once] [--max-jobs <n>] [--interval <seconds>] [--sandbox off|auto|required] [--control-dir <dir>]"
+    },
+    {
+      "data_schema": "schemas/tri.runner.secrets.json",
+      "description": "Runner service: the values of a claimed job's secret leases, for the claim holder only while the claim is live. Policy and lease expiry are re-checked, and each delivery is audited.",
+      "name": "runner-secrets",
+      "schema": "tri.runner.secrets",
+      "usage": "tri runner secrets <job>"
+    },
+    {
+      "data_schema": "schemas/tri.runner.metrics.json",
+      "description": "Runner service: queue depth, claims, lease expiry, and throughput for autoscalers (also GET /v0/runners/metrics, ?format=prometheus for text exposition).",
+      "name": "runner-metrics",
+      "schema": "tri.runner.metrics",
+      "usage": "tri runner metrics [--format json|prometheus]"
+    },
+    {
+      "data_schema": "schemas/tri.runner.autoscale.json",
+      "description": "Supervise local tri runner work processes against TRI_REMOTE: start workers as queue depth grows (up to --max), drain workers idle for --idle-seconds (down to --min).",
+      "name": "runner-autoscale",
+      "schema": "tri.runner.autoscale",
+      "usage": "tri runner autoscale [--min <n>] [--max <n>] [--jobs-per-runner <n>] [--idle-seconds <s>] [--interval <s>] [--poll <s>] [--sandbox off|auto|required] [--duration <s>] [--exit-when-idle]"
+    },
+    {
+      "data_schema": "schemas/tri.verification.run.json",
+      "description": "Run queued post-merge verifications in merge order; a failure reverts the changeset on the current target.",
+      "name": "verify-run",
+      "schema": "tri.verification.run",
+      "usage": "tri verify run <project> [--limit <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]"
+    },
+    {
+      "data_schema": "schemas/tri.verification.list.json",
+      "description": "List post-merge verifications.",
+      "name": "verify-list",
+      "schema": "tri.verification.list",
+      "usage": "tri verify list <project> [--status pending|running|verified|reverted|revert_conflict]"
+    },
+    {
+      "data_schema": "schemas/tri.verification.inspect.json",
+      "description": "Inspect one post-merge verification.",
+      "name": "verify-inspect",
+      "schema": "tri.verification.inspect",
+      "usage": "tri verify inspect <verification>"
+    },
+    {
+      "data_schema": "schemas/tri.merge_rule.inspect.json",
+      "description": "Remove a merge rule; later merges need an approved review again.",
+      "name": "merge-rules-remove",
+      "schema": "tri.merge_rule.inspect",
+      "usage": "tri merge-rules remove <project> <name-or-id>"
+    },
+    {
+      "data_schema": "schemas/tri.check_set.list.json",
+      "description": "List reusable required-check sets for a project.",
+      "name": "checks-set-list",
+      "schema": "tri.check_set.list",
+      "usage": "tri checks set-list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.check_set.inspect.json",
+      "description": "Inspect a reusable required-check set.",
+      "name": "checks-set-inspect",
+      "schema": "tri.check_set.inspect",
+      "usage": "tri checks set-inspect <project> <name-or-id> | <check-set>"
+    },
+    {
+      "data_schema": "schemas/tri.check.artifacts.json",
+      "description": "List artifacts produced by a check run.",
+      "name": "checks-artifacts",
+      "schema": "tri.check.artifacts",
+      "usage": "tri checks artifacts <check>"
+    },
+    {
+      "data_schema": "schemas/tri.check.stream.json",
+      "description": "Read a check log as an offset-addressed chunk.",
+      "name": "checks-stream",
+      "schema": "tri.check.stream",
+      "usage": "tri checks stream <check> [--log stdout|stderr] [--offset <n>] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.check.inspect.json",
+      "description": "Rerun a check command as a new check run.",
+      "name": "checks-rerun",
+      "schema": "tri.check.inspect",
+      "usage": "tri checks rerun <check>"
+    },
+    {
+      "data_schema": "schemas/tri.check.compare.json",
+      "description": "Compare check-run outcomes.",
+      "name": "checks-compare",
+      "schema": "tri.check.compare",
+      "usage": "tri checks compare <check...>"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.inspect.json",
+      "description": "Create a reviewable changeset from workspace operations.",
+      "name": "changeset-create",
+      "schema": "tri.changeset.inspect",
+      "usage": "tri changeset create <workspace> [--title <title>] [--visibility <selector>] [--hide-path <glob>] [--hide-package <pkg>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.inspect.json",
+      "description": "Inspect a reviewable changeset and its provenance.",
+      "name": "changeset-inspect",
+      "schema": "tri.changeset.inspect",
+      "usage": "tri changeset inspect <changeset>"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.split.json",
+      "description": "Preview or create a changeset split by path globs or operation ranges.",
+      "name": "changeset-split",
+      "schema": "tri.changeset.split",
+      "usage": "tri changeset split <changeset> (--paths <glob-list> | --operations <range-list>) [--apply] [--title <title>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.stack.json",
+      "description": "Record a changeset dependency without creating branches.",
+      "name": "changeset-stack",
+      "schema": "tri.changeset.stack",
+      "usage": "tri changeset stack <changeset> --after <parent-changeset>"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.revalidate.json",
+      "description": "Rerun checks against a changeset head snapshot without creating a branch.",
+      "name": "changeset-revalidate",
+      "schema": "tri.changeset.revalidate",
+      "usage": "tri changeset revalidate <changeset> [--check <check>] [--required]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.lifecycle.json",
+      "description": "Move a draft or changes-requested changeset back to ready for review.",
+      "name": "changeset-ready",
+      "schema": "tri.changeset.lifecycle",
+      "usage": "tri changeset ready <changeset> [--reason <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.lifecycle.json",
+      "description": "Discard a draft or ready changeset while keeping it readable for audit.",
+      "name": "changeset-discard",
+      "schema": "tri.changeset.lifecycle",
+      "usage": "tri changeset discard <changeset> [--reason <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.lifecycle.json",
+      "description": "Mark a ready or reviewing changeset as superseded by a replacement changeset.",
+      "name": "changeset-supersede",
+      "schema": "tri.changeset.lifecycle",
+      "usage": "tri changeset supersede <changeset> --by <replacement> [--reason <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.merge.json",
+      "description": "Policy-gated merge of an approved changeset into a Tri target.",
+      "name": "changeset-merge",
+      "schema": "tri.changeset.merge",
+      "usage": "tri changeset merge <changeset> --target <target> [--retry <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.compare.json",
+      "description": "Compare multiple agent attempts as changesets.",
+      "name": "changeset-compare",
+      "schema": "tri.changeset.compare",
+      "usage": "tri changeset compare <changeset...>"
+    },
+    {
+      "data_schema": "schemas/tri.review.create.json",
+      "description": "Create a review object for a changeset.",
+      "name": "review-create",
+      "schema": "tri.review.create",
+      "usage": "tri review create <changeset> [--reviewers <principal>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.inspect.json",
+      "description": "Inspect review decision surface.",
+      "name": "review-inspect",
+      "schema": "tri.review.inspect",
+      "usage": "tri review inspect <review>"
+    },
+    {
+      "data_schema": "schemas/tri.review_action.inspect.json",
+      "description": "Inspect one durable review action.",
+      "name": "review-action-inspect",
+      "schema": "tri.review_action.inspect",
+      "usage": "tri review action-inspect <review-action>"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Attach a structured review comment or reply.",
+      "name": "review-comment",
+      "schema": "tri.review.action",
+      "usage": "tri review comment <review> --body <text> [--path <path>] [--line <n>] [--reply-to <comment>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Resolve a review comment thread.",
+      "name": "review-resolve-thread",
+      "schema": "tri.review.action",
+      "usage": "tri review resolve-thread <review> --thread <comment> [--body <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Request changes on a review.",
+      "name": "review-request-changes",
+      "schema": "tri.review.action",
+      "usage": "tri review request-changes <review> --body <text>"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Approve a review and changeset.",
+      "name": "review-approve",
+      "schema": "tri.review.action",
+      "usage": "tri review approve <review> [--body <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Record a structured risk marker on a review.",
+      "name": "review-mark-risk",
+      "schema": "tri.review.action",
+      "usage": "tri review mark-risk <review> --risk <level> [--body <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Attach the current export policy decision to a review.",
+      "name": "review-attach-policy-finding",
+      "schema": "tri.review.action",
+      "usage": "tri review attach-policy-finding <review> [--body <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Refresh and attach the current check summary to a review.",
+      "name": "review-attach-check-summary",
+      "schema": "tri.review.action",
+      "usage": "tri review attach-check-summary <review> [--body <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.action.json",
+      "description": "Close a review without deleting its changeset.",
+      "name": "review-close",
+      "schema": "tri.review.action",
+      "usage": "tri review close <review> [--body <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.agent_pass.json",
+      "description": "Create a follow-up agent task and workspace from a review.",
+      "name": "review-request-agent-pass",
+      "schema": "tri.review.agent_pass",
+      "usage": "tri review request-agent-pass <review> --task <title> [--assignee <actor>]"
+    },
+    {
+      "data_schema": "schemas/tri.advisory.inspect.json",
+      "description": "Create a private advisory coordination object.",
+      "name": "advisory-create",
+      "schema": "tri.advisory.inspect",
+      "usage": "tri advisory create <project> --title <title> [--body <text>] [--body-file <path>] [--affected-package <pkg>] [--trusted-reviewer <principal>] [--embargoed]"
+    },
+    {
+      "data_schema": "schemas/tri.advisory.list.json",
+      "description": "List advisories for a project.",
+      "name": "advisory-list",
+      "schema": "tri.advisory.list",
+      "usage": "tri advisory list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.advisory.inspect.json",
+      "description": "Inspect an advisory.",
+      "name": "advisory-inspect",
+      "schema": "tri.advisory.inspect",
+      "usage": "tri advisory inspect <advisory>"
+    },
+    {
+      "data_schema": "schemas/tri.release.inspect.json",
+      "description": "Prepare a release and optionally disclose advisories.",
+      "name": "release-prepare",
+      "schema": "tri.release.inspect",
+      "usage": "tri release prepare <project> --include <changeset> [--disclose <advisory>] [--package <pkg>] [--rollback-target <target>]"
+    },
+    {
+      "data_schema": "schemas/tri.release.list.json",
+      "description": "List prepared releases for a project.",
+      "name": "release-list",
+      "schema": "tri.release.list",
+      "usage": "tri release list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.release.inspect.json",
+      "description": "Inspect a release record.",
+      "name": "release-inspect",
+      "schema": "tri.release.inspect",
+      "usage": "tri release inspect <release>"
+    },
+    {
+      "data_schema": "schemas/tri.policy.decision.json",
+      "description": "Evaluate export policy for a changeset.",
+      "name": "policy-evaluate-export",
+      "schema": "tri.policy.decision",
+      "usage": "tri policy evaluate export <changeset> [--override-reason <reason>]"
+    },
+    {
+      "data_schema": "schemas/tri.policy.decision.json",
+      "description": "Evaluate actor access to a Tri object.",
+      "name": "policy-evaluate-access",
+      "schema": "tri.policy.decision",
+      "usage": "tri policy evaluate access <object> [--action <action>]"
+    },
+    {
+      "data_schema": "schemas/tri.policy.explain.json",
+      "description": "Explain a recorded policy decision by id.",
+      "name": "policy-explain",
+      "schema": "tri.policy.explain",
+      "usage": "tri policy explain <decision>"
+    },
+    {
+      "data_schema": "schemas/tri.policy.embargo.json",
+      "description": "Create an embargoed advisory policy object.",
+      "name": "policy-create-embargo",
+      "schema": "tri.policy.embargo",
+      "usage": "tri policy create-embargo <project> --title <title> [--body <text>] [--body-file <path>] [--affected-package <pkg>] [--trusted-reviewer <principal>]"
+    },
+    {
+      "data_schema": "schemas/tri.policy.embargo_disclosure.json",
+      "description": "Prepare a policy-gated release disclosure for embargoed work.",
+      "name": "policy-disclose-embargo",
+      "schema": "tri.policy.embargo_disclosure",
+      "usage": "tri policy disclose-embargo <project> --advisory <advisory> --include <changeset> [--package <pkg>] [--rollback-target <target>]"
+    },
+    {
+      "data_schema": "schemas/tri.policy.visibility.json",
+      "description": "Explain object visibility, selectors, and active grants.",
+      "name": "policy-visibility",
+      "schema": "tri.policy.visibility",
+      "usage": "tri policy visibility <object>"
+    },
+    {
+      "data_schema": "schemas/tri.policy.grant.json",
+      "description": "Grant an actor or role access to a Tri object.",
+      "name": "policy-grant",
+      "schema": "tri.policy.grant",
+      "usage": "tri policy grant <object> --principal actor:<id>|role:<name> [--action <action>]"
+    },
+    {
+      "data_schema": "schemas/tri.policy.grant.json",
+      "description": "Inspect a local object policy grant.",
+      "name": "policy-grant-inspect",
+      "schema": "tri.policy.grant",
+      "usage": "tri policy grant-inspect <grant>"
+    },
+    {
+      "data_schema": "schemas/tri.policy.grant.json",
+      "description": "Revoke a local object policy grant.",
+      "name": "policy-revoke",
+      "schema": "tri.policy.grant",
+      "usage": "tri policy revoke <grant>"
+    },
+    {
+      "data_schema": "schemas/tri.config.materialize.json",
+      "description": "Create a non-exportable generated config artifact.",
+      "name": "config-materialize",
+      "schema": "tri.config.materialize",
+      "usage": "tri config materialize <workspace> --profile <profile>"
+    },
+    {
+      "data_schema": "schemas/tri.secrets.inspect.json",
+      "description": "Store a local secret reference outside source snapshots.",
+      "name": "secrets-put",
+      "schema": "tri.secrets.inspect",
+      "usage": "tri secrets put <project> <name> --value-file <path> [--scope <scope>]"
+    },
+    {
+      "data_schema": "schemas/tri.secrets.list.json",
+      "description": "List local secret references without exposing values.",
+      "name": "secrets-list",
+      "schema": "tri.secrets.list",
+      "usage": "tri secrets list <project>"
+    },
+    {
+      "data_schema": "schemas/tri.secrets.inspect.json",
+      "description": "Inspect policy-gated secret metadata without exposing the value.",
+      "name": "secrets-inspect",
+      "schema": "tri.secrets.inspect",
+      "usage": "tri secrets inspect <secret> [--project <project>]"
+    },
+    {
+      "data_schema": "schemas/tri.secret_lease.inspect.json",
+      "description": "Grant a scoped secret lease to a workspace.",
+      "name": "secrets-request-lease",
+      "schema": "tri.secret_lease.inspect",
+      "usage": "tri secrets request-lease <workspace> <secret> --env <name> [--ttl-seconds <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.secret_lease.inspect.json",
+      "description": "Revoke a secret lease.",
+      "name": "secrets-revoke",
+      "schema": "tri.secret_lease.inspect",
+      "usage": "tri secrets revoke <lease>"
+    },
+    {
+      "data_schema": "schemas/tri.secrets.audit.json",
+      "description": "List secret and lease audit events.",
+      "name": "secrets-audit",
+      "schema": "tri.secrets.audit",
+      "usage": "tri secrets audit [--workspace <workspace>] [--project <project>] [--secret <secret>] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.secrets.redact_logs.json",
+      "description": "Reprocess check log artifacts with known secret lease redactions.",
+      "name": "secrets-redact-logs",
+      "schema": "tri.secrets.redact_logs",
+      "usage": "tri secrets redact-logs <check> [--lease <lease>]"
+    },
+    {
+      "data_schema": "schemas/tri.events.list.json",
+      "description": "List append-only provenance events.",
+      "name": "events-list",
+      "schema": "tri.events.list",
+      "usage": "tri events list [--workspace <workspace>] [--project <project>] [--kind <kind>] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.events.inspect.json",
+      "description": "Inspect one provenance event.",
+      "name": "events-inspect",
+      "schema": "tri.events.inspect",
+      "usage": "tri events inspect <event>"
+    },
+    {
+      "data_schema": "schemas/tri.artifacts.list.json",
+      "description": "List artifacts the actor can read in the local store.",
+      "name": "artifacts-list",
+      "schema": "tri.artifacts.list",
+      "usage": "tri artifacts list [--kind <kind>] [--label <label>] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.artifacts.inspect.json",
+      "description": "Inspect a policy-gated artifact record.",
+      "name": "artifacts-inspect",
+      "schema": "tri.artifacts.inspect",
+      "usage": "tri artifacts inspect <artifact>"
+    },
+    {
+      "data_schema": "schemas/tri.artifacts.read.json",
+      "description": "Read policy-gated artifact content for logs and generated files.",
+      "name": "artifacts-read",
+      "schema": "tri.artifacts.read",
+      "usage": "tri artifacts read <artifact>"
+    },
+    {
+      "data_schema": "schemas/tri.export.git_patch.json",
+      "description": "Policy-gated export of a changeset as a Git patch.",
+      "name": "export-git-patch",
+      "schema": "tri.export.git_patch",
+      "usage": "tri export git-patch <changeset> [--output <path>] [--override-reason <reason>] [--summary]"
+    },
+    {
+      "data_schema": "schemas/tri.export.git_commit.json",
+      "description": "Policy-gated export of a changeset as a Git commit in a clean repo.",
+      "name": "export-git-commit",
+      "schema": "tri.export.git_commit",
+      "usage": "tri export git-commit <changeset> [--repo <repo>] [--message <text>] [--override-reason <reason>]"
+    },
+    {
+      "data_schema": "schemas/tri.export.github_pr.json",
+      "description": "Prepare a policy-gated GitHub PR branch and request artifact.",
+      "name": "export-github-pr",
+      "schema": "tri.export.github_pr",
+      "usage": "tri export github-pr <changeset> --repo <repo> --branch <branch> [--base <base>] [--title <title>] [--body <text>] [--draft] [--create] [--override-reason <reason>]"
+    },
+    {
+      "data_schema": "schemas/tri.export.list.json",
+      "description": "List policy-visible export records for a project.",
+      "name": "export-list",
+      "schema": "tri.export.list",
+      "usage": "tri export list <project> [--changeset <changeset>] [--kind <kind>] [--limit <n>]"
+    },
+    {
+      "data_schema": "schemas/tri.export.inspect.json",
+      "description": "Inspect an export record with policy decision and source event range.",
+      "name": "export-inspect",
+      "schema": "tri.export.inspect",
+      "usage": "tri export inspect <export>"
+    }
+  ],
+  "description": "Every CLI command: argv shape (usage), the envelope schema it answers with, and the data schema for that envelope. Errors answer with tri.error.",
+  "error_schema": "tri.error",
+  "schema_version": "0.1.0",
+  "title": "Tri command contracts"
+}

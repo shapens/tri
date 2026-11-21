@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.files.read.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "snapshot",
+    "path",
+    "blob",
+    "encoding",
+    "text"
+  ],
+  "title": "tri.files.read",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

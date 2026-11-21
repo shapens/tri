@@ -1,0 +1,16 @@
+{
+  "$id": "schemas/tri.remote.mount.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "workspace",
+    "path",
+    "snapshot",
+    "remote",
+    "files",
+    "fetched_bytes",
+    "cache_hits"
+  ],
+  "title": "tri.remote.mount",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

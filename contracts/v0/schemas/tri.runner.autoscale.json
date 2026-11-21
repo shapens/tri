@@ -1,0 +1,17 @@
+{
+  "$id": "schemas/tri.runner.autoscale.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "min",
+    "max",
+    "decisions",
+    "peak_workers",
+    "started",
+    "drained",
+    "workers",
+    "stopped_because"
+  ],
+  "title": "tri.runner.autoscale",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

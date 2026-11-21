@@ -1,0 +1,11 @@
+{
+  "$id": "schemas/tri.api.ready.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "status",
+    "ready"
+  ],
+  "title": "tri.api.ready",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

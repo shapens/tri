@@ -1,0 +1,14 @@
+{
+  "$id": "schemas/tri.review.agent_pass.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "review",
+    "action",
+    "task",
+    "workspace",
+    "task_run"
+  ],
+  "title": "tri.review.agent_pass",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

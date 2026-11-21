@@ -1,0 +1,20 @@
+{
+  "$id": "schemas/tri.tree.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "hash",
+    "fingerprint",
+    "entries",
+    "file_count",
+    "byte_count",
+    "redacted_entries",
+    "origins",
+    "origin_count",
+    "redacted_origins",
+    "access"
+  ],
+  "title": "tri.tree.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

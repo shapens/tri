@@ -1,0 +1,23 @@
+{
+  "$id": "schemas/tri.task.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "title",
+    "body",
+    "requester",
+    "status",
+    "acceptance_criteria",
+    "required_checks",
+    "lifecycle",
+    "workspaces",
+    "runs",
+    "changesets",
+    "redacted",
+    "created_at"
+  ],
+  "title": "tri.task.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

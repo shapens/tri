@@ -1,0 +1,19 @@
+{
+  "$id": "schemas/tri.actor.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "kind",
+    "known",
+    "task_scope",
+    "principal",
+    "actor_selector",
+    "selectors",
+    "roles",
+    "capabilities",
+    "accepted_formats"
+  ],
+  "title": "tri.actor.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

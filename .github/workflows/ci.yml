@@ -255,3 +255,55 @@ jobs:
       - name: Bounded-disk tests on ReFS block clones
         shell: bash
         run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
+
+  contracts:
+    name: contract files match the registries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Regenerate and compare contracts/v0
+        run: python -m tri.contracts --check
+
+  native-server:
+    name: tri-server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      TRI_CONFORMANCE_NATIVE: ${{ github.workspace }}/native/tri-server/tri-server${{ runner.os == 'Windows' && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: go vet
+        working-directory: native/tri-server
+        run: go vet ./...
+      - name: go test
+        working-directory: native/tri-server
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then go test -count=1 -v ./...; else go test -race -count=1 -v ./...; fi
+      - name: Build tri-server
+        working-directory: native/tri-server
+        shell: bash
+        run: go build -o "tri-server$([ "$RUNNER_OS" = "Windows" ] && echo .exe)" .
+      - name: Conformance suite against tri-server
+        shell: bash
+        run: python -m unittest discover -s tests/conformance -t tests -v
+      - name: Leak sweep through tri-server
+        shell: bash
+        run: python -m unittest discover -s tests -p test_leak_sweep.py -v

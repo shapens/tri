@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.api.server.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "host",
+    "port",
+    "endpoints"
+  ],
+  "title": "tri.api.server",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

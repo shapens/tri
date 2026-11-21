@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.files.log.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "ref",
+    "snapshot",
+    "path",
+    "entries",
+    "walked",
+    "truncated"
+  ],
+  "title": "tri.files.log",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

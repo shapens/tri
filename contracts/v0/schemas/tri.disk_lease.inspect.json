@@ -1,0 +1,17 @@
+{
+  "$id": "schemas/tri.disk_lease.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "kind",
+    "path",
+    "workspace",
+    "status",
+    "backend",
+    "created_at",
+    "released_at"
+  ],
+  "title": "tri.disk_lease.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

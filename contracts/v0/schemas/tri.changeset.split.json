@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.changeset.split.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "changeset",
+    "mode",
+    "selector",
+    "operations",
+    "paths",
+    "redacted_paths"
+  ],
+  "title": "tri.changeset.split",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

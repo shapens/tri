@@ -1,0 +1,13 @@
+{
+  "$id": "schemas/tri.snapshot.merge_base.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "left",
+    "right",
+    "merge_base",
+    "redacted"
+  ],
+  "title": "tri.snapshot.merge_base",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

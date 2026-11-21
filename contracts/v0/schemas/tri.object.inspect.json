@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.object.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "object",
+    "object_type",
+    "resolved_command",
+    "resolved_schema",
+    "result_ok",
+    "result"
+  ],
+  "title": "tri.object.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

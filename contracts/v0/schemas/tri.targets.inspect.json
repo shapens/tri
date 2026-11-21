@@ -1,0 +1,15 @@
+{
+  "$id": "schemas/tri.targets.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "name",
+    "snapshot",
+    "snapshot_data",
+    "created_at"
+  ],
+  "title": "tri.targets.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

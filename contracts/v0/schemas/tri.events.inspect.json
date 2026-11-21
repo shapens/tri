@@ -1,0 +1,21 @@
+{
+  "$id": "schemas/tri.events.inspect.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "actor",
+    "project",
+    "workspace",
+    "redacted_workspace",
+    "task",
+    "kind",
+    "object_refs",
+    "input_fingerprints",
+    "output_fingerprints",
+    "policy_result",
+    "created_at"
+  ],
+  "title": "tri.events.inspect",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}
