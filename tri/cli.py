@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri import gitmirror
 from tri import sandbox
+from tri import virtual
 from tri.auth import TokenAuthority, issue_token, load_token_file, public_record, revoke_tokens
 from tri.ignore import IgnoreRules
 from tri.textmerge import merge_three_way
@@ -111,7 +112,8 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "workspace-inspect", "usage": "tri workspace inspect <workspace>", "schema": "tri.workspace.inspect", "description": "Inspect workspace state."},
     {"name": "workspace-update", "usage": "tri workspace update <workspace> --from <target> [--expect-head <snapshot>]", "schema": "tri.workspace.update", "description": "Merge a workspace onto the current target snapshot."},
     {"name": "workspace-snapshot", "usage": "tri workspace snapshot <workspace> [--expect-head <snapshot>]", "schema": "tri.workspace.snapshot", "description": "Create an explicit workspace checkpoint snapshot."},
-    {"name": "workspace-mount", "usage": "tri workspace mount <workspace> <path> [--paths <glob>] [--ttl-seconds <n> | --no-ttl] [--ignore-path <glob>] [--no-env] [--env-link]", "schema": "tri.workspace.mount", "description": "Materialize a workspace into a local directory and create a materialization lease. --paths mounts only matching files; sync keeps the rest of the tree."},
+    {"name": "workspace-mount", "usage": "tri workspace mount <workspace> <path> [--paths <glob> | --virtual [--foreground]] [--ttl-seconds <n> | --no-ttl] [--ignore-path <glob>] [--no-env] [--env-link]", "schema": "tri.workspace.mount", "description": "Materialize a workspace into a local directory and create a materialization lease. --paths mounts only matching files; sync keeps the rest of the tree. --virtual mounts the whole tree as a FUSE view (Linux) whose content is fetched on first read; it runs as a detached daemon unless --foreground."},
+    {"name": "workspace-unmount", "usage": "tri workspace unmount <workspace> [--lease <lease>] [--path <dir>] [--force]", "schema": "tri.workspace.unmount", "description": "Stop a virtual checkout and release its lease. Refuses while the view has unsynced edits unless --force (locally they are kept as a salvage)."},
     {"name": "workspace-sync", "usage": "tri workspace sync <workspace> [--lease <lease>]", "schema": "tri.workspace.sync", "description": "Import mounted filesystem edits back into Tri through a materialization lease."},
     {"name": "workspace-leases", "usage": "tri workspace leases <workspace>", "schema": "tri.workspace.materialization_leases", "description": "List materialization leases for a workspace."},
     {"name": "workspace-lease-inspect", "usage": "tri workspace lease-inspect <lease>", "schema": "tri.workspace.materialization_lease", "description": "Inspect a materialization lease."},
@@ -270,6 +272,9 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
             "stale_materialization",
             "lease_already_reaped",
             "mount_path_in_use",
+            "virtual_checkout_unavailable",
+            "virtual_mount_failed",
+            "unsynced_changes",
             "materialization_degraded",
             "content_purged",
             "gc_in_progress",
@@ -338,6 +343,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.disk_lease.inspect": {"required": ["id", "kind", "path", "workspace", "status", "backend", "created_at", "released_at"]},
     "tri.workspace.sync": {"required": ["workspace", "lease", "operation", "snapshot", "paths"]},
     "tri.workspace.mount": {"required": ["workspace", "path", "snapshot", "lease", "read_only", "materialization"]},
+    "tri.workspace.unmount": {"required": ["workspace", "lease", "path", "unmounted", "status", "virtual"]},
     "tri.workspace.materialization_lease": {"required": ["id", "workspace", "path", "status", "read_only", "mounted_snapshot", "last_sync_snapshot", "owner", "ignored_paths", "generated_artifacts", "expires_at", "created_at", "revoked_at"]},
     "tri.workspace.materialization_leases": {"required": ["workspace", "leases"]},
     "tri.lease.inspect": {"required": ["id", "kind", "schema", "lease"]},
@@ -2542,6 +2548,7 @@ SERVER_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "cmd_files_write": ("body",),
     "cmd_import": ("repo",),
     "cmd_workspace_mount": ("path",),
+    "cmd_unmount": ("path",),
     "cmd_export_patch": ("output",),
     "cmd_export_commit": ("repo",),
     "cmd_export_github_pr": ("repo",),
@@ -6602,6 +6609,10 @@ def cmd_workspace_archive(store: Store, args: argparse.Namespace, command: list[
 
 
 def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    if args.virtual:
+        return virtual.mount_local(store, args, command, start)
+    if args.foreground:
+        raise TriError("invalid_command", "--foreground applies only to --virtual mounts.")
     ws = store.get_workspace(args.workspace)
     read_only = ws["status"] == "archived"
     if ws["status"] not in ("active", "archived"):
@@ -7152,6 +7163,8 @@ def reap_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, force: boo
 
 
 def _reap_claimed_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, force: bool, reason: str) -> dict[str, Any]:
+    if virtual.is_virtual(lease):
+        return virtual.reap_claimed(store, lease, actor=actor, force=force, reason=reason)
     result: dict[str, Any] = {"lease": lease["id"], "kind": "mount", "path": lease["path"], "workspace": lease["workspace_id"], "reason": reason}
     root = Path(lease["path"])
     identity = row_value(lease, "root_identity")
@@ -7298,7 +7311,7 @@ def _reap_claimed_disk_lease(store: Store, lease: sqlite3.Row, *, actor: str) ->
     return result
 
 
-def _mount_reap_reason(lease: sqlite3.Row, ws_status: str | None, now: str) -> str | None:
+def _mount_reap_reason(store: Store, lease: sqlite3.Row, ws_status: str | None, now: str) -> str | None:
     if row_value(lease, "grandfathered", 0):
         return None
     if ws_status == "discarded":
@@ -7309,6 +7322,8 @@ def _mount_reap_reason(lease: sqlite3.Row, ws_status: str | None, now: str) -> s
         return "expired"
     if lease["expires_at"] and lease["expires_at"] <= now:
         return "expired"
+    if lease["status"] in ("active", "read_only") and not virtual.lease_live(store, lease):
+        return "daemon_exited"
     return None
 
 
@@ -7401,7 +7416,7 @@ def _reap_leases_locked(
         if budget <= 0:
             break
         ws = store.row("SELECT status FROM workspaces WHERE id = ?", (mount["workspace_id"],))
-        why = reason if workspace_id is not None else _mount_reap_reason(mount, ws["status"] if ws else None, now)
+        why = reason if workspace_id is not None else _mount_reap_reason(store, mount, ws["status"] if ws else None, now)
         if why is None:
             continue
         budget -= 1
@@ -7519,7 +7534,7 @@ def claim_mount_path(store: Store, root: Path, *, actor: str) -> None:
     (salvaging first) a dead lease that still owns it."""
     now = utcnow()
     for lease in store.rows("SELECT * FROM materialization_leases WHERE path = ? AND reaped_at IS NULL AND status NOT IN ('reaped', 'gone')", (str(root),)):
-        live = lease["status"] in ("active", "read_only") and not (lease["expires_at"] and lease["expires_at"] <= now)
+        live = lease["status"] in ("active", "read_only") and not (lease["expires_at"] and lease["expires_at"] <= now) and virtual.lease_live(store, lease)
         if live or lease["status"] == "expired_needs_attention":
             raise TriError(
                 "mount_path_in_use",
@@ -8573,18 +8588,22 @@ def cmd_workspace_sync(store: Store, args: argparse.Namespace, command: list[str
             retryable=True,
         )
     root = Path(lease["path"])
-    if not root.exists():
+    is_virtual = virtual.is_virtual(lease)  # the view's edits live in its upper layer, not under the mountpoint
+    if not is_virtual and not root.exists():
         raise TriError("stale_materialization", "Materialized path no longer exists.", object=str(root), lease=lease["id"])
     before = ws["head_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
     ignored_paths = loads(lease["ignored_paths_json"], [])
-    if root.is_symlink():
+    if not is_virtual and root.is_symlink():
         raise TriError("path_escaped_mount", "Materialized workspace path cannot be a symlink.", object=str(root))
     baseline_file = Path(row_value(lease, "baseline_path") or "") if row_value(lease, "baseline_path") else None
     materialization: Materialization | None = None
     observed: dict[str, list[int]] = {}
     scanned_deleted: list[str] = []
-    if baseline_file is not None and baseline_file.exists():
+    virtual_report: dict[str, Any] | None = None
+    if is_virtual:
+        after_entries, virtual_report = virtual.sync_entries(store, ws, lease, before_entries)
+    elif baseline_file is not None and baseline_file.exists():
         materialization = load_materialization(root, baseline_file)
         rules = import_rules(store, ws["project_id"], before_entries)
         scanned_changed, scanned_deleted = materialization.scan(sparse_entries(before_entries, lease_sparse_paths(lease)), ignore=rules)
@@ -8606,7 +8625,7 @@ def cmd_workspace_sync(store: Store, args: argparse.Namespace, command: list[str
 
     if not paths:
         record_sync_baseline()
-        return envelope("tri.workspace.sync", command, actor=args.actor, start=start, data={"workspace": ws["id"], "lease": lease["id"], "operation": None, "snapshot": before, "paths": []})
+        return envelope("tri.workspace.sync", command, actor=args.actor, start=start, data={"workspace": ws["id"], "lease": lease["id"], "operation": None, "snapshot": before, "paths": [], **({"virtual": virtual_report} if virtual_report else {})})
     with store.conn:
         snapshot = store.create_snapshot(ws["project_id"], after_entries, parents=[before], source="workspace", actor=args.actor, metadata={"workspace": ws["id"], "operation": "materialization_sync"})
         op_id = new_id("op")
@@ -8641,7 +8660,7 @@ def cmd_workspace_sync(store: Store, args: argparse.Namespace, command: list[str
             output_fingerprints={"snapshot": snapshot["id"]},
         )
     record_sync_baseline()
-    return envelope("tri.workspace.sync", command, actor=args.actor, start=start, events=[evt], data={"workspace": ws["id"], "lease": lease["id"], "operation": op_id, "snapshot": snapshot["id"], "paths": paths})
+    return envelope("tri.workspace.sync", command, actor=args.actor, start=start, events=[evt], data={"workspace": ws["id"], "lease": lease["id"], "operation": op_id, "snapshot": snapshot["id"], "paths": paths, **({"virtual": virtual_report} if virtual_report else {})})
 
 
 def cmd_files_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -15700,6 +15719,7 @@ def cmd_doctor(store: Store, args: argparse.Namespace, command: list[str], start
         "sandbox": sandbox.probe(),
         "command_count": len(COMMAND_CONTRACTS),
         "materialization": materialization,
+        "virtual_checkouts": virtual.availability(),
     }
     return envelope("tri.doctor", command, actor=args.actor, start=start, data=data, warnings=warnings)
 
@@ -17134,7 +17154,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_mount.add_argument("--env-link", action="store_true")
     p_mount.add_argument("--ignore-path", action="append")
     p_mount.add_argument("--paths", action="append")
+    p_mount.add_argument("--virtual", action="store_true")
+    p_mount.add_argument("--foreground", action="store_true")
     p_mount.set_defaults(func=cmd_workspace_mount)
+    p_unmount = workspace_sub.add_parser("unmount")
+    p_unmount.add_argument("workspace")
+    p_unmount.add_argument("--lease")
+    p_unmount.add_argument("--path")
+    p_unmount.add_argument("--force", action="store_true")
+    p_unmount.set_defaults(func=virtual.cmd_unmount)
     p_sync = workspace_sub.add_parser("sync")
     p_sync.add_argument("workspace")
     p_sync.add_argument("--lease")
