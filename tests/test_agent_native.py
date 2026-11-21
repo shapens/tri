@@ -269,14 +269,14 @@ class AgentNativeCliTests(unittest.TestCase):
 class AuthenticatedServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="tri-auth-")
+        # Cleanups run last-in first-out: servers registered later stop before this
+        # directory is removed. Windows cannot delete a SQLite file a live server holds.
+        self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.env = os.environ.copy()
         self.env["TRI_HOME"] = str(self.root / "tri-home")
         self.env.pop("TRI_ACTOR", None)
         self.tokens = self.root / "tokens.json"
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
 
     def tri(self, *args: str) -> dict:
         result = subprocess.run([sys.executable, "-m", "tri", *args], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -296,12 +296,21 @@ class AuthenticatedServerTests(unittest.TestCase):
         except HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
+    @staticmethod
+    def stop_server(proc: subprocess.Popen) -> None:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=5)
+
     def start_server(self, *extra: str) -> tuple[subprocess.Popen, int]:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         proc = subprocess.Popen([sys.executable, "-m", "tri", "serve", "--host", "127.0.0.1", "--port", str(port), "--quiet", *extra], cwd=ROOT, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.addCleanup(lambda: (proc.terminate(), proc.communicate(timeout=5)))
+        self.addCleanup(self.stop_server, proc)
         deadline = time.time() + 10
         while time.time() < deadline:
             try:
