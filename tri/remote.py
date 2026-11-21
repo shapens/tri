@@ -35,7 +35,7 @@ REMOTE_ENV = "TRI_REMOTE"
 TOKEN_ENV = "TRI_TOKEN"
 TOKEN_FILE_ENV = "TRI_TOKEN_FILE"
 CACHE_ENV = "TRI_CACHE_DIR"
-LOCAL_ONLY_COMMANDS = {"serve", "auth", "mcp"}
+LOCAL_ONLY_COMMANDS = {"serve", "auth", "mcp", "cache"}
 FETCH_CHUNK = 256
 SKIP_DIRS = {".git"}
 

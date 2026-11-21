@@ -132,7 +132,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "files-list", "usage": "tri files list <workspace-or-snapshot>", "schema": "tri.files.list", "description": "List files in a workspace or snapshot."},
     {"name": "files-stat", "usage": "tri files stat <workspace-or-snapshot> <path>", "schema": "tri.files.stat", "description": "Inspect path metadata without reading file contents."},
     {"name": "files-read", "usage": "tri files read <workspace-or-snapshot> <path> [--offset <n>] [--limit <n>]", "schema": "tri.files.read", "description": "Read a file through the Tri file API."},
-    {"name": "files-fetch", "usage": "tri files fetch <workspace-or-snapshot> --path <path> [--path <path>] [--max-bytes <n>]", "schema": "tri.files.fetch", "description": "Read several files in one call as base64 (remote mounts); paths beyond the byte budget come back in deferred."},
+    {"name": "files-fetch", "usage": "tri files fetch <workspace-or-snapshot> --path <path> [--path <path>] [--max-bytes <n>] [--hashes-only]", "schema": "tri.files.fetch", "description": "Read several files in one call as base64 (remote mounts); paths beyond the byte budget come back in deferred."},
     {"name": "files-write", "usage": "tri files write <workspace> <path> (--text <text> | --base64 <data> | --body <file>) [--expect-head <snapshot>]", "schema": "tri.files.write", "description": "Write a file through the Tri file API."},
     {"name": "files-delete", "usage": "tri files delete <workspace> <path> [--expect-head <snapshot>]", "schema": "tri.files.delete", "description": "Delete a file through the Tri file API."},
     {"name": "files-move", "usage": "tri files move <workspace> <src> <dest> [--expect-head <snapshot>]", "schema": "tri.files.move", "description": "Move a file through the Tri file API."},
@@ -155,8 +155,9 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "mirror-inspect", "usage": "tri mirror inspect <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Inspect one Git mirror and its last sync."},
     {"name": "mirror-sync", "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.mirror.sync", "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits."},
     {"name": "mirror-remove", "usage": "tri mirror remove <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Stop mirroring a target."},
+    {"name": "cache-serve", "usage": "tri cache serve --upstream <url> [--host 127.0.0.1] [--port 8766] [--dir <path>] [--quiet]", "schema": "tri.cache.server", "description": "Regional read-through cache in front of a Tri service: forwards every request with the caller's token, and serves file content the service has authorized from a shared content-addressed cache."},
     {"name": "runner-claim", "usage": "tri runner claim [--wait <seconds>]", "schema": "tri.runner.claim", "description": "Runner service: claim the oldest queued run job, with its file manifest."},
-    {"name": "runner-fetch", "usage": "tri runner fetch <job> --path <path> [--path <path>]", "schema": "tri.files.fetch", "description": "Runner service: read files of a claimed job (only paths the requester can see)."},
+    {"name": "runner-fetch", "usage": "tri runner fetch <job> --path <path> [--path <path>] [--hashes-only]", "schema": "tri.files.fetch", "description": "Runner service: read files of a claimed job (only paths the requester can see)."},
     {"name": "runner-complete", "usage": "tri runner complete <job> --result <json>", "schema": "tri.check.inspect", "description": "Runner service: report exit status, output, and file changes; the server records the check run."},
     {"name": "runner-jobs", "usage": "tri runner jobs [--status queued|claimed|completed|failed] [--limit <n>]", "schema": "tri.run_job.list", "description": "Runner service: list run jobs."},
     {"name": "runner-work", "usage": "tri runner work [--once] [--max-jobs <n>] [--interval <seconds>] [--sandbox off|auto|required]", "schema": "tri.runner.work", "description": "Run queued jobs from TRI_REMOTE on this machine, each in a sandbox, until stopped."},
@@ -380,6 +381,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.mirror.inspect": {"required": ["id", "project", "target", "remote", "branch", "audience", "status", "synced_snapshot", "synced_git_commit", "in_sync", "last_result", "created_by", "created_at"]},
     "tri.mirror.list": {"required": ["mirrors"]},
     "tri.runner.claim": {"required": ["job"]},
+    "tri.cache.server": {"required": ["host", "port", "upstream", "dir"]},
     "tri.run_job.inspect": {"required": ["id", "workspace", "status", "command", "snapshot"]},
     "tri.run_job.list": {"required": ["jobs"]},
     "tri.runner.work": {"required": ["jobs", "count"]},
@@ -9203,6 +9205,9 @@ def cmd_files_fetch(store: Store, args: argparse.Namespace, command: list[str], 
         visible, reason = path_visibility(path, hidden_patterns)
         if not visible:
             raise TriError("policy_denied", "Path is hidden by policy.", object=path, reason=reason)
+        if getattr(args, "hashes_only", False):
+            files.append({"path": path, "hash": entry["hash"], "mode": entry.get("mode", "100644"), "size": entry.get("size"), "encoding": None, "content": None})
+            continue
         if files and used + int(entry.get("size") or 0) > budget:
             deferred.append(path)
             continue
@@ -9354,6 +9359,9 @@ def cmd_runner_fetch(store: Store, args: argparse.Namespace, command: list[str],
         entry = entries.get(path)
         if entry is None:
             raise TriError("policy_denied", "Path is not part of this job.", object=path)
+        if args.hashes_only:
+            files.append({"path": path, "hash": entry["hash"], "mode": entry.get("mode", "100644"), "size": entry.get("size"), "encoding": None, "content": None})
+            continue
         if files and used + int(entry.get("size") or 0) > FILES_FETCH_MAX_BYTES:
             deferred.append(path)
             continue
@@ -16542,6 +16550,12 @@ def cmd_auth_revoke(store: Store, args: argparse.Namespace, command: list[str], 
     return envelope("tri.auth.list", command, actor=args.actor, start=start, data={"file": str(Path(args.file).resolve()), "tokens": [public_record(item) for item in removed]})
 
 
+def cmd_cache_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    from tri.regional import serve_cache
+
+    return serve_cache(args, command=command, start=start)
+
+
 def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     auth_file = args.auth_file or os.environ.get("TRI_SERVE_AUTH_FILE")
     if not auth_file and args.host not in LOOPBACK_HOSTS and not args.allow_unauthenticated:
@@ -16935,6 +16949,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("ref")
     p_fetch.add_argument("--path", action="append")
     p_fetch.add_argument("--max-bytes", type=int)
+    p_fetch.add_argument("--hashes-only", action="store_true")
     p_fetch.set_defaults(func=cmd_files_fetch)
     p_write = files_sub.add_parser("write")
     p_write.add_argument("workspace")
@@ -17012,6 +17027,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
 
+    p = sub.add_parser("cache")
+    cache_sub = p.add_subparsers(dest="cache_cmd", required=True)
+    p_cache = cache_sub.add_parser("serve")
+    p_cache.add_argument("--upstream", required=True)
+    p_cache.add_argument("--host", default="127.0.0.1")
+    p_cache.add_argument("--port", type=int, default=8766)
+    p_cache.add_argument("--dir")
+    p_cache.add_argument("--quiet", action="store_true")
+    p_cache.set_defaults(func=cmd_cache_serve)
+
     p = sub.add_parser("runner")
     runner_sub = p.add_subparsers(dest="runner_cmd", required=True)
     p_runner = runner_sub.add_parser("claim")
@@ -17020,6 +17045,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_runner = runner_sub.add_parser("fetch")
     p_runner.add_argument("job")
     p_runner.add_argument("--path", action="append")
+    p_runner.add_argument("--hashes-only", action="store_true")
     p_runner.set_defaults(func=cmd_runner_fetch)
     p_runner = runner_sub.add_parser("complete")
     p_runner.add_argument("job")
@@ -17441,7 +17467,7 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 # Commands that start servers or manage credentials never run on behalf of a remote client.
-API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth"})
+API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache"})
 
 
 def raise_actor_mismatch(claimed: str | None, authenticated: str) -> None:
@@ -17576,7 +17602,7 @@ def execute_argv(
 
 def main(argv: list[str] | None = None) -> None:
     output, status = execute_argv(list(sys.argv[1:] if argv is None else argv), start=time.time())
-    if output["schema"] not in ("tri.api.server", "tri.mcp.server"):
+    if output["schema"] not in ("tri.api.server", "tri.mcp.server", "tri.cache.server"):
         print_json(output)
     if status:
         raise SystemExit(status)

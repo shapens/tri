@@ -109,6 +109,7 @@ Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name 
 - history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
+- regional cache (`tri cache serve --upstream <url>`): forwards requests with the caller's token and serves authorized file content from a shared content-addressed store
 - remote runner pool: `tri run --runner remote` / `tri serve --run-executor remote` queue runs; `tri runner work` on other machines claims jobs, fetches only the job's visible files, runs them sandboxed, and reports results
 - remote mode (`TRI_REMOTE`, `TRI_TOKEN`): the CLI and `tri mcp` run every command on one central `tri serve`; `workspace mount`/`sync` work through a per-machine blob cache (`TRI_CACHE_DIR`), and `files fetch` reads many files per round trip
 - post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
