@@ -279,6 +279,63 @@ class ContainerSandboxTests(unittest.TestCase):
         self.assertEqual(check["environment_policy"]["sandbox"]["limits"]["memory_mb"], 64)
 
 
+@unittest.skipUnless(PROBE["kind"] == "winjob", f"the Windows job-object backend is not active here: {PROBE.get('reason') or PROBE['kind']}")
+class WindowsJobSandboxTests(unittest.TestCase):
+    """Job Object limits and low integrity, exercised directly (Windows CI)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="tri-winjob-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.run_dir = self.root / "run"
+        self.run_dir.mkdir()
+
+    def run_box(self, script: str, **limits) -> sandbox.Completed:
+        box = sandbox.build("required", run_dir=self.run_dir, hidden=[self.root / "store"], limits=sandbox.Limits(timeout_seconds=60, **limits))
+        self.assertEqual(box.kind, "winjob")
+        self.assertFalse(box.describe()["network_enforced"])  # documented: no network blocking without admin rights
+        return sandbox.run(box, [sys.executable, "-c", script], cwd=self.run_dir, env=sandbox.scrubbed_env(self.run_dir))
+
+    def test_child_runs_at_low_integrity_and_writes_only_the_run_directory(self) -> None:
+        (self.root / "store").mkdir()
+        (self.root / "store" / "blob").write_bytes(b"store")
+        script = (
+            "import sys\n"
+            "out = []\n"
+            "for path, mode in ((r'%s', 'rb'), (r'%s', 'w'), ('inside.txt', 'w')):\n"
+            "    try:\n"
+            "        open(path, mode).close(); out.append('ok')\n"
+            "    except OSError:\n"
+            "        out.append('denied')\n"
+            "print(','.join(out))\n"
+        ) % (self.root / "store" / "blob", self.root / "outside.txt")
+        completed = self.run_box(script)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.decode().strip(), "denied,denied,ok")
+        self.assertFalse((self.root / "outside.txt").exists())
+
+    def test_process_limit_stops_fork_bombs(self) -> None:
+        script = (
+            "import subprocess, sys\n"
+            "started = 0\n"
+            "procs = []\n"
+            "for _ in range(8):\n"
+            "    try:\n"
+            "        procs.append(subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])); started += 1\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "print(started)\n"
+            "[p.kill() for p in procs]\n"
+        )
+        completed = self.run_box(script, pids=4)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(int(completed.stdout.decode().strip() or "99"), 8)
+
+    def test_memory_limit_is_enforced(self) -> None:
+        completed = self.run_box("x = bytearray(512 * 1024 * 1024); print(len(x))", memory_mb=128)
+        self.assertNotEqual(completed.returncode, 0)
+
+
 @unittest.skipIf(os.name == "nt", "bubblewrap and seatbelt profiles use POSIX paths")
 class SandboxWrapTests(unittest.TestCase):
     def test_bwrap_hides_the_store_and_binds_only_the_run_directory(self) -> None:
