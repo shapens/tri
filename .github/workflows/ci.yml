@@ -59,6 +59,10 @@ jobs:
           git config --global user.name "Tri CI"
       - name: Probe overlay support
         run: python -c "from pathlib import Path; import tempfile; from tri.overlay import probe_overlay; print(probe_overlay(Path(tempfile.mkdtemp())))"
+      - name: Install bubblewrap for sandboxed runs
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+      - name: Probe sandbox support
+        run: python -c "from tri.sandbox import probe; p = probe(); print(p); assert p['isolated'], p"
       - name: Full suite with automatic backend selection (overlay wherever runs are ephemeral)
         run: python -m unittest discover -s tests -v
       - name: Overlay-specific tests with the backend forced

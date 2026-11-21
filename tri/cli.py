@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri import gitmirror
+from tri import sandbox
 from tri.auth import TokenAuthority, issue_token, load_token_file, public_record, revoke_tokens
 from tri.ignore import IgnoreRules
 from tri.textmerge import merge_three_way
@@ -66,11 +67,11 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "schema", "usage": "tri schema [name]", "schema": "tri.schema", "description": "Show first JSON schemas used by agent clients."},
     {"name": "batch", "usage": "tri batch <plan.json> [--continue-on-error]", "schema": "tri.batch", "description": "Run a dependent JSON command batch in one local agent round trip."},
     {"name": "doctor", "usage": "tri doctor", "schema": "tri.doctor", "description": "Inspect local Tri store health and command availability."},
-    {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated]", "schema": "tri.api.server", "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor."},
+    {"name": "serve", "usage": "tri serve [--host 127.0.0.1] [--port 8765] [--quiet] [--auth-file <tokens.json>] [--allow-unauthenticated] [--run-sandbox off|auto|required] [--allow-unsandboxed-runs]", "schema": "tri.api.server", "description": "Run the JSON HTTP API; with --auth-file each bearer token is bound to one actor. Beyond loopback, runs are sandboxed by default (--run-sandbox required)."},
     {"name": "auth-issue", "usage": "tri auth issue <actor> --file <tokens.json> [--label <text>]", "schema": "tri.auth.token", "description": "Issue a bearer token bound to one actor; the token is shown once and only its hash is stored."},
     {"name": "auth-list", "usage": "tri auth list --file <tokens.json>", "schema": "tri.auth.list", "description": "List issued tokens without their secrets."},
     {"name": "auth-revoke", "usage": "tri auth revoke <token-id-or-actor> --file <tokens.json>", "schema": "tri.auth.list", "description": "Revoke tokens; a running server stops accepting them on its next request."},
-    {"name": "mcp", "usage": "tri mcp", "schema": "tri.mcp.server", "description": "Serve Tri to agent harnesses over the Model Context Protocol (stdio); every call runs as the startup actor."},
+    {"name": "mcp", "usage": "tri mcp [--run-sandbox off|auto|required]", "schema": "tri.mcp.server", "description": "Serve Tri to agent harnesses over the Model Context Protocol (stdio); every call runs as the startup actor."},
     {"name": "objects-inspect", "usage": "tri objects inspect <object>", "schema": "tri.object.inspect", "description": "Inspect any supported typed Tri object id through its policy-aware command."},
     {"name": "actors-inspect", "usage": "tri actors inspect <actor>", "schema": "tri.actor.inspect", "description": "Inspect an actor identity, derived roles, and policy selectors."},
     {"name": "import", "usage": "tri import <repo> --name <name> [--ref <ref>] [--target <target>]", "schema": "tri.import", "description": "Import a Git repo or directory into Tri snapshots."},
@@ -141,7 +142,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "operations-inspect", "usage": "tri operations inspect <operation>", "schema": "tri.operation.inspect", "description": "Inspect one policy-gated operation provenance record."},
     {"name": "search", "usage": "tri search <project> <query> [--scope <scope>] [--glob <glob>] [--include-history] [--limit <n>] [--case-sensitive]", "schema": "tri.search", "description": "Search authorized project work with provenance across files and Tri objects."},
     {"name": "diff", "usage": "tri diff <workspace-or-changeset> | tri diff <base-snapshot> <head-snapshot> [--mode summary|files|patch|machine] [--path <glob>]", "schema": "tri.diff", "description": "Diff workspace, changeset, or explicit snapshots."},
-    {"name": "run", "usage": "tri run <workspace> [--paths <glob>] [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run. --paths lays out only matching files (a partial checkout); changes anywhere are still imported, and only files that were laid out can be deleted."},
+    {"name": "run", "usage": "tri run <workspace> [--paths <glob>] [--sandbox] [--timeout <seconds>] [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run. --sandbox requires isolation (no network, writes only in the run directory, no Tri home or credential reads, scrubbed environment); --timeout kills the command's process group. --paths lays out only matching files (a partial checkout); changes anywhere are still imported, and only files that were laid out can be deleted."},
     {"name": "checks-list", "usage": "tri checks list <workspace-or-changeset>", "schema": "tri.check.list", "description": "List check runs for a workspace or changeset."},
     {"name": "checks-inspect", "usage": "tri checks inspect <check>", "schema": "tri.check.inspect", "description": "Inspect one structured check run."},
     {"name": "checks-set-create", "usage": "tri checks set-create <project> <name> --required-check <cmd>", "schema": "tri.check_set.inspect", "description": "Create a reusable project required-check set."},
@@ -243,6 +244,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.diagnostic": {
         "required": ["code", "severity", "message", "retryable"],
         "codes": [
+            "sandbox_unavailable",
             "mirror_conflict",
             "mirror_diverged",
             "mirror_push_rejected",
@@ -6603,6 +6605,47 @@ def store_meta_set(store: Store, key: str, value: str) -> None:
         store.conn.execute("INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
 
+def command_sandbox(
+    store: Store,
+    run_dir: Path,
+    *,
+    purpose: str,
+    requested: str | None = None,
+    network: bool | None = None,
+    timeout: float | None = None,
+) -> sandbox.Sandbox | None:
+    """The sandbox for a command Tri runs from workspace content, per `TRI_RUN_SANDBOX`
+    (`tri serve --run-sandbox`) or an explicit request; None when sandboxing is off."""
+    mode = sandbox.resolve_mode(requested)
+    if network is None:
+        network = os.environ.get("TRI_RUN_SANDBOX_NETWORK", "0") == "1"
+    try:
+        return sandbox.build(
+            mode,
+            run_dir=run_dir,
+            hidden=[store.home],
+            readable=[store.home / "envs"],
+            network=network,
+            limits=sandbox.Limits.from_env(timeout_seconds=timeout),
+        )
+    except sandbox.SandboxUnavailable as exc:
+        raise TriError(
+            "sandbox_unavailable",
+            "Sandboxed runs are required here, but this host cannot isolate commands.",
+            reason=str(exc),
+            purpose=purpose,
+            hint="Install bubblewrap (Linux) or run on macOS; or set --run-sandbox auto to accept limits without isolation.",
+        ) from None
+
+
+def sandbox_env(box: sandbox.Sandbox | None, run_dir: Path, base: dict[str, str], extra: dict[str, str]) -> dict[str, str]:
+    if box is None:
+        env = dict(base)
+        env.update(extra)
+        return env
+    return sandbox.scrubbed_env(run_dir, extra)
+
+
 def trash_dir(store: Store) -> Path:
     return store.home / "trash"
 
@@ -6642,9 +6685,12 @@ def spawn_tree_remover(path: Path) -> None:
     package_root = str(Path(__file__).resolve().parents[1])
     env["PYTHONPATH"] = package_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     try:
-        subprocess.Popen([sys.executable, "-c", code, str(path)], env=env, **kwargs)
+        remover = subprocess.Popen([sys.executable, "-c", code, str(path)], env=env, **kwargs)
     except OSError:
         remove_tree(path)
+        return
+    # Reap it so a long-lived `tri serve` does not collect zombies; a CLI exit leaves it running.
+    threading.Thread(target=remover.wait, daemon=True).start()
 
 
 def empty_trash(store: Store, *, min_age_seconds: float = 600.0) -> int:
@@ -7628,8 +7674,10 @@ def ensure_env(store: Store, recipe: sqlite3.Row, entries: dict[str, dict[str, A
             materialization = materialize_entries(store, entries, build.work)
             build.record_materialization(materialization)
             argv = split_command(recipe["install"])
+            # Installs run hooks from workspace content (npm/pip scripts), so they share the run sandbox; they usually need the network.
+            box = command_sandbox(store, build.dir, purpose="env_build", network=os.environ.get("TRI_RUN_SANDBOX_ENV_NETWORK", "1") == "1")
             try:
-                proc = subprocess.run(argv, cwd=build.work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=os.environ.copy())
+                proc = sandbox.run(box, argv, cwd=build.work, env=sandbox_env(box, build.dir, os.environ, {}))
                 exit_status, out, err = proc.returncode, proc.stdout, proc.stderr
             except OSError as exc:
                 exit_status, out, err = 127, b"", str(exc).encode()
@@ -7698,10 +7746,10 @@ class EnvPlan:
     def finalize(self, materialization: Materialization) -> None:
         materialization.skip_prefixes = sorted(set(materialization.skip_prefixes) | set(self.reserved))
 
-    def install_private(self, work: Path, env: dict[str, str]) -> None:
+    def install_private(self, work: Path, env: dict[str, str], box: "sandbox.Sandbox | None" = None) -> None:
         for recipe in self.private:
             try:
-                proc = subprocess.run(split_command(recipe["install"]), cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
+                proc = sandbox.run(box, split_command(recipe["install"]), cwd=work, env=env)
                 exit_status = proc.returncode
             except OSError:
                 exit_status = 127
@@ -10341,6 +10389,8 @@ def run_check_for_workspace(
     import_changes: bool = True,
     use_env: bool = True,
     sparse_paths: list[str] | None = None,
+    sandbox_mode: str | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     check_id = new_id("check")
     run_lease = RunLease(store, kind="run", key=check_id, workspace_id=ws["id"], before_snapshot=ws["head_snapshot_id"])
@@ -10361,6 +10411,8 @@ def run_check_for_workspace(
             import_changes=import_changes,
             use_env=use_env,
             sparse_paths=sparse_paths,
+            sandbox_mode=sandbox_mode,
+            timeout=timeout,
         )
         failed = False
         return result
@@ -10384,6 +10436,8 @@ def _run_check_for_workspace(
     import_changes: bool = True,
     use_env: bool = True,
     sparse_paths: list[str] | None = None,
+    sandbox_mode: str | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     if ws["status"] != "active":
         raise TriError("policy_denied", "Only active workspaces can run checks.", object=ws["id"])
@@ -10400,10 +10454,11 @@ def _run_check_for_workspace(
     task_run = latest_workspace_task_run(store, ws["id"])
     normalized_assumptions = normalize_assumptions(assumptions)
     work = store.runs / check_id / "work"
-    env = os.environ.copy()
-    env.update(secret_env)
+    box = command_sandbox(store, run_lease.dir, purpose="run", requested=sandbox_mode, timeout=timeout)
+    extra_env = dict(secret_env)
     if generated_configs:
-        env["TRI_CONFIG_DIR"] = str(work / ".tri" / "generated-config")
+        extra_env["TRI_CONFIG_DIR"] = str(work / ".tri" / "generated-config")
+    env = sandbox_env(box, run_lease.dir, os.environ, extra_env)
     with store.conn:
         phase_evt = set_workspace_task_run_phase(store, ws, actor=actor, status="checking", reason="run")
         policy_event = new_id("evt")
@@ -10444,17 +10499,17 @@ def _run_check_for_workspace(
         # A partial checkout writes only its files; cloning the full cached base would defeat it.
         base_snapshot=None if sparse else ws["base_snapshot_id"],
         attachments=env_plan.attachments,
-        allow_overlay=not env_plan.private and not sparse,
+        allow_overlay=not env_plan.private and not sparse and box is None,
     )
     env_plan.finalize(materialization)
     run_lease.record_envs(env_plan)
     run_lease.record_sparse(sparse)
     run_lease.record_materialization(materialization)
-    env_plan.install_private(work, env)
+    env_plan.install_private(work, env, box)
     materialize_generated_configs_for_run(store, materialization.writable_root, generated_configs)
     started = time.time()
     run_cwd = run_lease.dir if isinstance(materialization, OverlayMaterialization) else work
-    proc = subprocess.run(materialization.wrap(cmd), cwd=run_cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False, env=env)
+    proc = sandbox.run(box, materialization.wrap(cmd), cwd=run_cwd, env=env)
     run_lease.command_finished = import_changes
     duration_ms = int((time.time() - started) * 1000)
     if import_changes:
@@ -10531,6 +10586,7 @@ def _run_check_for_workspace(
     environment_policy = check_environment_policy(secret_leases, secret_env)
     environment_policy["generated_configs"] = generated_configs
     environment_policy["generated_config_paths"] = [config["path"] for config in generated_configs]
+    environment_policy["sandbox"] = {**box.describe(), "timed_out": proc.timed_out} if box else {"kind": "off", "isolated": False}
     reproducibility = "not_imported_stale_workspace_head" if stale_diagnostic else "local_replayable"
     completed_refs = {
         "check": check_id,
@@ -10603,7 +10659,13 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
     import_changes = not args.no_import_changes
     use_env = not args.no_env
     sparse_paths = list(args.paths or [])
-    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env", "--paths"):
+    sandbox_mode = "required" if args.sandbox else None
+    timeout = args.timeout
+    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env", "--paths", "--sandbox", "--timeout"):
+        if cmd[0] == "--sandbox":
+            sandbox_mode = "required"
+            cmd = cmd[1:]
+            continue
         if cmd[0] == "--no-import-changes":
             import_changes = False
             cmd = cmd[1:]
@@ -10618,6 +10680,11 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
             lease_ids.append(cmd[1])
         elif cmd[0] == "--paths":
             sparse_paths.append(cmd[1])
+        elif cmd[0] == "--timeout":
+            try:
+                timeout = float(cmd[1])
+            except ValueError:
+                raise TriError("invalid_command", "--timeout takes seconds.", value=cmd[1]) from None
         else:
             assumptions.append(cmd[1])
         cmd = cmd[2:]
@@ -10635,6 +10702,8 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
         import_changes=import_changes,
         use_env=use_env,
         sparse_paths=sparse_paths,
+        sandbox_mode=sandbox_mode,
+        timeout=timeout,
     )
 
 
@@ -12360,7 +12429,8 @@ def _run_check_for_changeset_head(
         )
     started = time.time()
     run_cwd = run_lease.dir if isinstance(materialization, OverlayMaterialization) else work
-    proc = subprocess.run(materialization.wrap(cmd), cwd=run_cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, check=False, env=os.environ.copy())
+    box = command_sandbox(store, run_lease.dir, purpose="changeset_revalidate")
+    proc = sandbox.run(box, materialization.wrap(cmd), cwd=run_cwd, env=sandbox_env(box, run_lease.dir, os.environ, {}))
     duration_ms = int((time.time() - started) * 1000)
     rules = import_rules(store, cs["project_id"], before_entries)
     scanned_changed, scanned_deleted = materialization.scan(before_entries, ignore=rules)
@@ -14834,6 +14904,7 @@ def cmd_doctor(store: Store, args: argparse.Namespace, command: list[str], start
         "schema_version": SCHEMA_VERSION,
         "counts": counts,
         "git_available": shutil.which("git") is not None,
+        "sandbox": sandbox.probe(),
         "command_count": len(COMMAND_CONTRACTS),
         "materialization": materialization,
     }
@@ -15771,6 +15842,10 @@ def cmd_mcp(store: Store, args: argparse.Namespace, command: list[str], start: f
 
     actor = args.actor
     require_known_actor(actor)
+    if args.run_sandbox:
+        os.environ[sandbox.MODE_ENV] = args.run_sandbox
+        if args.run_sandbox == "required" and not sandbox.probe()["isolated"]:
+            raise TriError("sandbox_unavailable", "Sandboxed runs were required, but this host cannot isolate commands.", reason=sandbox.probe().get("reason"))
 
     def execute(argv: list[str]) -> dict[str, Any]:
         if argv and argv[0] in API_BLOCKED_COMMANDS:
@@ -15829,10 +15904,19 @@ def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start:
             object=args.host,
             required_flag="--auth-file",
         )
+    run_sandbox = args.run_sandbox or os.environ.get(sandbox.MODE_ENV) or ("off" if args.host in LOOPBACK_HOSTS else "required")
+    if run_sandbox == "required" and not sandbox.probe()["isolated"] and not args.allow_unsandboxed_runs:
+        raise TriError(
+            "sandbox_unavailable",
+            "Refusing to serve beyond loopback without sandboxed runs: any client could execute code as the server user.",
+            reason=sandbox.probe().get("reason"),
+            hint="Install bubblewrap, or pass --allow-unsandboxed-runs if every token holder is trusted.",
+        )
+    os.environ[sandbox.MODE_ENV] = "auto" if run_sandbox == "required" and args.allow_unsandboxed_runs else run_sandbox
     server = TriHTTPServer((args.host, args.port), TriAPIHandler)
     server.authority = TokenAuthority(Path(auth_file).resolve()) if auth_file else None
     host, port = server.server_address
-    data = {**api_server_data(str(host), int(port)), "auth": "bearer" if auth_file else "none"}
+    data = {**api_server_data(str(host), int(port)), "auth": "bearer" if auth_file else "none", "run_sandbox": os.environ[sandbox.MODE_ENV]}
     if not args.quiet:
         print_json(envelope("tri.api.server", command, actor=args.actor, start=start, data=data))
         sys.stdout.flush()
@@ -15933,9 +16017,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--auth-file")
     p.add_argument("--allow-unauthenticated", action="store_true")
+    p.add_argument("--run-sandbox", choices=list(sandbox.MODES))
+    p.add_argument("--allow-unsandboxed-runs", action="store_true")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("mcp")
+    p.add_argument("--run-sandbox", choices=list(sandbox.MODES))
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("auth")
@@ -16261,6 +16348,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-import-changes", action="store_true")
     p.add_argument("--no-env", action="store_true")
     p.add_argument("--paths", action="append")
+    p.add_argument("--sandbox", action="store_true")
+    p.add_argument("--timeout", type=float)
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
 
