@@ -72,6 +72,18 @@ tri run ws_... -- make test                                    # executes on the
 claude mcp add tri -- env TRI_REMOTE=https://tri.example.com TRI_TOKEN_FILE=~/.tri-token tri mcp
 ```
 
+Run several stateless nodes for one store: metadata in PostgreSQL, content in S3-compatible (or shared-directory) object storage. Clients list every node and move on when one is down:
+
+```sh
+export TRI_DATABASE_URL='postgres://tri:...@db.internal:5432/tri?sslmode=require' TRI_DATABASE_SCHEMA=tri
+export TRI_OBJECT_STORE=s3://tri-objects/prod AWS_REGION=us-east-1   # TRI_OBJECT_STORE_ENDPOINT for MinIO/R2
+tri storage migrate --database "$TRI_DATABASE_URL" --schema tri --objects "$TRI_OBJECT_STORE"   # once, from an existing SQLite home
+TRI_NODE_ID=node-a tri serve --host 0.0.0.0 --auth-file tokens.json      # repeat on every node
+export TRI_REMOTE=https://tri-a.example.com,https://tri-b.example.com   # clients fail over
+tri storage status                                                      # backend, schema, object store, node id
+tri backup create /backups/tri-$(date +%F)                              # a complete single-node SQLite home
+```
+
 Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name server paths (`files write --body`, `import <dir>`, `workspace mount <dir>`, ...) unless the caller is a maintainer.
 
 ## Implemented MVP Surface
@@ -111,6 +123,7 @@ Beyond loopback, `tri serve` sandboxes runs and refuses API arguments that name 
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
 - regional cache (`tri cache serve --upstream <url>`): forwards requests with the caller's token and serves authorized file content from a shared content-addressed store
 - remote runner pool: `tri run --runner remote` / `tri serve --run-executor remote` queue runs; `tri runner work` on other machines claims jobs, fetches only the job's visible files, runs them sandboxed, and reports results
+- replicated storage: PostgreSQL metadata (`TRI_DATABASE_URL`, standard-library wire client with TLS and SCRAM) and shared object storage (`TRI_OBJECT_STORE`, S3 Signature V4 or a shared directory) behind any number of stateless `tri serve` nodes; writers stay serialized across nodes, clients fail over between nodes, `tri storage migrate` moves a SQLite store, and backups of a shared store are single-node homes
 - remote mode (`TRI_REMOTE`, `TRI_TOKEN`): the CLI and `tri mcp` run every command on one central `tri serve`; `workspace mount`/`sync` work through a per-machine blob cache (`TRI_CACHE_DIR`), and `files fetch` reads many files per round trip
 - post-merge verification: merge rules with `--verify-after <check-set>` merge first; `tri verify run` checks merged snapshots in order and reverts failures on the current target, keeping later merges
 - sandboxed runs (`tri run --sandbox`, `tri serve --run-sandbox`, default `required` beyond loopback): bubblewrap on Linux, the system sandbox on macOS; no network, no writes outside the run directory, no reads of the Tri home or credential files, scrubbed environment, CPU/memory/file-size/wall-clock limits

@@ -22,7 +22,9 @@ import base64
 import fnmatch
 import hashlib
 import json
+import errno
 import os
+import socket
 import shutil
 import time
 import uuid
@@ -35,7 +37,7 @@ REMOTE_ENV = "TRI_REMOTE"
 TOKEN_ENV = "TRI_TOKEN"
 TOKEN_FILE_ENV = "TRI_TOKEN_FILE"
 CACHE_ENV = "TRI_CACHE_DIR"
-LOCAL_ONLY_COMMANDS = {"serve", "auth", "mcp", "cache"}
+LOCAL_ONLY_COMMANDS = {"serve", "auth", "mcp", "cache", "storage"}
 FETCH_CHUNK = 256
 SKIP_DIRS = {".git"}
 
@@ -69,27 +71,60 @@ def error_envelope(argv: list[str], code: str, message: str, **fields: Any) -> d
     return envelope("tri.error", ["tri", *argv], ok=False, diagnostics=[{"code": code, "severity": "error", "message": message, "retryable": code == "remote_unreachable", **fields}])
 
 
+_PREFERRED: dict[tuple[str, ...], int] = {}
+
+
+def _never_reached_server(exc: BaseException) -> bool:
+    """True when the request cannot have been processed, so another node may take it."""
+    reason = getattr(exc, "reason", exc)
+    return isinstance(reason, (ConnectionRefusedError, socket.gaierror)) or (isinstance(reason, OSError) and reason.errno in {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH})
+
+
 class RemoteClient:
+    """Talks to one Tri service. ``url`` may list several nodes (comma separated)
+    serving the same store; a request moves to the next node only when the
+    current one refused the connection or answered 503 (draining or not ready),
+    so a write is never sent twice."""
+
     def __init__(self, url: str, token: str | None, *, timeout: float = 900.0) -> None:
-        self.url = url.rstrip("/")
+        self.urls = [part.strip().rstrip("/") for part in url.split(",") if part.strip()] or [url.rstrip("/")]
+        self.url = self.urls[_PREFERRED.get(tuple(self.urls), 0) % len(self.urls)]
         self.token = token
         self.timeout = timeout
 
-    def _post(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
-        req = request.Request(f"{self.url}{route}", data=json.dumps(payload).encode(), method="POST")
+    def _post_one(self, base: str, route: str, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        req = request.Request(f"{base}{route}", data=json.dumps(payload).encode(), method="POST")
         req.add_header("Content-Type", "application/json")
         if self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
         try:
             with request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read())
+                return json.loads(response.read()), False
         except HTTPError as exc:
+            if exc.code == 503:
+                return error_envelope(payload.get("argv", []), "remote_unreachable", "The Tri server is not ready (HTTP 503).", remote=base), True
             try:
-                return json.loads(exc.read())
+                return json.loads(exc.read()), False
             except (ValueError, OSError):
-                return error_envelope(payload.get("argv", []), "remote_unreachable", f"Remote returned HTTP {exc.code}.", remote=self.url)
+                return error_envelope(payload.get("argv", []), "remote_unreachable", f"Remote returned HTTP {exc.code}.", remote=base), False
         except (URLError, OSError, TimeoutError) as exc:
-            return error_envelope(payload.get("argv", []), "remote_unreachable", f"Cannot reach the Tri server: {exc}", remote=self.url)
+            return error_envelope(payload.get("argv", []), "remote_unreachable", f"Cannot reach the Tri server: {exc}", remote=base), _never_reached_server(exc)
+
+    def _post(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
+        key = tuple(self.urls)
+        first = _PREFERRED.get(key, 0) % len(self.urls)
+        output: dict[str, Any] | None = None
+        for offset in range(len(self.urls)):
+            index = (first + offset) % len(self.urls)
+            output, try_next = self._post_one(self.urls[index], route, payload)
+            if not try_next:
+                _PREFERRED[key] = index
+                self.url = self.urls[index]
+                return output
+        assert output is not None
+        if len(self.urls) > 1:
+            output.setdefault("diagnostics", [{}])[0]["remotes_tried"] = list(self.urls)
+        return output
 
     def command(self, argv: list[str]) -> dict[str, Any]:
         return self._post("/v0/command", {"argv": argv})

@@ -155,6 +155,7 @@ class TriCliTests(unittest.TestCase):
         self.assertEqual(results["changeset"]["schema"], "tri.changeset.inspect")
         self.assertTrue(results["changeset"]["data"]["id"].startswith("cs_"))
 
+    @unittest.skipIf(os.environ.get("TRI_DATABASE_URL"), "exercises SQLite file packing and raw SQLite connections")
     def test_packed_store_reopens_between_commands(self) -> None:
         imported = self.import_project()
         home = Path(self.env["TRI_HOME"])

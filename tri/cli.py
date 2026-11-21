@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -28,7 +29,9 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri import gitmirror
+from tri import pgstore
 from tri import sandbox
+from tri.objectstore import ObjectStore, ObjectStoreError, object_store_from_env, object_store_from_url
 from tri.auth import TokenAuthority, issue_token, load_token_file, public_record, revoke_tokens
 from tri.ignore import IgnoreRules
 from tri.textmerge import merge_three_way
@@ -156,6 +159,8 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "mirror-sync", "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.mirror.sync", "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits."},
     {"name": "mirror-remove", "usage": "tri mirror remove <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Stop mirroring a target."},
     {"name": "backup-create", "usage": "tri backup create <dir> [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.backup.create", "description": "Maintainer: consistent online backup that is itself a Tri home (restore by pointing TRI_HOME at it); repeats copy only new objects, --watch keeps a warm standby."},
+    {"name": "storage-status", "usage": "tri storage status", "schema": "tri.storage.status", "description": "Where this node keeps metadata (SQLite or PostgreSQL) and content (local files or shared object storage), and whether several nodes can serve the store."},
+    {"name": "storage-migrate", "usage": "tri storage migrate --database <postgres-url> [--schema <name>] [--objects <file:///dir|s3://bucket/prefix>] [--replace]", "schema": "tri.storage.migrate", "description": "Maintainer: copy this SQLite store into PostgreSQL (and its blobs, artifacts and secret values into shared object storage), so stateless nodes can serve it with TRI_DATABASE_URL, TRI_DATABASE_SCHEMA and TRI_OBJECT_STORE."},
     {"name": "backup-verify", "usage": "tri backup verify <dir> [--deep]", "schema": "tri.backup.verify", "description": "Maintainer: check a backup's database integrity and that every live object and artifact is present (--deep rehashes content)."},
     {"name": "cache-serve", "usage": "tri cache serve --upstream <url> [--host 127.0.0.1] [--port 8766] [--dir <path>] [--quiet]", "schema": "tri.cache.server", "description": "Regional read-through cache in front of a Tri service: forwards every request with the caller's token, and serves file content the service has authorized from a shared content-addressed cache."},
     {"name": "runner-claim", "usage": "tri runner claim [--wait <seconds>]", "schema": "tri.runner.claim", "description": "Runner service: claim the oldest queued run job, with its file manifest."},
@@ -257,6 +262,8 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
         "required": ["code", "severity", "message", "retryable"],
         "codes": [
             "backup_incomplete",
+            "store_unavailable",
+            "object_store_unavailable",
             "remote_unreachable",
             "content_mismatch",
             "sandbox_unavailable",
@@ -386,6 +393,8 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.runner.claim": {"required": ["job"]},
     "tri.cache.server": {"required": ["host", "port", "upstream", "dir"]},
     "tri.backup.create": {"required": ["dest", "cycles", "created_at", "counts", "copied"]},
+    "tri.storage.status": {"required": ["metadata", "objects", "multi_node", "node_id"]},
+    "tri.storage.migrate": {"required": ["database", "schema", "tables", "objects"]},
     "tri.backup.verify": {"required": ["dest", "ok", "blobs_checked", "artifacts_checked", "problems"]},
     "tri.run_job.inspect": {"required": ["id", "workspace", "status", "command", "snapshot"]},
     "tri.run_job.list": {"required": ["jobs"]},
@@ -581,6 +590,17 @@ def decision_denial(code: str, message: str, **fields: Any) -> dict[str, Any]:
     return TriError(code, message, **fields).diagnostic
 
 
+_POSTGRES_READY: set[tuple[str, str]] = set()
+
+
+def store_schema_fingerprint() -> str:
+    """Changes whenever the schema DDL or the migrations change."""
+    import inspect
+
+    source = inspect.getsource(Store.init_db) + inspect.getsource(Store.migrate_db)
+    return hashlib.sha256(source.encode()).hexdigest()[:24]
+
+
 class Store:
     def __init__(self, home: Path | None = None, *, pack_on_close: bool | None = None) -> None:
         self.home = Path(os.environ.get("TRI_HOME", home or ".tri")).resolve()
@@ -599,6 +619,14 @@ class Store:
         self._blob_cache: dict[str, bytes] = {}
         self._tree_cache: dict[str, tuple[dict[str, dict[str, Any]], set[str]]] = {}
         self.home.mkdir(parents=True, exist_ok=True)
+        self.object_store: ObjectStore | None = object_store_from_env()
+        # Identifies this node's directories (run dirs, mounts) in shared metadata.
+        self.node_id = os.environ.get("TRI_NODE_ID", "").strip() or f"{socket.gethostname()}:{hashlib.sha256(str(self.home).encode()).hexdigest()[:12]}"
+        self.database_url = os.environ.get(pgstore.DATABASE_URL_ENV, "").strip() or None
+        if self.database_url:
+            self._open_postgres()
+            return
+        self.backend = "sqlite"
         # Two locks, so no lock is ever converted between shared and exclusive
         # (flock conversion is not atomic):
         # - the open lock is held shared by every open Store; packing takes it
@@ -646,6 +674,56 @@ class Store:
                 page_size = 512
             self.conn.execute(f"PRAGMA page_size={page_size}")
         self.init_db()
+
+    def _open_postgres(self) -> None:
+        """Metadata in PostgreSQL (one schema per store), shared by every node.
+
+        TRI_HOME then only holds per-node caches and scratch space; blobs,
+        artifacts and secret values live in TRI_OBJECT_STORE when several nodes
+        serve the same store."""
+        assert self.database_url
+        self.backend = "postgres"
+        self.schema = pgstore.schema_for(str(self.home))
+        self.pack_on_close = False
+        self.pack_db_max_bytes = None
+        self.lock_file = None
+        self.admin_lock = None
+        for directory in (self.blobs, self.artifacts, self.runs, self.secrets):
+            directory.mkdir(parents=True, exist_ok=True)
+        key = (self.database_url, self.schema)
+        if key not in _POSTGRES_READY:
+            pgstore.ensure_schema(self.database_url, self.schema)
+        self.conn = pgstore.connect(self.database_url, self.schema)
+        if key in _POSTGRES_READY:
+            return
+        fingerprint = store_schema_fingerprint()
+        lock = pgstore.SessionLock(self.database_url, self.schema, "init")
+        lock.acquire()
+        try:
+            current = None
+            try:
+                row = self.conn.execute("SELECT value FROM store_meta WHERE key = ?", ("schema_fingerprint",)).fetchone()
+                current = row["value"] if row else None
+            except sqlite3.OperationalError:
+                current = None
+            if current != fingerprint:
+                self.init_db()
+                with self.conn:
+                    self.conn.execute(
+                        "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        ("schema_fingerprint", fingerprint),
+                    )
+        finally:
+            lock.release()
+        _POSTGRES_READY.add(key)
+
+    def named_lock(self, name: str) -> Any:
+        """A lock that excludes other holders on this machine, or on every node
+        when the metadata lives in PostgreSQL."""
+        if self.backend == "postgres":
+            assert self.database_url
+            return pgstore.SessionLock(self.database_url, self.schema, name)
+        return FileLock(self.home / f"{name}.lock")
 
     @property
     def materializer(self) -> Materializer:
@@ -1168,6 +1246,9 @@ class Store:
         merge_rule_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(merge_rules)").fetchall()}
         if "verify_check_set_id" not in merge_rule_columns:
             self.conn.execute("ALTER TABLE merge_rules ADD COLUMN verify_check_set_id TEXT")
+        for table in ("materialization_leases", "disk_leases"):
+            if "node_id" not in {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN node_id TEXT")
         lease_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(materialization_leases)").fetchall()}
         for column, ddl in (
             ("backend", "TEXT"),
@@ -1233,6 +1314,9 @@ class Store:
                 sidecar.unlink()
 
     def close(self) -> None:
+        if self.backend == "postgres":
+            pgstore.release(self.conn)
+            return
         try:
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error:
@@ -1282,11 +1366,17 @@ class Store:
             row = self.conn.execute("SELECT purged_at FROM blobs WHERE id = ?", (blob_id,)).fetchone()
             was_purged = bool(row and row["purged_at"])
             self.conn.execute("UPDATE blobs SET last_referenced_at = ?, purged_at = NULL WHERE id = ?", (now, blob_id))
+        stored: bytes | None = None
         if was_purged or not object_path.exists():
             compressed = zlib.compress(data)
+            stored = COMPRESSED_BLOB_MAGIC + compressed if len(compressed) + len(COMPRESSED_BLOB_MAGIC) < len(data) else data
             tmp = object_path.with_name(f".{object_path.name}.{uuid.uuid4().hex}.tmp")
-            tmp.write_bytes(COMPRESSED_BLOB_MAGIC + compressed if len(compressed) + len(COMPRESSED_BLOB_MAGIC) < len(data) else data)
+            tmp.write_bytes(stored)
             os.replace(tmp, object_path)
+        if self.object_store is not None and (inserted or was_purged):
+            # Uploaded inside the transaction that commits the row, so a
+            # committed blob row always has its content in shared storage.
+            self.share_object(f"blobs/{digest}", stored if stored is not None else object_path.read_bytes())
         self._blob_cache[blob_id] = data
         return {"id": blob_id, "hash": digest, "size": len(data), "object_path": str(object_path)}
 
@@ -1306,11 +1396,48 @@ class Store:
         try:
             data = path.read_bytes()
         except FileNotFoundError:
-            raise TriError("path_not_found", "Blob content file is missing from the object store.", object=blob_id) from None
+            shared = self.fetch_object(f"blobs/{row['hash']}", self.blobs / row["hash"][:2] / row["hash"])
+            if shared is None:
+                raise TriError("path_not_found", "Blob content file is missing from the object store.", object=blob_id) from None
+            data = shared
         if data.startswith(COMPRESSED_BLOB_MAGIC):
             data = zlib.decompress(data[len(COMPRESSED_BLOB_MAGIC) :])
         self._blob_cache[blob_id] = data
         return data
+
+    def share_object(self, key: str, data: bytes) -> None:
+        """Write to shared object storage (no-op without TRI_OBJECT_STORE)."""
+        if self.object_store is None:
+            return
+        try:
+            self.object_store.put(key, data)
+        except ObjectStoreError as exc:
+            raise TriError("object_store_unavailable", f"Shared object storage did not accept {key}: {exc}", retryable=exc.retryable) from None
+
+    def fetch_object(self, key: str, local: Path) -> bytes | None:
+        """Read through to shared object storage on a local miss and keep a local copy."""
+        if self.object_store is None:
+            return None
+        try:
+            data = self.object_store.get(key)
+        except ObjectStoreError as exc:
+            raise TriError("object_store_unavailable", f"Shared object storage could not return {key}: {exc}", retryable=exc.retryable) from None
+        if data is None:
+            return None
+        local.parent.mkdir(parents=True, exist_ok=True)
+        tmp = local.with_name(f".{local.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, local)
+        return data
+
+    def shared_file(self, kind: str, path: Path) -> Path:
+        """Return a local path for an artifact or secret value written by any node."""
+        if path.exists() or self.object_store is None:
+            return path
+        local = (self.artifacts if kind == "artifacts" else self.secrets) / path.name
+        if local.exists() or self.fetch_object(f"{kind}/{path.name}", local) is not None:
+            return local
+        return path
 
     def put_tree(self, entries: dict[str, dict[str, Any]]) -> dict[str, str]:
         """Store ``entries`` as directory-level nodes; unchanged directories are shared."""
@@ -3590,12 +3717,51 @@ def event_view(store: Store, row: sqlite3.Row, *, actor: str, record_denial: boo
     return event_view_data(store, event_data(row), actor=actor, record_denial=record_denial)
 
 
-def artifact_path(value: str) -> Path:
-    """Artifact files are recorded absolute; backups record them relative to the home."""
+_SHARED_STORE: list[ObjectStore | None] = []
+
+
+def shared_object_store() -> ObjectStore | None:
+    if not _SHARED_STORE or (_SHARED_STORE[0] is not None and _SHARED_STORE[0].url != os.environ.get("TRI_OBJECT_STORE", "").strip()) or (_SHARED_STORE[0] is None and os.environ.get("TRI_OBJECT_STORE", "").strip()):
+        _SHARED_STORE[:] = [object_store_from_env()]
+    return _SHARED_STORE[0]
+
+
+def home_file(value: str) -> Path:
+    """Resolve a file recorded by the store: absolute (single node), or relative to
+    TRI_HOME (backups, and every node of a store with shared object storage, where
+    a local miss is fetched from TRI_OBJECT_STORE under the same relative key)."""
     path = Path(value)
     if path.is_absolute():
         return path
-    return Path(os.environ.get("TRI_HOME", ".tri")).resolve() / path
+    local = Path(os.environ.get("TRI_HOME", ".tri")).resolve() / path
+    if not local.exists():
+        shared = shared_object_store()
+        if shared is not None:
+            try:
+                data = shared.get(path.as_posix())
+            except ObjectStoreError as exc:
+                raise TriError("object_store_unavailable", f"Shared object storage could not return {path.as_posix()}: {exc}", retryable=exc.retryable) from None
+            if data is not None:
+                local.parent.mkdir(parents=True, exist_ok=True)
+                tmp = local.with_name(f".{local.name}.{uuid.uuid4().hex}.tmp")
+                tmp.write_bytes(data)
+                os.replace(tmp, local)
+    return local
+
+
+def shared_record_path(store: "Store", path: Path, data: bytes) -> str:
+    """Record a new artifact or secret file: absolute on a single node, relative
+    and uploaded when the store shares object storage between nodes."""
+    if store.object_store is None:
+        return str(path)
+    relative = path.relative_to(store.home).as_posix()
+    store.share_object(relative, data)
+    return relative
+
+
+def artifact_path(value: str) -> Path:
+    """Artifact files are recorded absolute; backups and shared stores record them relative to the home."""
+    return home_file(value)
 
 
 def artifact_data(row: sqlite3.Row, *, include_text: bool = False) -> dict[str, Any]:
@@ -3774,7 +3940,7 @@ def require_active_materialization_lease(store: Store, lease: sqlite3.Row) -> No
 def read_secret_value(store: Store, secret: sqlite3.Row) -> bytes:
     if secret["revoked_at"]:
         raise TriError("policy_denied", "Secret has been revoked.", object=secret["id"])
-    return Path(secret["value_path"]).read_bytes()
+    return home_file(secret["value_path"]).read_bytes()
 
 
 def generated_config_path(profile: str) -> str:
@@ -3965,7 +4131,7 @@ def secret_redactions_for_leases(store: Store, lease_ids: list[str], *, workspac
         if workspace_id and lease["workspace_id"] != workspace_id:
             raise TriError("policy_denied", "Secret lease does not belong to this check workspace.", object=lease_id, workspace=workspace_id)
         secret = store.get_secret(lease["secret_id"])
-        value_path = Path(secret["value_path"])
+        value_path = home_file(secret["value_path"])
         if not value_path.exists():
             raise TriError("path_not_found", "Secret value is not available for log redaction.", object=secret["id"], lease=lease_id)
         redactions.append((lease_id, value_path.read_bytes()))
@@ -6640,8 +6806,8 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
             INSERT INTO materialization_leases (
               id, workspace_id, actor, path, mounted_snapshot_id, last_sync_snapshot_id,
               ignored_paths_json, generated_artifacts_json, status, expires_at, created_at, revoked_at,
-              backend, degraded, baseline_path, ttl_seconds, env_keys_json, root_identity, sparse_paths_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              backend, degraded, baseline_path, ttl_seconds, env_keys_json, root_identity, sparse_paths_json, node_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lease_id,
@@ -6663,6 +6829,7 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
                 dumps([record["key"] for record in env_plan.records if record.get("key")]),
                 directory_identity(root),
                 dumps(sparse) if sparse else None,
+                store.node_id,
             ),
         )
         evt = store.create_event(
@@ -6898,10 +7065,10 @@ class RunLease:
         with store.conn:
             store.conn.execute(
                 """
-                INSERT INTO disk_leases (id, kind, path, workspace_id, check_id, before_snapshot_id, baseline_path, holder_lock, backend, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?)
+                INSERT INTO disk_leases (id, kind, path, workspace_id, check_id, before_snapshot_id, baseline_path, holder_lock, backend, status, created_at, node_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)
                 """,
-                (self.id, kind, str(self.work), workspace_id, key, before_snapshot, str(self.baseline_path), str(self.dir / ".holder.lock"), utcnow()),
+                (self.id, kind, str(self.work), workspace_id, key, before_snapshot, str(self.baseline_path), str(self.dir / ".holder.lock"), utcnow(), store.node_id),
             )
 
     def record_envs(self, plan: "EnvPlan") -> None:
@@ -7385,7 +7552,7 @@ def _reap_leases_locked(
 
     budget = limit if limit is not None else 1 << 30
     if workspace_id is None:
-        for disk in store.rows("SELECT * FROM disk_leases WHERE status = 'active' ORDER BY created_at"):
+        for disk in store.rows("SELECT * FROM disk_leases WHERE status = 'active' AND (node_id IS NULL OR node_id = ?) ORDER BY created_at", (store.node_id,)):
             if budget <= 0:
                 break
             budget -= 1
@@ -7393,7 +7560,10 @@ def _reap_leases_locked(
     now = utcnow()
     placeholders = ",".join("?" for _ in REAPABLE_MOUNT_STATUSES)
     params: tuple[Any, ...] = REAPABLE_MOUNT_STATUSES
-    sql = f"SELECT * FROM materialization_leases WHERE status IN ({placeholders}) AND reaped_at IS NULL"
+    # Directories live on the node that made them: only that node can tell
+    # whether one is still in use, so each node reaps its own leases.
+    sql = f"SELECT * FROM materialization_leases WHERE status IN ({placeholders}) AND reaped_at IS NULL AND (node_id IS NULL OR node_id = ?)"
+    params = (*params, store.node_id)
     if workspace_id is not None:
         sql += " AND workspace_id = ?"
         params = (*params, workspace_id)
@@ -7408,7 +7578,7 @@ def _reap_leases_locked(
         attempt(lambda mount=mount, why=why: reap_mount_lease(store, mount, actor=actor, reason=why), mount["id"])
     if workspace_id is None and force_lease is None:
         report["swept"] = sweep_orphan_dirs(store)
-    store_meta_set(store, "last_reap_at", utcnow())
+    store_meta_set(store, reap_marker_key(store), utcnow())
     return report
 
 
@@ -7455,17 +7625,22 @@ def sweep_orphan_dirs(store: Store) -> list[str]:
     return swept
 
 
+def reap_marker_key(store: Store) -> str:
+    """Each node reaps its own directories, so a shared store tracks cadence per node."""
+    return "last_reap_at" if store.backend == "sqlite" else f"last_reap_at:{store.node_id}"
+
+
 def maybe_auto_reap(store: Store) -> None:
     if os.environ.get("TRI_AUTO_REAP", "1") == "0":
         return
-    last = store_meta_get(store, "last_reap_at")
+    last = store_meta_get(store, reap_marker_key(store))
     if last:
         try:
             if (datetime.now(timezone.utc) - parse_utc(last)).total_seconds() < AUTO_REAP_INTERVAL_SECONDS:
                 return
         except ValueError:
             pass
-    store_meta_set(store, "last_reap_at", utcnow())
+    store_meta_set(store, reap_marker_key(store), utcnow())
     try:
         reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
         evict_caches(store)
@@ -7509,7 +7684,7 @@ def lease_status_summary(store: Store) -> dict[str, Any]:
         "run_dirs_by_status": runs,
         "needs_attention": attention,
         "grandfathered": grandfathered,
-        "last_reap_at": store_meta_get(store, "last_reap_at"),
+        "last_reap_at": store_meta_get(store, reap_marker_key(store)),
         "last_reap_error": store_meta_get(store, "last_reap_error"),
     }
 
@@ -8150,11 +8325,30 @@ def gc_plan_summary(store: Store, computed: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def delete_purged_objects(store: Store, hashes: list[str]) -> None:
+    """Delete purged blobs from shared object storage after the purge commits.
+
+    Runs under the write lock and re-checks each row: a writer on any node that
+    re-adds the content clears purged_at and re-uploads under the same lock, so
+    it either restored the blob first (and we keep it) or uploads after us."""
+    assert store.object_store is not None
+    store.conn.execute("BEGIN IMMEDIATE")
+    try:
+        for digest in hashes:
+            row = store.conn.execute("SELECT purged_at FROM blobs WHERE hash = ?", (digest,)).fetchone()
+            if row is not None and row["purged_at"]:
+                store.object_store.delete(f"blobs/{digest}")
+        store.conn.commit()
+    except BaseException:
+        store.conn.rollback()
+        raise
+
+
 def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _after_mark: Callable[[], None] | None = None) -> dict[str, Any]:
     """Purge unreachable content. Runs in one write transaction so writers that
     dedup against a candidate either finish first (and protect it) or wait and
     then restore it."""
-    gc_lock = FileLock(store.home / "gc.lock")
+    gc_lock = store.named_lock("gc")
     if not gc_lock.acquire(exclusive=True, blocking=False):
         gc_lock.close()
         raise TriError("gc_in_progress", "Another garbage collection is running.", retryable=True)
@@ -8222,6 +8416,8 @@ def gc_apply(store: Store, *, retention_days: float, grace_seconds: float, _afte
                 base = store.home / "bases" / name
                 if base.exists():
                     remove_tree(base)
+        if store.object_store is not None and purged_hashes:
+            delete_purged_objects(store, purged_hashes)
         return {"blobs": purged_blobs, "trees": purged_trees, "freed_bytes": freed}
     finally:
         gc_lock.close()
@@ -11225,7 +11421,7 @@ def write_artifact(store: Store, kind: str, name: str, data: bytes, *, labels: l
     path.write_bytes(data)
     store.conn.execute(
         "INSERT INTO artifacts (id, kind, path, size, labels_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (artifact_id, kind, str(path), len(data), dumps(labels), utcnow()),
+        (artifact_id, kind, shared_record_path(store, path, data), len(data), dumps(labels), utcnow()),
     )
     return artifact_id
 
@@ -12194,13 +12390,19 @@ def mirror_sync_with_retry(store: Store, mirror_id: str, *, actor: str, retries:
     attempt = 0
     while True:
         attempt += 1
-        mirror = store.row("SELECT * FROM mirrors WHERE id = ?", (mirror_id,))
+        # One sync per mirror at a time, on every node serving the store: two
+        # syncs would race on the synced pair and could push the same work twice.
+        lock = store.named_lock(f"mirror-{mirror_id}")
+        lock.acquire(exclusive=True)
         try:
+            mirror = store.row("SELECT * FROM mirrors WHERE id = ?", (mirror_id,))
             return mirror_sync_once(store, mirror, actor=actor), attempt
         except TriError as exc:
             if not exc.diagnostic.get("retryable") or attempt > retries:
                 raise
-            time.sleep(min(0.1 * attempt, 1.0))
+        finally:
+            lock.close()
+        time.sleep(min(0.1 * attempt, 1.0))
 
 
 def cmd_mirror_add(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -15423,7 +15625,7 @@ def cmd_secrets_put(store: Store, args: argparse.Namespace, command: list[str], 
     with store.conn:
         store.conn.execute(
             "INSERT INTO secret_refs (id, project_id, name, provider, value_path, fingerprint, scope_json, created_by, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (secret_id, project["id"], args.name, "local_file", str(secret_path), fingerprint, dumps(args.scope or ["workspace"]), args.actor, utcnow(), None),
+            (secret_id, project["id"], args.name, "local_file", shared_record_path(store, secret_path, value), fingerprint, dumps(args.scope or ["workspace"]), args.actor, utcnow(), None),
         )
         evt = store.create_event(
             kind="secret.created",
@@ -15693,7 +15895,8 @@ def cmd_doctor(store: Store, args: argparse.Namespace, command: list[str], start
         )
     data = {
         "home": str(store.home),
-        "db": str(store.db_path),
+        "db": str(store.db_path) if store.backend == "sqlite" else pgstore.redact_dsn(store.database_url or ""),
+        "storage": storage_summary(store),
         "schema_version": SCHEMA_VERSION,
         "counts": counts,
         "git_available": shutil.which("git") is not None,
@@ -16189,6 +16392,17 @@ def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
     }
 
 
+def storage_summary(store: Store) -> dict[str, Any]:
+    """Where this node keeps metadata and content (credentials redacted)."""
+    if store.backend == "postgres":
+        assert store.database_url
+        metadata: dict[str, Any] = {"backend": "postgres", "url": pgstore.redact_dsn(store.database_url), "schema": store.schema, "shared": True}
+    else:
+        metadata = {"backend": "sqlite", "path": str(store.db_path), "shared": False}
+    objects = store.object_store.describe() if store.object_store is not None else {"kind": "local", "path": str(store.blobs)}
+    return {"metadata": metadata, "objects": objects, "multi_node": store.backend == "postgres" and store.object_store is not None}
+
+
 def api_server_data(host: str, port: int) -> dict[str, Any]:
     return {"host": host, "port": port, "endpoints": api_endpoint_catalog(host, port)}
 
@@ -16534,9 +16748,19 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         if parsed.path in ("/health", "/v0/health"):
-            store = Store(pack_on_close=False)
             try:
-                data = {"status": "ok", "home": None if self.server.authority else str(store.home), "schema_version": SCHEMA_VERSION, "auth": "bearer" if self.server.authority else "none"}
+                store = Store(pack_on_close=False)
+            except sqlite3.Error as exc:
+                diagnostic = TriError("store_unavailable", f"The metadata store is unavailable: {exc}", retryable=True).diagnostic
+                self.write_json(503, envelope("tri.error", ["tri", "serve", "health"], ok=False, actor="actor_local", start=start, diagnostics=[diagnostic]))
+                return
+            try:
+                store.row("SELECT 1 AS ok", ())
+                data = {"status": "ok", "home": None if self.server.authority else str(store.home), "schema_version": SCHEMA_VERSION, "auth": "bearer" if self.server.authority else "none", "storage": storage_summary(store)}
+            except sqlite3.Error as exc:
+                diagnostic = TriError("store_unavailable", f"The metadata store is unavailable: {exc}", retryable=True).diagnostic
+                self.write_json(503, envelope("tri.error", ["tri", "serve", "health"], ok=False, actor="actor_local", start=start, diagnostics=[diagnostic]))
+                return
             finally:
                 store.close()
             self.write_json(200, envelope("tri.api.health", ["tri", "serve", "health"], actor=self.actor_from_request() or "actor_local", start=start, data=data))
@@ -16591,7 +16815,10 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise TriError("invalid_command", "Command request must be a JSON object.")
             if parsed.path == "/v0/batch":
-                store = Store(pack_on_close=False)
+                try:
+                    store = Store(pack_on_close=False)
+                except sqlite3.Error as exc:
+                    raise TriError("store_unavailable", f"The metadata store is unavailable: {exc}", retryable=True) from None
                 try:
                     actor = self.actor_from_request(payload) or "actor_local"
                     data, ok = run_batch_payload(store, payload, default_actor=actor, start=start, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed)
@@ -16619,10 +16846,11 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             if argv and argv[0] in API_BLOCKED_COMMANDS:
                 raise TriError("invalid_command", "This command is not available through the API.", object=argv[0])
             output, _ = execute_argv(argv, actor=self.actor_from_request(payload), start=start, pack_on_close=False, pinned_actor=self.pinned_actor, server_paths_allowed=self.server_paths_allowed, forward_remote=False)
-            self.write_json(200, output)
+            unavailable = not output.get("ok") and any(d.get("code") == "store_unavailable" for d in output.get("diagnostics", []))
+            self.write_json(503 if unavailable else 200, output)
         except TriError as exc:
             self.write_json(
-                200,
+                503 if exc.diagnostic["code"] == "store_unavailable" else 200,
                 envelope(
                     "tri.error",
                     ["tri", "serve", "request"],
@@ -16727,6 +16955,47 @@ def copy_missing_files(source: Path, dest: Path) -> tuple[int, int]:
     return copied, bytes_copied
 
 
+def sqlite_schema(conn: sqlite3.Connection) -> None:
+    """Create the store schema in a bare SQLite connection."""
+    shell = Store.__new__(Store)
+    conn.row_factory = sqlite3.Row
+    shell.conn = conn
+    Store.init_db(shell)
+    conn.row_factory = None
+
+
+def copy_shared_objects(store: Store, db: Path, dest: Path) -> dict[str, int]:
+    """Fetch content this node never cached from shared object storage."""
+    assert store.object_store is not None
+    conn = sqlite3.connect(db)
+    files = 0
+    size = 0
+    try:
+        wanted = [(f"blobs/{digest}", dest / "objects" / "blobs" / digest[:2] / digest) for (digest,) in conn.execute("SELECT hash FROM blobs WHERE purged_at IS NULL")]
+        for (path,) in conn.execute("SELECT path FROM artifacts"):
+            if isinstance(path, str) and not Path(path).is_absolute():
+                wanted.append((path, dest / path))
+        for (path,) in conn.execute("SELECT value_path FROM secret_refs"):
+            if isinstance(path, str) and not Path(path).is_absolute():
+                wanted.append((path, dest / path))
+    finally:
+        conn.close()
+    for key, local in wanted:
+        if local.exists():
+            continue
+        try:
+            data = store.object_store.get(key)
+        except ObjectStoreError as exc:
+            raise TriError("object_store_unavailable", f"Shared object storage could not return {key}: {exc}", retryable=exc.retryable) from None
+        if data is None:
+            continue
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(data)
+        files += 1
+        size += len(data)
+    return {"files": files, "bytes": size}
+
+
 def backup_once(store: Store, dest: Path) -> dict[str, Any]:
     started = time.time()
     dest.mkdir(parents=True, exist_ok=True)
@@ -16734,7 +17003,13 @@ def backup_once(store: Store, dest: Path) -> dict[str, Any]:
     tmp_db = dest / f".tri.sqlite3.{uuid.uuid4().hex}.tmp"
     target = sqlite3.connect(tmp_db)
     try:
-        store.conn.backup(target)
+        if store.backend == "postgres":
+            # A backup is always a complete single-node home: restoring needs no database server.
+            assert store.database_url
+            sqlite_schema(target)
+            pgstore.copy_postgres_to_sqlite(store.database_url, store.schema, target)
+        else:
+            store.conn.backup(target)
         target.execute("UPDATE blobs SET object_path = substr(hash, 1, 2) || '/' || hash")
         artifacts_root = str(store.artifacts) + os.sep
         rows = target.execute("SELECT id, path FROM artifacts").fetchall()
@@ -16752,6 +17027,8 @@ def backup_once(store: Store, dest: Path) -> dict[str, Any]:
     for name in BACKUP_DIRS:
         files, size = copy_missing_files(store.home / name, dest / name)
         copied[name] = {"files": files, "bytes": size}
+    if store.object_store is not None:
+        copied["shared"] = copy_shared_objects(store, tmp_db.with_name("tri.sqlite3"), dest)
     secrets_dir = dest / "secrets"
     if secrets_dir.is_dir() and os.name != "nt":
         for dirpath, _, filenames in os.walk(secrets_dir):
@@ -16761,6 +17038,75 @@ def backup_once(store: Store, dest: Path) -> dict[str, Any]:
     manifest = {"created_at": utcnow(), "source": str(store.home), "schema_version": SCHEMA_VERSION, "counts": counts, "copied": copied, "seconds": round(time.time() - started, 3)}
     (dest / "BACKUP.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return manifest
+
+
+def cmd_storage_status(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    return envelope("tri.storage.status", command, actor=args.actor, start=start, data={**storage_summary(store), "node_id": store.node_id})
+
+
+def cmd_storage_migrate(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="storage.migrate", object_id=pgstore.redact_dsn(args.database), message="Only maintainers can migrate the store.")
+    if store.backend != "sqlite":
+        raise TriError("invalid_command", "This store already uses PostgreSQL; migrate from the SQLite home (unset TRI_DATABASE_URL).")
+    schema = args.schema or pgstore.schema_for(str(store.home))
+    objects = object_store_from_url(args.objects) if args.objects else None
+    pgstore.ensure_schema(args.database, schema)
+    target = pgstore.PgConnection(args.database, schema)
+    try:
+        shell = Store.__new__(Store)
+        shell.conn = target
+        Store.init_db(shell)
+        existing = target.execute("SELECT COUNT(*) AS count FROM projects").fetchone()["count"]
+        if existing and not args.replace:
+            raise TriError("invalid_command", "The target schema already holds a store; pass --replace to overwrite it.", schema=schema, projects=existing)
+    finally:
+        target.close()
+    uploaded = {"blobs": 0, "artifacts": 0, "secrets": 0, "bytes": 0}
+    store.conn.commit()
+    store.conn.execute("BEGIN")  # one read snapshot of the source for the whole copy
+    try:
+        if objects is not None:
+            # Content first: every row copied below must find its object.
+            for row in store.rows("SELECT * FROM blobs WHERE purged_at IS NULL"):
+                path = blob_object_path(store, row)
+                if path.exists():
+                    data = path.read_bytes()
+                    objects.put(f"blobs/{row['hash']}", data)
+                    uploaded["blobs"] += 1
+                    uploaded["bytes"] += len(data)
+            for kind, sql, column in (("artifacts", "SELECT path FROM artifacts", "path"), ("secrets", "SELECT value_path FROM secret_refs", "value_path")):
+                for row in store.rows(sql):
+                    local = home_file(row[column])
+                    if local.exists() and store.home in local.parents:
+                        data = local.read_bytes()
+                        objects.put(local.relative_to(store.home).as_posix(), data)
+                        uploaded[kind] += 1
+                        uploaded["bytes"] += len(data)
+        tables = pgstore.copy_sqlite_to_postgres(store.conn, args.database, schema)
+    finally:
+        store.conn.rollback()
+    target = pgstore.PgConnection(args.database, schema)
+    try:
+        with target:
+            if objects is not None:
+                # Shared stores record files relative to each node's home.
+                prefix = str(store.home) + os.sep
+                for table, column in (("artifacts", "path"), ("secret_refs", "value_path")):
+                    for row in target.execute(f"SELECT id, {column} FROM {table}").fetchall():
+                        value = row[column]
+                        if isinstance(value, str) and value.startswith(prefix):
+                            target.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?", (value[len(prefix):].replace(os.sep, "/"), row["id"]))
+            target.execute("UPDATE blobs SET object_path = ''")
+            target.execute(
+                "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("schema_fingerprint", store_schema_fingerprint()),
+            )
+    finally:
+        target.close()
+    with store.conn:
+        evt = store.create_event(kind="storage.migrated", actor=args.actor, object_refs={"database": pgstore.redact_dsn(args.database), "schema": schema, "objects": args.objects})
+    data = {"database": pgstore.redact_dsn(args.database), "schema": schema, "tables": tables, "objects": {"url": args.objects, **uploaded} if objects is not None else None}
+    return envelope("tri.storage.migrate", command, actor=args.actor, start=start, events=[evt], data=data)
 
 
 def cmd_backup_create(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -17314,6 +17660,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_backup.add_argument("--deep", action="store_true")
     p_backup.set_defaults(func=cmd_backup_verify)
 
+    p = sub.add_parser("storage")
+    storage_sub = p.add_subparsers(dest="storage_cmd", required=True)
+    p_storage = storage_sub.add_parser("status")
+    p_storage.set_defaults(func=cmd_storage_status)
+    p_storage = storage_sub.add_parser("migrate")
+    p_storage.add_argument("--database", required=True)
+    p_storage.add_argument("--schema")
+    p_storage.add_argument("--objects")
+    p_storage.add_argument("--replace", action="store_true")
+    p_storage.set_defaults(func=cmd_storage_migrate)
+
     p = sub.add_parser("cache")
     cache_sub = p.add_subparsers(dest="cache_cmd", required=True)
     p_cache = cache_sub.add_parser("serve")
@@ -17754,7 +18111,7 @@ def get_parser() -> argparse.ArgumentParser:
 
 
 # Commands that start servers or manage credentials never run on behalf of a remote client.
-API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache", "backup"})
+API_BLOCKED_COMMANDS = frozenset({"serve", "mcp", "auth", "cache", "backup", "storage"})
 
 
 def raise_actor_mismatch(claimed: str | None, authenticated: str) -> None:
@@ -17862,7 +18219,11 @@ def execute_argv(
             require_no_server_paths(args, actor=getattr(args, "actor", effective_actor))
         except TriError as exc:
             return envelope("tri.error", ["tri", *argv], ok=False, actor=getattr(args, "actor", effective_actor), diagnostics=[exc.diagnostic], start=start), 1
-    active_store = store or Store(pack_on_close=pack_on_close)
+    try:
+        active_store = store or Store(pack_on_close=pack_on_close)
+    except sqlite3.Error as exc:
+        diagnostic = TriError("store_unavailable", f"The metadata store is unavailable: {exc}", retryable=True).diagnostic
+        return envelope("tri.error", ["tri", *argv], ok=False, actor=getattr(args, "actor", effective_actor), diagnostics=[diagnostic], start=start), 1
     try:
         output = args.func(active_store, args, ["tri", *parse_argv], start)
         return output, 0 if output.get("ok", False) else 1

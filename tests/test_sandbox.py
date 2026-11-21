@@ -32,7 +32,7 @@ def attempt(name, fn):
         results[name] = "blocked"
 attempt("read_store", lambda: open(sys.argv[1], "rb").read(1))
 try:
-    results["list_home"] = "leaked" if "tri.sqlite3" in os.listdir(sys.argv[2]) else "hidden"
+    results["list_home"] = "leaked" if "canary.txt" in os.listdir(sys.argv[2]) else "hidden"
 except Exception:
     results["list_home"] = "hidden"
 attempt("write_outside", lambda: open(sys.argv[3], "w").write("x"))
@@ -91,7 +91,9 @@ class SandboxTests(unittest.TestCase):
     def probe(self, *flags: str) -> tuple[dict, dict[str, str]]:
         port = self.listener()
         outside = self.root / "outside.txt"
-        check = self.tri("run", self.ws, *flags, "--", sys.executable, "-c", PROBE_SCRIPT, str(self.home / "tri.sqlite3"), str(self.home), str(outside), str(port))["data"]
+        canary = self.home / "canary.txt"  # a store file, whatever the metadata backend
+        canary.write_bytes(b"store-only\n")
+        check = self.tri("run", self.ws, *flags, "--", sys.executable, "-c", PROBE_SCRIPT, str(canary), str(self.home), str(outside), str(port))["data"]
         return check, dict(eval(self.read("probe.txt") or "[]"))  # noqa: S307 - written by the probe above
 
     def test_runs_are_unsandboxed_by_default_on_a_workstation(self) -> None:

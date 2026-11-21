@@ -101,6 +101,53 @@ jobs:
       - name: Bounded-disk tests on reflink clones
         run: python -m unittest discover -s tests -p "test_bounded_disk.py" -v
 
+  replicated-storage:
+    name: replicated storage (postgres + s3)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tri
+          POSTGRES_PASSWORD: tri-ci
+          POSTGRES_DB: tri
+          POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tri"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      TRI_TEST_DATABASE_URL: postgres://tri:tri-ci@127.0.0.1:5432/tri?sslmode=disable
+      TRI_OBJECT_STORE_ENDPOINT: http://127.0.0.1:9000
+      AWS_ACCESS_KEY_ID: triminio
+      AWS_SECRET_ACCESS_KEY: triminio-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Configure git identity for fixture repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name "Tri CI"
+      - name: Start MinIO (S3-compatible object storage) and create a bucket
+        run: |
+          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=triminio -e MINIO_ROOT_PASSWORD=triminio-secret minio/minio server /data
+          for i in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+          docker run --rm --network host --entrypoint sh minio/mc -c "mc alias set local http://127.0.0.1:9000 triminio triminio-secret && mc mb local/tri-ci"
+      - name: Multi-node tests (shared PostgreSQL metadata; file and S3 object storage; failover)
+        env:
+          TRI_TEST_S3_URL: s3://tri-ci/tests
+        run: python -m unittest discover -s tests -p test_replicated_storage.py -v
+      - name: Full suite with PostgreSQL metadata and S3 object storage
+        env:
+          TRI_DATABASE_URL: postgres://tri:tri-ci@127.0.0.1:5432/tri?sslmode=disable
+          TRI_OBJECT_STORE: s3://tri-ci/suite
+        run: python -m unittest discover -s tests -v
+
   windows-refs:
     name: windows ReFS block clones
     runs-on: windows-latest

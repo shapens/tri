@@ -1021,6 +1021,7 @@ class ReviewFixTests(TriHarness):
         self.tri("files", "write", ws, "unique.txt", "--text", text)
         self.tri("workspace", "discard", ws)
 
+    @unittest.skipIf(os.environ.get("TRI_DATABASE_URL"), "exercises SQLite file packing and raw SQLite connections")
     def test_gc_mark_does_not_hold_the_write_lock(self) -> None:
         import sqlite3
         from tri.cli import Store, gc_apply
@@ -1297,6 +1298,7 @@ class CleanupGapTests(TriHarness):
         self.assertEqual(refused["diagnostics"][0]["code"], "invalid_command")
         self.tri("gc", "--apply", "--grace-seconds", "5", "--unsafe-no-grace")
 
+    @unittest.skipIf(os.environ.get("TRI_DATABASE_URL"), "exercises SQLite file packing and raw SQLite connections")
     def test_put_tree_batches_node_writes(self) -> None:
         from tri.cli import Store
 
@@ -1388,6 +1390,7 @@ class ServeAndDoctorTests(TriHarness):
 
 
 class StoreOpenConcurrencyTests(unittest.TestCase):
+    @unittest.skipIf(os.environ.get("TRI_DATABASE_URL"), "exercises SQLite file packing and raw SQLite connections")
     def test_opening_a_packed_store_never_waits_for_long_lived_stores(self) -> None:
         import subprocess
 

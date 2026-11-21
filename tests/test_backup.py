@@ -31,6 +31,10 @@ class BackupTests(unittest.TestCase):
         env = {**os.environ, "TRI_HOME": str(home or self.home), "TRI_AUTO_REAP": "0"}
         for key in ("TRI_REMOTE", "TRI_ACTOR"):
             env.pop(key, None)
+        if home is not None:
+            # A backup is a complete single-node home: it opens without a database server.
+            for key in ("TRI_DATABASE_URL", "TRI_DATABASE_SCHEMA", "TRI_OBJECT_STORE"):
+                env.pop(key, None)
         result = subprocess.run([sys.executable, "-m", "tri", *args], cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = json.loads(result.stdout)
         self.assertEqual(output["ok"], ok, output)
