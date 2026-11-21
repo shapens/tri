@@ -12,7 +12,7 @@ The goal is to be the best agent-native source control. The field as of 2026-11-
 - Anthropic's internal Scion replaced Git for one agent-scale monorepo: server-side changesets, no full clones, server-side blame and merge bases, no global merge lock. Its access control is the thin part of its public write-up.
 - Tri's wedge is the live record itself: isolated workspaces, API-first mutations, pre-commit provenance, structured checks, object-level policy, secret leases, and reviewable changesets before any Git or GitHub export.
 
-`tri.md` holds the full comparison, the gaps that remain (server-authoritative storage, sparse checkouts, sandboxed runners), and the scorecard Tri has to win.
+`tri.md` holds the full comparison, the gaps that remain (server-authoritative storage, virtual checkouts, sandboxed runners), and the scorecard Tri has to win.
 
 The marginal advantage to prove is small and specific: an agent should be able to mutate, check, review, protect, and export work through stable Tri objects without first editing a shared working directory, assigning changes to a branch, or treating a GitHub pull request as the live coordination surface.
 
@@ -96,6 +96,7 @@ claude mcp add tri -- env TRI_HOME=/tmp/tri-home tri --actor agent:claude mcp
 - history queries without a checkout: path log, line blame with snapshot/actor/changeset provenance, and snapshot merge bases, all stopping at snapshots the actor cannot read
 - bearer-token actors for `tri serve` (`tri auth issue|list|revoke`, `--auth-file`), with actor pinning across HTTP routes and batches and a refusal to serve beyond loopback without tokens
 - MCP stdio server (`tri mcp`) exposing `tri` and `tri_batch` tools pinned to one actor
+- partial checkouts for large trees (`tri run --paths <glob>`, `tri workspace mount --paths <glob>`), with run directories deleted in the background and new base directories derived from the previous base
 - two-way Git mirror (`tri mirror add|sync|inspect|list|remove`): Git pushes land as attributed snapshots, Tri merges land as Git commits titled by changeset, both-sides edits line-merge into a merge commit, and private packages and secret-like paths never leave Tri
 - review object creation and inspection with task context, changeset summary, checks, artifacts, policy findings, attached policy/check evidence, visibility impact, reviewer state, threaded comments, and export preview
 - anchored review comments, direct review-action inspection, replies, thread resolution, requested changes, assigned-reviewer approvals, risk markers, explicit policy-finding/check-summary attachments, explicit review close, and request-agent-pass workspaces

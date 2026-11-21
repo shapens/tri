@@ -542,10 +542,18 @@ def load_materialization(path: Path, baseline_file: Path) -> Materialization:
 
 
 class Materializer:
-    def __init__(self, home: Path, cache: CheckoutCache, *, read_blob: Callable[[str], bytes]) -> None:
+    def __init__(
+        self,
+        home: Path,
+        cache: CheckoutCache,
+        *,
+        read_blob: Callable[[str], bytes],
+        load_tree: Callable[[str], dict[str, dict[str, Any]]] | None = None,
+    ) -> None:
         self.home = Path(home)
         self.cache = cache
         self.read_blob = read_blob
+        self.load_tree = load_tree
         self.bases = self.home / "bases"
 
     # -- capability -------------------------------------------------------
@@ -629,16 +637,45 @@ class Materializer:
             return final
         self.bases.mkdir(parents=True, exist_ok=True)
         tmp = self.bases / f".{tree_id}.{uuid.uuid4().hex}.tmp"
-        tmp.mkdir()
         try:
             skipped: list[str] = []
-            for path, entry in entries.items():
-                self._place(tmp, path, entry, method, skipped)
+            if not self._derive_base(tmp, entries, method, skipped):
+                tmp.mkdir()
+                for path, entry in entries.items():
+                    self._place(tmp, path, entry, method, skipped)
             os.rename(tmp, final)
         except OSError:
             remove_tree(tmp)
             return final if final.is_dir() else None
         return final
+
+    def _derive_base(self, tmp: Path, entries: dict[str, dict[str, Any]], method: str, skipped: list[str]) -> bool:
+        """Build a base by cloning the most recently used one and applying the
+        difference, so a target that moved by one merge costs that merge's files
+        instead of the whole tree. Returns False when no donor base is usable."""
+        if self.load_tree is None:
+            return False
+        try:
+            candidates = sorted(
+                (child for child in self.bases.iterdir() if child.is_dir() and not child.name.startswith(".")),
+                key=lambda child: child.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return False
+        for donor in candidates[:3]:
+            try:
+                donor_entries = self.load_tree(donor.name)
+            except Exception:
+                continue
+            if not clone_dir(donor, tmp):
+                continue
+            try:
+                self._apply_delta(tmp, donor_entries, entries, method, skipped)
+                return True
+            except OSError:
+                remove_tree(tmp)
+        return False
 
     def _remove_path(self, root: Path, path: str) -> None:
         target = root / path

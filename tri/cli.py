@@ -110,7 +110,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "workspace-inspect", "usage": "tri workspace inspect <workspace>", "schema": "tri.workspace.inspect", "description": "Inspect workspace state."},
     {"name": "workspace-update", "usage": "tri workspace update <workspace> --from <target> [--expect-head <snapshot>]", "schema": "tri.workspace.update", "description": "Merge a workspace onto the current target snapshot."},
     {"name": "workspace-snapshot", "usage": "tri workspace snapshot <workspace> [--expect-head <snapshot>]", "schema": "tri.workspace.snapshot", "description": "Create an explicit workspace checkpoint snapshot."},
-    {"name": "workspace-mount", "usage": "tri workspace mount <workspace> <path> [--ttl-seconds <n> | --no-ttl] [--ignore-path <glob>] [--no-env] [--env-link]", "schema": "tri.workspace.mount", "description": "Materialize a workspace into a local directory and create a materialization lease."},
+    {"name": "workspace-mount", "usage": "tri workspace mount <workspace> <path> [--paths <glob>] [--ttl-seconds <n> | --no-ttl] [--ignore-path <glob>] [--no-env] [--env-link]", "schema": "tri.workspace.mount", "description": "Materialize a workspace into a local directory and create a materialization lease. --paths mounts only matching files; sync keeps the rest of the tree."},
     {"name": "workspace-sync", "usage": "tri workspace sync <workspace> [--lease <lease>]", "schema": "tri.workspace.sync", "description": "Import mounted filesystem edits back into Tri through a materialization lease."},
     {"name": "workspace-leases", "usage": "tri workspace leases <workspace>", "schema": "tri.workspace.materialization_leases", "description": "List materialization leases for a workspace."},
     {"name": "workspace-lease-inspect", "usage": "tri workspace lease-inspect <lease>", "schema": "tri.workspace.materialization_lease", "description": "Inspect a materialization lease."},
@@ -141,7 +141,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "operations-inspect", "usage": "tri operations inspect <operation>", "schema": "tri.operation.inspect", "description": "Inspect one policy-gated operation provenance record."},
     {"name": "search", "usage": "tri search <project> <query> [--scope <scope>] [--glob <glob>] [--include-history] [--limit <n>] [--case-sensitive]", "schema": "tri.search", "description": "Search authorized project work with provenance across files and Tri objects."},
     {"name": "diff", "usage": "tri diff <workspace-or-changeset> | tri diff <base-snapshot> <head-snapshot> [--mode summary|files|patch|machine] [--path <glob>]", "schema": "tri.diff", "description": "Diff workspace, changeset, or explicit snapshots."},
-    {"name": "run", "usage": "tri run <workspace> [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run."},
+    {"name": "run", "usage": "tri run <workspace> [--paths <glob>] [--with-lease <lease>] [--assumption <text>] [--no-import-changes] [--no-env] -- <command>", "schema": "tri.check.inspect", "description": "Run a command as a structured check run. --paths lays out only matching files (a partial checkout); changes anywhere are still imported, and only files that were laid out can be deleted."},
     {"name": "checks-list", "usage": "tri checks list <workspace-or-changeset>", "schema": "tri.check.list", "description": "List check runs for a workspace or changeset."},
     {"name": "checks-inspect", "usage": "tri checks inspect <check>", "schema": "tri.check.inspect", "description": "Inspect one structured check run."},
     {"name": "checks-set-create", "usage": "tri checks set-create <project> <name> --required-check <cmd>", "schema": "tri.check_set.inspect", "description": "Create a reusable project required-check set."},
@@ -620,7 +620,7 @@ class Store:
     @property
     def materializer(self) -> Materializer:
         if self._materializer is None:
-            self._materializer = Materializer(self.home, CheckoutCache(self.checkout, self.read_blob), read_blob=self.read_blob)
+            self._materializer = Materializer(self.home, CheckoutCache(self.checkout, self.read_blob), read_blob=self.read_blob, load_tree=self.load_tree)
         return self._materializer
 
     def init_db(self) -> None:
@@ -1099,6 +1099,8 @@ class Store:
         disk_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(disk_leases)").fetchall()}
         if "env_keys_json" not in disk_columns:
             self.conn.execute("ALTER TABLE disk_leases ADD COLUMN env_keys_json TEXT NOT NULL DEFAULT '[]'")
+        if "sparse_paths_json" not in disk_columns:
+            self.conn.execute("ALTER TABLE disk_leases ADD COLUMN sparse_paths_json TEXT")
         lease_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(materialization_leases)").fetchall()}
         for column, ddl in (
             ("backend", "TEXT"),
@@ -1110,6 +1112,7 @@ class Store:
             ("salvage_id", "TEXT"),
             ("env_keys_json", "TEXT"),
             ("root_identity", "TEXT"),
+            ("sparse_paths_json", "TEXT"),
         ):
             if column not in lease_columns:
                 self.conn.execute(f"ALTER TABLE materialization_leases ADD COLUMN {column} {ddl}")
@@ -3001,6 +3004,17 @@ def materialize_for_run(
     return materialization
 
 
+def lease_sparse_paths(lease: sqlite3.Row) -> list[str]:
+    return loads(row_value(lease, "sparse_paths_json"), []) or []
+
+
+def sparse_entries(entries: dict[str, dict[str, Any]], patterns: list[str]) -> dict[str, dict[str, Any]]:
+    """The subset of a tree a partial checkout lays out; no patterns means the whole tree."""
+    if not patterns:
+        return entries
+    return {path: entry for path, entry in entries.items() if path_matches_filters(path, patterns)}
+
+
 def entries_after_scan(
     store: Store,
     root: Path,
@@ -3513,6 +3527,7 @@ def materialization_lease_data(row: sqlite3.Row) -> dict[str, Any]:
         "mounted_snapshot": row["mounted_snapshot_id"],
         "last_sync_snapshot": row["last_sync_snapshot_id"],
         "ignored_paths": loads(row["ignored_paths_json"], []),
+        "sparse_paths": lease_sparse_paths(row),
         "generated_artifacts": loads(row["generated_artifacts_json"], []),
         "expires_at": row["expires_at"],
         "created_at": row["created_at"],
@@ -6443,8 +6458,9 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
     expires_at = lease_expiry(ttl_seconds) if ttl_seconds else None
     claim_mount_path(store, root, actor=args.actor)
     lease_id = new_id("lease")
+    sparse = normalize_path_patterns(args.paths)
     env_plan = EnvPlan() if args.no_env else plan_environments(store, ws["project_id"], entries, actor=args.actor, workspace=ws, purpose="mount", env_link=args.env_link)
-    materialization = materialize_entries(store, entries, root, base_snapshot=ws["base_snapshot_id"], attachments=env_plan.attachments)
+    materialization = materialize_entries(store, sparse_entries(entries, sparse), root, base_snapshot=None if sparse else ws["base_snapshot_id"], attachments=env_plan.attachments)
     env_plan.finalize(materialization)
     if read_only:
         make_materialization_read_only(root)
@@ -6461,8 +6477,8 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
             INSERT INTO materialization_leases (
               id, workspace_id, actor, path, mounted_snapshot_id, last_sync_snapshot_id,
               ignored_paths_json, generated_artifacts_json, status, expires_at, created_at, revoked_at,
-              backend, degraded, baseline_path, ttl_seconds, env_keys_json, root_identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              backend, degraded, baseline_path, ttl_seconds, env_keys_json, root_identity, sparse_paths_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lease_id,
@@ -6483,6 +6499,7 @@ def cmd_workspace_mount(store: Store, args: argparse.Namespace, command: list[st
                 ttl_seconds,
                 dumps([record["key"] for record in env_plan.records if record.get("key")]),
                 directory_identity(root),
+                dumps(sparse) if sparse else None,
             ),
         )
         evt = store.create_event(
@@ -6586,6 +6603,70 @@ def store_meta_set(store: Store, key: str, value: str) -> None:
         store.conn.execute("INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
 
+def trash_dir(store: Store) -> Path:
+    return store.home / "trash"
+
+
+def discard_tree(store: Store, path: Path) -> None:
+    """Remove a released directory without making the caller wait for it.
+
+    Deleting a 50,000-file run directory costs seconds of unlink calls, so the
+    directory is renamed into the store's trash (atomic, same volume) and deleted
+    by a detached process. The reaper and `tri gc` empty whatever is left.
+    `TRI_DEFER_CLEANUP=0` deletes inline."""
+    path = Path(path)
+    if not path.exists():
+        return
+    if os.environ.get("TRI_DEFER_CLEANUP", "1") == "0":
+        remove_tree(path)
+        return
+    trash = trash_dir(store)
+    try:
+        trash.mkdir(parents=True, exist_ok=True)
+        doomed = trash / f"{int(time.time())}-{path.name}-{uuid.uuid4().hex[:8]}"
+        os.rename(path, doomed)
+    except OSError:
+        remove_tree(path)
+        return
+    spawn_tree_remover(doomed)
+
+
+def spawn_tree_remover(path: Path) -> None:
+    code = "import sys\nfrom pathlib import Path\nfrom tri.materialize import remove_tree\nremove_tree(Path(sys.argv[1]))\n"
+    kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    env = dict(os.environ)
+    package_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = package_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    try:
+        subprocess.Popen([sys.executable, "-c", code, str(path)], env=env, **kwargs)
+    except OSError:
+        remove_tree(path)
+
+
+def empty_trash(store: Store, *, min_age_seconds: float = 600.0) -> int:
+    """Delete trash entries left by interrupted background removals. Entries
+    younger than ``min_age_seconds`` are left to the remover that owns them."""
+    trash = trash_dir(store)
+    if not trash.is_dir():
+        return 0
+    removed = 0
+    now = time.time()
+    for child in list(trash.iterdir()):
+        stamp = child.name.split("-", 1)[0]
+        if stamp.isdigit() and now - int(stamp) < min_age_seconds:
+            continue
+        try:
+            remove_tree(child)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 class RunLease:
     """A directory Tri owns while a command runs, with a holder lock that the
     reaper probes to tell a live run from a crashed one."""
@@ -6616,6 +6697,11 @@ class RunLease:
             with self.store.conn:
                 self.store.conn.execute("UPDATE disk_leases SET env_keys_json = ? WHERE id = ?", (dumps(keys), self.id))
 
+    def record_sparse(self, patterns: list[str]) -> None:
+        if patterns:
+            with self.store.conn:
+                self.store.conn.execute("UPDATE disk_leases SET sparse_paths_json = ? WHERE id = ?", (dumps(patterns), self.id))
+
     def record_materialization(self, materialization: Materialization) -> None:
         materialization.save_baseline(self.baseline_path)
         with self.store.conn:
@@ -6629,7 +6715,7 @@ class RunLease:
         # The reaper only claims 'active' leases, so the lock can drop now; it must
         # close before removal because Windows cannot delete an open file.
         self.holder.close()
-        remove_tree(self.dir)
+        discard_tree(self.store, self.dir)
 
     def abandon(self) -> None:
         """Keep the directory for the reaper to salvage (the command ran but its
@@ -6860,7 +6946,7 @@ def _reap_claimed_mount_lease(store: Store, lease: sqlite3.Row, *, actor: str, f
         materialization = Materialization(path=root, backend=row_value(lease, "backend") or "copy", degraded=True)
     rules = import_rules(store, ws["project_id"], before_entries)
     lease_ignored = loads(lease["ignored_paths_json"], [])
-    changed, deleted = materialization.scan(before_entries, ignore=rules)
+    changed, deleted = materialization.scan(sparse_entries(before_entries, lease_sparse_paths(lease)), ignore=rules)
     captured_changed = [
         path
         for path in changed
@@ -6956,7 +7042,7 @@ def _reap_claimed_disk_lease(store: Store, lease: sqlite3.Row, *, actor: str) ->
             materialization = load_any_materialization(work, Path(baseline_file))
             before_entries = store.load_snapshot_tree(lease["before_snapshot_id"])
             rules = import_rules(store, ws["project_id"], before_entries)
-            changed, deleted = materialization.scan(before_entries, ignore=rules)
+            changed, deleted = materialization.scan(sparse_entries(before_entries, lease_sparse_paths(lease)), ignore=rules)
             changed = [path for path in changed if not path.startswith(GENERATED_CONFIG_PREFIX + "/") and (path in before_entries or not is_secret_like_path(path))]
             after_entries = entries_after_scan(store, materialization.content_root, before_entries, changed, deleted, skip_escaping=True)
             paths = changed_paths(before_entries, after_entries)
@@ -7159,6 +7245,7 @@ def maybe_auto_reap(store: Store) -> None:
     try:
         reap_leases(store, actor=REAPER_ACTOR, limit=AUTO_REAP_LIMIT)
         evict_caches(store)
+        empty_trash(store)
     except Exception as exc:  # maintenance never fails the user's command; surface it in doctor
         store_meta_set(store, "last_reap_error", f"{utcnow()} {type(exc).__name__}: {exc}")
         return
@@ -8033,6 +8120,7 @@ def cmd_gc(store: Store, args: argparse.Namespace, command: list[str], start: fl
     if args.reap or args.apply:
         data["reaped"] = reap_leases(store, actor=args.actor)
         data["evicted"] = evict_caches(store)
+        data["trash_removed"] = empty_trash(store, min_age_seconds=0 if args.apply else 600.0)
     if args.clear_caches:
         data["evicted"] = evict_caches(store, clear=True)
     data["plan"] = gc_plan_summary(store, gc_compute(store, retention_days=retention, grace_seconds=grace))
@@ -8272,13 +8360,14 @@ def cmd_workspace_sync(store: Store, args: argparse.Namespace, command: list[str
     if baseline_file is not None and baseline_file.exists():
         materialization = load_materialization(root, baseline_file)
         rules = import_rules(store, ws["project_id"], before_entries)
-        scanned_changed, scanned_deleted = materialization.scan(before_entries, ignore=rules)
+        scanned_changed, scanned_deleted = materialization.scan(sparse_entries(before_entries, lease_sparse_paths(lease)), ignore=rules)
         scanned_changed = [path for path in scanned_changed if not path_matches_hidden(path, ignored_paths)]
         scanned_deleted = [path for path in scanned_deleted if not path_matches_hidden(path, ignored_paths)]
         after_entries = entries_after_scan(store, root, before_entries, scanned_changed, scanned_deleted, observed)
     else:
         synced_entries = filter_ignored_entries(build_entries_from_dir(store, root, allow_symlinks=True), ignored_paths)
-        after_entries = {path: entry for path, entry in before_entries.items() if path_matches_hidden(path, ignored_paths)}
+        sparse = lease_sparse_paths(lease)
+        after_entries = {path: entry for path, entry in before_entries.items() if path_matches_hidden(path, ignored_paths) or (sparse and not path_matches_filters(path, sparse))}
         after_entries.update(synced_entries)
     paths = changed_paths(before_entries, after_entries)
 
@@ -10251,6 +10340,7 @@ def run_check_for_workspace(
     assumptions: list[str] | None = None,
     import_changes: bool = True,
     use_env: bool = True,
+    sparse_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     check_id = new_id("check")
     run_lease = RunLease(store, kind="run", key=check_id, workspace_id=ws["id"], before_snapshot=ws["head_snapshot_id"])
@@ -10270,6 +10360,7 @@ def run_check_for_workspace(
             assumptions=assumptions,
             import_changes=import_changes,
             use_env=use_env,
+            sparse_paths=sparse_paths,
         )
         failed = False
         return result
@@ -10292,6 +10383,7 @@ def _run_check_for_workspace(
     assumptions: list[str] | None = None,
     import_changes: bool = True,
     use_env: bool = True,
+    sparse_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     if ws["status"] != "active":
         raise TriError("policy_denied", "Only active workspaces can run checks.", object=ws["id"])
@@ -10300,6 +10392,8 @@ def _run_check_for_workspace(
         raise TriError("path_not_found", "No command supplied for tri run.")
     before = ws["head_snapshot_id"]
     before_entries = store.load_snapshot_tree(before)
+    sparse = normalize_path_patterns(sparse_paths)
+    run_entries = sparse_entries(before_entries, sparse)
     env_plan = plan_environments(store, ws["project_id"], before_entries, actor=actor, workspace=ws, purpose="run") if use_env else EnvPlan()
     secret_leases, secret_env, redactions = active_secret_leases(store, ws["id"], secret_lease_ids or [], actor=actor)
     generated_configs = generated_config_records_for_run(store, ws["id"], actor=actor)
@@ -10345,14 +10439,16 @@ def _run_check_for_workspace(
     events: list[str] = [policy_event, started_evt] if phase_evt is None else [phase_evt, policy_event, started_evt]
     materialization = materialize_for_run(
         store,
-        before_entries,
+        run_entries,
         run_lease,
-        base_snapshot=ws["base_snapshot_id"],
+        # A partial checkout writes only its files; cloning the full cached base would defeat it.
+        base_snapshot=None if sparse else ws["base_snapshot_id"],
         attachments=env_plan.attachments,
-        allow_overlay=not env_plan.private,
+        allow_overlay=not env_plan.private and not sparse,
     )
     env_plan.finalize(materialization)
     run_lease.record_envs(env_plan)
+    run_lease.record_sparse(sparse)
     run_lease.record_materialization(materialization)
     env_plan.install_private(work, env)
     materialize_generated_configs_for_run(store, materialization.writable_root, generated_configs)
@@ -10363,7 +10459,7 @@ def _run_check_for_workspace(
     duration_ms = int((time.time() - started) * 1000)
     if import_changes:
         rules = import_rules(store, ws["project_id"], before_entries)
-        scanned_changed, scanned_deleted = materialization.scan(before_entries, ignore=rules)
+        scanned_changed, scanned_deleted = materialization.scan(run_entries, ignore=rules)
         scanned_entries = entries_after_scan(store, materialization.content_root, before_entries, scanned_changed, scanned_deleted)
         after_entries = filter_generated_config_entries(before_entries, scanned_entries, generated_configs)
         paths = changed_paths(before_entries, after_entries)
@@ -10428,6 +10524,10 @@ def _run_check_for_workspace(
         materialization=materialization,
     )
     materialized_directory["environments"] = env_plan.records
+    if sparse:
+        materialized_directory["sparse_paths"] = sparse
+        materialized_directory["materialized_files"] = len(run_entries)
+        materialized_directory["total_files"] = len(before_entries)
     environment_policy = check_environment_policy(secret_leases, secret_env)
     environment_policy["generated_configs"] = generated_configs
     environment_policy["generated_config_paths"] = [config["path"] for config in generated_configs]
@@ -10502,7 +10602,8 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
     assumptions = list(args.assumption or [])
     import_changes = not args.no_import_changes
     use_env = not args.no_env
-    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env"):
+    sparse_paths = list(args.paths or [])
+    while cmd and cmd[0] in ("--with-lease", "--assumption", "--no-import-changes", "--no-env", "--paths"):
         if cmd[0] == "--no-import-changes":
             import_changes = False
             cmd = cmd[1:]
@@ -10515,6 +10616,8 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
             raise TriError("invalid_command", f"{cmd[0]} requires a value.")
         if cmd[0] == "--with-lease":
             lease_ids.append(cmd[1])
+        elif cmd[0] == "--paths":
+            sparse_paths.append(cmd[1])
         else:
             assumptions.append(cmd[1])
         cmd = cmd[2:]
@@ -10531,6 +10634,7 @@ def cmd_run(store: Store, args: argparse.Namespace, command: list[str], start: f
         assumptions=assumptions,
         import_changes=import_changes,
         use_env=use_env,
+        sparse_paths=sparse_paths,
     )
 
 
@@ -16003,6 +16107,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mount.add_argument("--no-env", action="store_true")
     p_mount.add_argument("--env-link", action="store_true")
     p_mount.add_argument("--ignore-path", action="append")
+    p_mount.add_argument("--paths", action="append")
     p_mount.set_defaults(func=cmd_workspace_mount)
     p_sync = workspace_sub.add_parser("sync")
     p_sync.add_argument("workspace")
@@ -16155,6 +16260,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--assumption", action="append")
     p.add_argument("--no-import-changes", action="store_true")
     p.add_argument("--no-env", action="store_true")
+    p.add_argument("--paths", action="append")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
 
