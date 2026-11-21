@@ -209,7 +209,7 @@ jobs:
       - name: Start MinIO (S3-compatible object storage) and create a bucket
         run: |
           docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=triminio -e MINIO_ROOT_PASSWORD=triminio-secret minio/minio server /data
-          for i in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+          for _ in $(seq 60); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
           docker run --rm --network host --entrypoint sh minio/mc -c "mc alias set local http://127.0.0.1:9000 triminio triminio-secret && mc mb local/tri-ci"
       - name: Multi-node tests (shared PostgreSQL metadata; file and S3 object storage; failover)
         env:
@@ -275,7 +275,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
-      TRI_CONFORMANCE_NATIVE: ${{ github.workspace }}/native/tri-server/tri-server${{ runner.os == 'Windows' && '.exe' || '' }}
+      TRI_CONFORMANCE_NATIVE: ${{ github.workspace }}/native/tri-server/tri-server${{ matrix.os == 'windows-latest' && '.exe' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
