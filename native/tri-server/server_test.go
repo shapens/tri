@@ -175,12 +175,13 @@ func TestAuthHealthReadyAndForwarding(t *testing.T) {
 	os.WriteFile(path, []byte(fmt.Sprintf(`{"tokens":[{"actor":"agent:a","sha256":%q}]}`, TokenDigest("tri_good"))), 0o600)
 	_, _, ts := newTestServer(t, "echo", 1, 2, NewTokenAuthority(path), ServerConfig{})
 
+	// Health needs no token and is answered by a worker (which opens the store).
 	status, body, _ := get(t, ts.URL+"/v0/health", nil)
-	if status != 200 || body["schema"] != "tri.api.health" {
+	if status != 200 {
 		t.Fatalf("health: %d %v", status, body)
 	}
-	if data := body["data"].(map[string]any); data["home"] != nil || data["auth"] != "bearer" {
-		t.Fatalf("health must hide home when tokens are required: %v", data)
+	if echo := body["echo"].(map[string]any); echo["path"] != "/v0/health" || echo["actor"] != nil {
+		t.Fatalf("health must reach a worker unauthenticated: %v", body)
 	}
 	status, body, _ = get(t, ts.URL+"/v0/ready", nil)
 	if status != 200 || body["data"].(map[string]any)["ready"] != true {

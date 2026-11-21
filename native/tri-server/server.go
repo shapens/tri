@@ -117,9 +117,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, start time.Time, 
 	path := r.URL.Path
 	if r.Method == http.MethodGet {
 		switch path {
-		case "/health", "/v0/health":
-			s.health(w, r, start)
-			return
 		case "/ready", "/v0/ready":
 			s.ready(w, r, start)
 			return
@@ -138,7 +135,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, start time.Time, 
 		return
 	}
 	var actor *string
-	if s.authority != nil {
+	// Health is answered by a worker, like tri serve: it opens the store, so a
+	// node that cannot reach its database answers 503 and clients fail over.
+	// It needs no token; the worker hides the home when tokens are required.
+	isHealth := r.Method == http.MethodGet && (path == "/health" || path == "/v0/health")
+	if s.authority != nil && !isHealth {
 		resolved := s.authority.ActorFor(bearerToken(r))
 		if resolved == "" {
 			s.metrics.AuthFailure()
@@ -271,20 +272,6 @@ func (s *Server) MetricsPublicOrAuthenticated(w http.ResponseWriter, r *http.Req
 		return false
 	}
 	return true
-}
-
-// health answers like TriAPIHandler: unauthenticated, home hidden when tokens
-// are required. It reports this process; readiness reports the workers.
-func (s *Server) health(w http.ResponseWriter, r *http.Request, start time.Time) {
-	hello := s.pool.Hello()
-	var home any = hello.Home
-	auth := "none"
-	if s.authority != nil {
-		home = nil
-		auth = "bearer"
-	}
-	data := map[string]any{"status": "ok", "home": home, "schema_version": s.schemaVersion(), "auth": auth}
-	s.writeJSON(w, http.StatusOK, Envelope(s.schemaVersion(), "tri.api.health", []string{"tri", "serve", "health"}, claimedActor(r), true, data, nil, start))
 }
 
 func (s *Server) isReady() bool {
