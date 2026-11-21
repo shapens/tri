@@ -271,6 +271,7 @@ Being the best agent-native source control means closing the gaps that Scion and
 | History needs a checkout | Agents and CI asked Git for blame or merge bases by cloning | `tri files log <ref> <path>`, `tri files blame <ref> <path>`, and `tri snapshots merge-base <a> <b>` run on the store. Blame attributes lines to the snapshot, actor, and changeset that introduced them. History walks stop at the first snapshot the actor cannot read, and hidden or secret-like paths are refused. |
 | Self-asserted actors | Any HTTP client could claim `actor_local`, which holds maintainer and security roles, so the API could not safely leave one machine | `tri auth issue <actor> --file tokens.json` issues a bearer token bound to one actor and stores only its SHA-256. `tri serve --auth-file tokens.json` pins every request to the token's actor and rejects a different `--actor`, payload actor, batch actor, or `X-Tri-Actor` with `actor_mismatch`. Revocation applies on the next request. `tri serve` refuses to bind beyond loopback without `--auth-file` unless `--allow-unauthenticated` is passed. `serve`, `mcp`, and `auth` cannot run through the API or a batch. |
 | No MCP server | Claude Code, Codex, and Cursor reach tools through MCP; GitButler ships `but mcp` | `tri --actor agent:<id> mcp` serves the `tri` and `tri_batch` tools over stdio. Every call is pinned to the startup actor. |
+| No two-way Git mirror | Teams adopt only when teammates who never install Tri still see an ordinary Git repository | `tri mirror add <project> --remote <url>` pairs a target with a Git branch; `tri mirror sync [--watch]` turns new Git commits into attributed snapshots, three-way merges them with Tri work (line-level), and pushes each Tri merge back as one Git commit titled by its changeset, plus a merge commit when both sides moved. Pushes are never forced; a Git push that races the sync is refetched and retried. Paths the mirror audience cannot read (private packages) and secret-like paths never leave Tri, and Git cannot overwrite them. Same-line edits on both sides stop with `mirror_conflict` and change nothing. |
 
 ### Still Open
 
@@ -278,10 +279,9 @@ These are ordered by how much they block the goal.
 
 1. **Server-authoritative storage.** Tri still runs on one machine with SQLite and local blobs. The target is Scion's shape: one authoritative service (a transactional metadata store plus object storage), with every disk a cache. The client/server question is settled in favor of this; decentralized sync is not a goal.
 2. **Sparse and virtual checkouts with tiered caches.** Materialization is copy-on-write but whole-tree. Agents should fetch only the trees and blobs they touch, through a per-machine daemon and a regional cache that serve the same API.
-3. **Two-way Git mirror.** Import, `targets refresh`, and policy-gated export exist, but nothing keeps a GitHub repository and a Tri target in sync continuously. Teammates who never install Tri must see an ordinary Git repository, and pushes from them must land as Tri snapshots.
-4. **Sandboxed remote runners.** `tri run` executes on the server host as the server user. With authentication that is acceptable for trusted agents on one machine, but a shared server needs isolated runners and resource limits before untrusted agents can call `run`.
-5. **Post-merge verification lane.** Scion runs tests after merge and before deploy. Tri's merge rules still require checks before merge. A policy that allows merge-then-verify for low-risk paths, with automatic revert on failure, would remove the last pre-merge wait.
-6. **Production runtime.** The prototype is one large Python module. It is the right tool for proving the object model; the server should be rewritten once the object model stops changing, keeping the JSON contracts as the compatibility boundary.
+3. **Sandboxed remote runners.** `tri run` executes on the server host as the server user. With authentication that is acceptable for trusted agents on one machine, but a shared server needs isolated runners and resource limits before untrusted agents can call `run`.
+4. **Post-merge verification lane.** Scion runs tests after merge and before deploy. Tri's merge rules still require checks before merge. A policy that allows merge-then-verify for low-risk paths, with automatic revert on failure, would remove the last pre-merge wait.
+5. **Production runtime.** The prototype is one large Python module. It is the right tool for proving the object model; the server should be rewritten once the object model stops changing, keeping the JSON contracts as the compatibility boundary.
 
 ## Agent-Scale Scorecard
 
@@ -2468,7 +2468,16 @@ Export records:
 
 ### Mirror Mode
 
-Tri must mirror a Git remote bidirectionally. It was deferred for the first proof; it is now an adoption requirement, because Cursor Origin and Zed DeltaDB both show that teams adopt a new system only when teammates who never install it still see an ordinary Git repository. Merged Tri targets should appear as commits on a mirrored branch, and pushes to that branch should land as Tri snapshots through `targets refresh`.
+Tri must mirror a Git remote bidirectionally. It was deferred for the first proof; it is now an adoption requirement, because Cursor Origin and Zed DeltaDB both show that teams adopt a new system only when teammates who never install it still see an ordinary Git repository. Merged Tri targets appear as commits on the mirrored branch, and pushes to that branch land as Tri snapshots.
+
+`tri mirror` implements this. Each mirror keeps a private bare repository under the Tri home and a synced pair: one Tri snapshot and one Git commit whose mirrorable trees are identical. A sync:
+
+1. fetches the branch and turns each first-parent commit after the pair into a snapshot attributed to the Git author (`human:<email>`), with `git_commit` metadata so `files blame` and `files log` cite it
+2. fast-forwards the target when only Git moved, or three-way merges the Git tip with the target (line-level, against the synced snapshot) when both moved
+3. writes one Git commit per Tri target move since the pair (titled by the changeset, with `Tri-Changeset` and `Tri-Snapshot` trailers), plus a merge commit when both sides moved, and pushes without force
+4. records the new pair
+
+A path is mirrorable when it is not secret-like and the mirror's audience (default `service:git-mirror`) can read it. Git never receives Tri's copy of a non-mirrorable path and Tri never takes Git's, so a public mirror of a project with private packages stays public-safe in both directions. A branch that already differs from the target needs `--prefer git` or `--prefer tri` the first time. Force pushes are mirrored as one change with a `mirror_history_rewritten` warning.
 
 ## First Implementation
 
@@ -2688,7 +2697,7 @@ The MVP should be judged by behaviors, not positioning.
 | Check evidence | CI logs | agent scores and session transcript | forge CI status and local operation history | server-side diff and blame for CI | structured check-run objects |
 | Agent API surface | shell plus Git porcelain | hooks capture agent sessions | hooks and `but mcp` organize branch output | `scn` client and RPCs | typed commands over CLI, authenticated HTTP, and MCP |
 | History queries | full clone | full clone | full clone | server-side blame, history, merge base | `files log`, `files blame`, `snapshots merge-base` on the store |
-| Export | native Git | native Git | native Git | not exported | policy-gated Git adapter and, next, a two-way mirror |
+| Export | native Git | native Git | native Git | not exported | policy-gated Git adapter and a two-way mirror (`tri mirror`) |
 
 ## Example Workflows
 

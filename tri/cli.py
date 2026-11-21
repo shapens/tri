@@ -27,6 +27,7 @@ from socketserver import ThreadingMixIn
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from tri import gitmirror
 from tri.auth import TokenAuthority, issue_token, load_token_file, public_record, revoke_tokens
 from tri.ignore import IgnoreRules
 from tri.textmerge import merge_three_way
@@ -147,6 +148,11 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "merge-rules-add", "usage": "tri merge-rules add <project> <name> --path <glob> [--path <glob>] [--exclude <glob>] [--allow <selector>] [--max-files <n>]", "schema": "tri.merge_rule.inspect", "description": "Maintainer rule letting checked changesets that only touch matching paths merge without a human review."},
     {"name": "merge-rules-list", "usage": "tri merge-rules list <project> [--all]", "schema": "tri.merge_rule.list", "description": "List project merge rules."},
     {"name": "merge-rules-inspect", "usage": "tri merge-rules inspect <project> <name-or-id>", "schema": "tri.merge_rule.inspect", "description": "Inspect one merge rule."},
+    {"name": "mirror-add", "usage": "tri mirror add <project> --remote <url-or-path> [--target <target>] [--branch <branch>] [--audience <actor>] [--prefer git|tri] [--retry <n>] [--no-sync]", "schema": "tri.mirror.inspect", "description": "Maintainer two-way mirror between a Tri target and a Git branch; paths the audience cannot read and secret-like paths never leave Tri."},
+    {"name": "mirror-list", "usage": "tri mirror list [<project>] [--all]", "schema": "tri.mirror.list", "description": "List Git mirrors."},
+    {"name": "mirror-inspect", "usage": "tri mirror inspect <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Inspect one Git mirror and its last sync."},
+    {"name": "mirror-sync", "usage": "tri mirror sync <mirror-or-project> [--retry <n>] [--watch [--interval <seconds>] [--max-cycles <n>]]", "schema": "tri.mirror.sync", "description": "Pull new Git commits into the target as snapshots, merge with Tri work, and push Tri merges back as Git commits."},
+    {"name": "mirror-remove", "usage": "tri mirror remove <mirror-or-project>", "schema": "tri.mirror.inspect", "description": "Stop mirroring a target."},
     {"name": "merge-rules-remove", "usage": "tri merge-rules remove <project> <name-or-id>", "schema": "tri.merge_rule.inspect", "description": "Remove a merge rule; later merges need an approved review again."},
     {"name": "checks-set-list", "usage": "tri checks set-list <project>", "schema": "tri.check_set.list", "description": "List reusable required-check sets for a project."},
     {"name": "checks-set-inspect", "usage": "tri checks set-inspect <project> <name-or-id> | <check-set>", "schema": "tri.check_set.inspect", "description": "Inspect a reusable required-check set."},
@@ -237,6 +243,12 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.diagnostic": {
         "required": ["code", "severity", "message", "retryable"],
         "codes": [
+            "mirror_conflict",
+            "mirror_diverged",
+            "mirror_push_rejected",
+            "mirror_history_rewritten",
+            "git_mirror_failed",
+            "git_mirror_unreachable",
             "stale_workspace_head",
             "stale_materialization",
             "lease_already_reaped",
@@ -352,6 +364,9 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.snapshot.merge_base": {"required": ["left", "right", "merge_base", "redacted"]},
     "tri.merge_rule.inspect": {"required": ["id", "project", "name", "path_globs", "exclude_globs", "allow", "max_files", "status", "created_by", "created_at"]},
     "tri.merge_rule.list": {"required": ["project", "merge_rules"]},
+    "tri.mirror.inspect": {"required": ["id", "project", "target", "remote", "branch", "audience", "status", "synced_snapshot", "synced_git_commit", "in_sync", "last_result", "created_by", "created_at"]},
+    "tri.mirror.list": {"required": ["mirrors"]},
+    "tri.mirror.sync": {"required": ["id", "project", "target", "remote", "branch", "synced_snapshot", "synced_git_commit", "in_sync", "sync", "cycles"]},
     "tri.review.create": {"required": ["id", "changeset", "status", "reviewers", "check_summary", "export_preview"]},
     "tri.review.inspect": {"required": ["id", "changeset", "redacted_changeset", "workspace", "redacted_workspace", "status", "reviewers", "approvals", "approved_reviewers", "pending_reviewers", "maintainer_override", "check_summary", "risk_summary", "export_preview", "changeset_summary", "task", "task_run", "actor_identity", "commands", "checks", "artifacts", "policy_findings", "attached_policy_findings", "attached_check_summaries", "visibility_impact", "comment_threads", "unresolved_risks", "actions", "created_at"]},
     "tri.review_action.inspect": {"required": ["id", "review", "actor", "kind", "body", "metadata", "created_at"]},
@@ -961,6 +976,32 @@ class Store:
               created_by TEXT NOT NULL,
               created_at TEXT NOT NULL,
               revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS mirrors (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              remote TEXT NOT NULL,
+              branch TEXT NOT NULL,
+              audience TEXT NOT NULL,
+              prefer TEXT,
+              status TEXT NOT NULL,
+              synced_snapshot_id TEXT,
+              synced_git_commit TEXT,
+              event_cursor INTEGER NOT NULL DEFAULT 0,
+              last_sync_at TEXT,
+              last_result_json TEXT NOT NULL DEFAULT '{}',
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              removed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS mirror_commits (
+              mirror_id TEXT NOT NULL,
+              snapshot_id TEXT NOT NULL,
+              git_commit TEXT NOT NULL,
+              direction TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (mirror_id, snapshot_id, git_commit, direction)
             );
             CREATE TABLE IF NOT EXISTS merge_rules (
               id TEXT PRIMARY KEY,
@@ -10820,6 +10861,526 @@ def cmd_merge_rules_remove(store: Store, args: argparse.Namespace, command: list
     return envelope("tri.merge_rule.inspect", command, actor=args.actor, start=start, events=[evt], data=merge_rule_data(resolve_merge_rule(store, project["id"], row["id"])))
 
 
+# --- Two-way Git mirror -------------------------------------------------------
+#
+# A mirror pairs one Tri target with one Git branch. Each sync records a pair
+# (synced_snapshot, synced_git_commit) whose mirrorable trees are identical.
+# Paths the mirror audience cannot read (hidden packages) and secret-like paths
+# are not mirrorable: Git never receives Tri's copy and Tri never takes Git's,
+# so each side keeps what the other cannot see.
+
+MIRROR_TARGET_EVENTS = ("changeset.merged", "target.refreshed")
+DEFAULT_MIRROR_AUDIENCE = "service:git-mirror"
+
+
+def mirror_git_dir(store: Store, mirror_id: str) -> Path:
+    return store.home / "mirrors" / f"{mirror_id}.git"
+
+
+def mirror_error(exc: gitmirror.GitMirrorError) -> TriError:
+    return TriError(exc.code, exc.message, retryable=exc.retryable, **exc.fields)
+
+
+def mirror_data(store: Store, row: sqlite3.Row) -> dict[str, Any]:
+    target = store.row("SELECT name, snapshot_id FROM targets WHERE id = ?", (row["target_id"],))
+    return {
+        "id": row["id"],
+        "project": row["project_id"],
+        "target": target["name"] if target else None,
+        "target_snapshot": target["snapshot_id"] if target else None,
+        "remote": row["remote"],
+        "branch": row["branch"],
+        "audience": row["audience"],
+        "prefer": row["prefer"],
+        "status": row["status"],
+        "synced_snapshot": row["synced_snapshot_id"],
+        "synced_git_commit": row["synced_git_commit"],
+        "in_sync": bool(target) and row["synced_snapshot_id"] == target["snapshot_id"],
+        "last_sync_at": row["last_sync_at"],
+        "last_result": loads(row["last_result_json"], {}),
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "removed_at": row["removed_at"],
+    }
+
+
+def resolve_mirror(store: Store, mirror_ref: str) -> sqlite3.Row:
+    row = store.row("SELECT * FROM mirrors WHERE id = ?", (mirror_ref,))
+    if row is None:
+        project = store.row("SELECT id FROM projects WHERE id = ? OR name = ?", (mirror_ref, mirror_ref))
+        if project is not None:
+            row = store.row("SELECT * FROM mirrors WHERE project_id = ? AND status = 'active' ORDER BY created_at LIMIT 1", (project["id"],))
+    if row is None:
+        raise TriError("path_not_found", "Mirror not found.", object=mirror_ref)
+    return row
+
+
+def mirror_is_mirrorable(path: str, hidden: list[str]) -> bool:
+    return not is_secret_like_path(path) and not path_matches_hidden(path, hidden)
+
+
+def mirror_entry_from_git(store: Store, mode: str, content: bytes) -> dict[str, Any]:
+    blob = store.put_blob(content)
+    entry = {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": mode}
+    if mode == "120000":
+        entry["symlink_target"] = content.decode(errors="replace")
+    return entry
+
+
+def mirror_author_actor(info: gitmirror.CommitInfo, fallback: str) -> str:
+    return actor_ref_from_git_author(info.author_name, info.author_email) or fallback
+
+
+def mirror_actor_ident(actor: str) -> tuple[str, str]:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", actor.lower()).strip("-") or "tri"
+    return actor, f"{slug}@tri.invalid"
+
+
+def mirror_timestamp(value: str | None) -> int:
+    if not value:
+        return int(time.time())
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return int(time.time())
+
+
+def mirror_inbound_entries(
+    store: Store,
+    git_dir: Path,
+    *,
+    previous: dict[str, dict[str, Any]],
+    previous_commit: str | None,
+    commit: str,
+    hidden: list[str],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Tri entries for a Git commit: Git's mirrorable paths, Tri's copy of everything else."""
+    ignored: list[str] = []
+    if previous_commit is not None:
+        entries = dict(previous)
+        changes = gitmirror.diff_tree(git_dir, previous_commit, commit)
+        wanted = []
+        for change in changes:
+            if not mirror_is_mirrorable(change.path, hidden):
+                ignored.append(change.path)
+            elif change.status == "D":
+                entries.pop(normalize_path(change.path), None)
+            elif change.mode == gitmirror.SUBMODULE_MODE:
+                ignored.append(change.path)
+            else:
+                wanted.append(change)
+        blobs = git_cat_file_batch(git_dir, sorted({change.oid for change in wanted if change.oid}))
+        for change in wanted:
+            entries[normalize_path(change.path)] = mirror_entry_from_git(store, change.mode or "100644", blobs[change.oid or ""])
+        return dict(sorted(entries.items())), sorted(set(ignored))
+    tree = gitmirror.ls_tree(git_dir, commit)
+    entries = {path: entry for path, entry in previous.items() if not mirror_is_mirrorable(path, hidden)}
+    keep = {}
+    for path, item in tree.items():
+        if not mirror_is_mirrorable(path, hidden):
+            ignored.append(path)
+            continue
+        keep[path] = item
+    blobs = git_cat_file_batch(git_dir, sorted({item.oid for item in keep.values()}))
+    for path, item in keep.items():
+        entries[normalize_path(path)] = mirror_entry_from_git(store, item.mode, blobs[item.oid])
+    return dict(sorted(entries.items())), sorted(set(ignored))
+
+
+def mirror_tree_changes(
+    store: Store,
+    old: dict[str, dict[str, Any]],
+    new: dict[str, dict[str, Any]],
+    hidden: list[str],
+) -> tuple[dict[str, object], dict[str, str]]:
+    changes: dict[str, object] = {}
+    modes: dict[str, str] = {}
+    for path in changed_paths(old, new):
+        if not mirror_is_mirrorable(path, hidden):
+            continue
+        entry = new.get(path)
+        if entry is None:
+            changes[path] = None
+            continue
+        changes[path] = store.read_blob(entry["blob"])
+        modes[path] = entry.get("mode") or "100644"
+    return changes, modes
+
+
+def mirror_tri_steps(store: Store, mirror: sqlite3.Row, target_id: str, target_snapshot: str) -> tuple[list[dict[str, Any]], int]:
+    """Target moves recorded since the last sync, oldest first, ending at the current target."""
+    steps: list[dict[str, Any]] = []
+    cursor = int(mirror["event_cursor"] or 0)
+    placeholders = ",".join("?" for _ in MIRROR_TARGET_EVENTS)
+    rows = store.rows(
+        f"SELECT rowid, * FROM events WHERE rowid > ? AND project_id = ? AND kind IN ({placeholders}) ORDER BY rowid",
+        (cursor, mirror["project_id"], *MIRROR_TARGET_EVENTS),
+    )
+    for row in rows:
+        refs = loads(row["object_refs_json"], {})
+        if refs.get("target") != target_id or not refs.get("snapshot"):
+            continue
+        if steps and steps[-1]["snapshot"] == refs["snapshot"]:
+            continue
+        title = None
+        if refs.get("changeset"):
+            cs = store.row("SELECT title FROM changesets WHERE id = ?", (refs["changeset"],))
+            title = cs["title"] if cs else None
+        steps.append({"snapshot": refs["snapshot"], "actor": row["actor"], "at": row["created_at"], "changeset": refs.get("changeset"), "title": title, "kind": row["kind"]})
+        cursor = int(row["rowid"])
+        if refs["snapshot"] == target_snapshot:
+            break
+    if not steps or steps[-1]["snapshot"] != target_snapshot:
+        steps.append({"snapshot": target_snapshot, "actor": None, "at": None, "changeset": None, "title": None, "kind": "target"})
+    return steps, cursor
+
+
+def mirror_step_message(step: dict[str, Any]) -> str:
+    title = step.get("title") or ("Refresh Tri target" if step.get("kind") == "target.refreshed" else "Sync Tri target")
+    trailers = [f"Tri-Snapshot: {step['snapshot']}"]
+    if step.get("changeset"):
+        trailers.insert(0, f"Tri-Changeset: {step['changeset']}")
+    return f"{title}\n\n" + "\n".join(trailers) + "\n"
+
+
+def mirror_record_commit(store: Store, mirror_id: str, snapshot_id: str, commit: str, direction: str) -> None:
+    store.conn.execute(
+        "INSERT OR IGNORE INTO mirror_commits (mirror_id, snapshot_id, git_commit, direction, created_at) VALUES (?, ?, ?, ?, ?)",
+        (mirror_id, snapshot_id, commit, direction, utcnow()),
+    )
+
+
+def mirror_sync_once(store: Store, mirror: sqlite3.Row, *, actor: str) -> dict[str, Any]:
+    git_dir = mirror_git_dir(store, mirror["id"])
+    try:
+        gitmirror.ensure_bare(git_dir)
+        remote_tip = gitmirror.fetch(git_dir, mirror["remote"], mirror["branch"])
+    except gitmirror.GitMirrorError as exc:
+        raise mirror_error(exc) from exc
+    target = store.row("SELECT * FROM targets WHERE id = ?", (mirror["target_id"],))
+    if target is None:
+        raise TriError("path_not_found", "Mirrored target no longer exists.", object=mirror["target_id"])
+    target_snapshot = target["snapshot_id"]
+    synced_snapshot = mirror["synced_snapshot_id"]
+    synced_commit = mirror["synced_git_commit"]
+    hidden = effective_hidden_patterns(store, mirror["project_id"], [], actor=mirror["audience"])
+    warnings: list[dict[str, Any]] = []
+    result: dict[str, Any] = {"mode": "noop", "inbound_commits": [], "inbound_snapshots": [], "outbound_commits": [], "ignored_git_paths": [], "text_merged_paths": []}
+
+    try:
+        if synced_commit is not None and remote_tip is not None and not gitmirror.has_commit(git_dir, synced_commit):
+            synced_commit_known = False
+        else:
+            synced_commit_known = True
+
+        # Inbound: Git commits after the synced commit become Tri snapshots.
+        inbound_tip = synced_snapshot
+        inbound_parent = synced_snapshot or target_snapshot
+        inbound_commit = synced_commit
+        inbound_rows: list[tuple[str, str]] = []
+        with store.conn:
+            if remote_tip is not None and remote_tip != synced_commit:
+                if synced_commit is not None and synced_commit_known and gitmirror.is_ancestor(git_dir, synced_commit, remote_tip):
+                    commits = gitmirror.first_parent_commits(git_dir, remote_tip, synced_commit)
+                    previous_commit: str | None = synced_commit
+                else:
+                    if synced_commit is not None:
+                        warnings.append(TriError("mirror_history_rewritten", "The Git branch was force-pushed; mirroring its tip as one change.", severity="warning", remote_tip=remote_tip, synced_git_commit=synced_commit).diagnostic)
+                    commits = [remote_tip]
+                    previous_commit = None
+                base_for_hidden = synced_snapshot or target_snapshot
+                entries = store.load_snapshot_tree(base_for_hidden) if base_for_hidden else {}
+                for commit in commits:
+                    entries, ignored = mirror_inbound_entries(store, git_dir, previous=entries, previous_commit=previous_commit, commit=commit, hidden=hidden)
+                    result["ignored_git_paths"].extend(ignored)
+                    info = gitmirror.commit_info(git_dir, commit)
+                    if synced_snapshot is None and commit == remote_tip and not changed_paths(store.load_snapshot_tree(target_snapshot), entries):
+                        inbound_tip = target_snapshot  # first sync of identical trees: pair them without a new snapshot
+                    else:
+                        snapshot = store.create_snapshot(
+                            mirror["project_id"],
+                            entries,
+                            parents=[inbound_parent] if inbound_parent else [],
+                            source="imported",
+                            actor=mirror_author_actor(info, actor),
+                            metadata={
+                                "mirror": mirror["id"],
+                                "source_path": mirror["remote"],
+                                "import_ref": mirror["branch"],
+                                "git_commit": commit,
+                                "git_tree": info.tree,
+                                "git_author": {"name": info.author_name, "email": info.author_email, "date": info.author_date, "actor": mirror_author_actor(info, actor)},
+                                "git_message": info.message[:2000],
+                            },
+                        )
+                        inbound_tip = snapshot["id"]
+                        inbound_parent = inbound_tip
+                        result["inbound_snapshots"].append(inbound_tip)
+                    inbound_rows.append((inbound_tip, commit))
+                    result["inbound_commits"].append(commit)
+                    previous_commit = commit
+                inbound_commit = remote_tip
+            result["ignored_git_paths"] = sorted(set(result["ignored_git_paths"]))
+
+            # Decide the new target and whether Tri has work Git lacks.
+            merge_snapshot: str | None = None
+            if synced_snapshot is None:
+                if remote_tip is None:
+                    new_target, outbound_from = target_snapshot, None
+                    result["mode"] = "initial_push"
+                elif inbound_tip == target_snapshot:
+                    new_target, outbound_from = target_snapshot, None
+                    result["mode"] = "initial_pair"
+                elif mirror["prefer"] == "git":
+                    new_target, outbound_from = inbound_tip, None
+                    result["mode"] = "initial_adopt_git"
+                elif mirror["prefer"] == "tri":
+                    new_target, outbound_from = target_snapshot, inbound_tip
+                    result["mode"] = "initial_adopt_tri"
+                else:
+                    differing = changed_paths(store.load_snapshot_tree(target_snapshot), store.load_snapshot_tree(inbound_tip))
+                    raise TriError(
+                        "mirror_diverged",
+                        "The Git branch and the Tri target differ; add the mirror with --prefer git or --prefer tri to choose the starting content.",
+                        object=mirror["id"],
+                        differing_paths=len(differing),
+                        retryable=False,
+                    )
+            elif not inbound_rows:
+                new_target, outbound_from = target_snapshot, (synced_snapshot if target_snapshot != synced_snapshot else None)
+                result["mode"] = "outbound" if outbound_from else "noop"
+            elif target_snapshot == synced_snapshot:
+                new_target, outbound_from = inbound_tip, None
+                result["mode"] = "inbound"
+            else:
+                text_merged: list[str] = []
+                merged, conflicts, _ = merge_entries(
+                    store,
+                    store.load_snapshot_tree(synced_snapshot),
+                    store.load_snapshot_tree(target_snapshot),
+                    store.load_snapshot_tree(inbound_tip),
+                    text_merged,
+                )
+                if conflicts:
+                    raise TriError(
+                        "mirror_conflict",
+                        "Tri and Git changed the same lines since the last sync; resolve in a workspace and merge, then sync again.",
+                        object=mirror["id"],
+                        conflicts=[{"kind": item["kind"], "path": item["path"]} for item in conflicts],
+                        retryable=False,
+                    )
+                snapshot = store.create_snapshot(
+                    mirror["project_id"],
+                    merged,
+                    parents=[target_snapshot, inbound_tip],
+                    source="merge",
+                    actor=actor,
+                    metadata={"target": target["name"], "operation": "mirror_merge", "mirror": mirror["id"], "git_commit": remote_tip, "text_merged_paths": text_merged},
+                )
+                merge_snapshot = snapshot["id"]
+                result["text_merged_paths"] = text_merged
+                new_target, outbound_from = merge_snapshot, synced_snapshot
+                result["mode"] = "merge"
+
+            if new_target != target_snapshot:
+                updated = store.conn.execute("UPDATE targets SET snapshot_id = ? WHERE id = ? AND snapshot_id = ?", (new_target, target["id"], target_snapshot))
+                if updated.rowcount != 1:
+                    raise TriError("stale_target_snapshot", "Target changed during mirror sync.", object=target["name"], expected=target_snapshot, retryable=True)
+                store.create_event(
+                    kind="mirror.inbound",
+                    actor=actor,
+                    project_id=mirror["project_id"],
+                    object_refs={"mirror": mirror["id"], "target": target["id"], "target_name": target["name"], "snapshot": new_target, "previous_snapshot": target_snapshot, "git_commit": remote_tip},
+                )
+            for snapshot_id, commit in inbound_rows:
+                mirror_record_commit(store, mirror["id"], snapshot_id, commit, "inbound")
+            if outbound_from is None and new_target is not None and (inbound_commit or remote_tip):
+                # Git is now the full story: record the exact pair.
+                pair_commit = inbound_commit or remote_tip
+                store.conn.execute(
+                    "UPDATE mirrors SET synced_snapshot_id = ?, synced_git_commit = ?, event_cursor = (SELECT COALESCE(MAX(rowid), 0) FROM events) WHERE id = ?",
+                    (new_target, pair_commit, mirror["id"]),
+                )
+                mirror_record_commit(store, mirror["id"], new_target, pair_commit, "pair")
+
+        # Outbound: Tri target moves since the pair become Git commits, then one push.
+        needs_push = outbound_from is not None or (synced_snapshot is None and remote_tip is None)
+        if needs_push:
+            commits_to_write: list[gitmirror.OutboundCommit] = []
+            step_snapshots: list[str] = []
+            if synced_snapshot is None and remote_tip is None:
+                entries = store.load_snapshot_tree(target_snapshot)
+                changes, modes = mirror_tree_changes(store, {}, entries, hidden)
+                name, email = mirror_actor_ident(actor)
+                commits_to_write.append(gitmirror.OutboundCommit(parents=[], message=f"Import Tri target {target['name']}\n\nTri-Snapshot: {target_snapshot}\n", author=(name, email, int(time.time())), changes=changes, modes=modes))
+                step_snapshots.append(target_snapshot)
+                cursor = int(store.row("SELECT COALESCE(MAX(rowid), 0) AS cursor FROM events", ())["cursor"])
+            elif synced_snapshot is None:
+                # --prefer tri on a non-empty branch: one commit on top of the Git tip.
+                assert remote_tip is not None and outbound_from is not None
+                changes, modes = mirror_tree_changes(store, store.load_snapshot_tree(outbound_from), store.load_snapshot_tree(target_snapshot), hidden)
+                name, email = mirror_actor_ident(actor)
+                commits_to_write.append(gitmirror.OutboundCommit(parents=[remote_tip], message=f"Adopt Tri target {target['name']}\n\nTri-Snapshot: {target_snapshot}\n", author=(name, email, int(time.time())), changes=changes, modes=modes))
+                step_snapshots.append(target_snapshot)
+                cursor = int(store.row("SELECT COALESCE(MAX(rowid), 0) AS cursor FROM events", ())["cursor"])
+            else:
+                assert synced_commit is not None
+                steps, cursor = mirror_tri_steps(store, mirror, target["id"], target_snapshot)
+                parent_ref = synced_commit
+                parent_entries = store.load_snapshot_tree(synced_snapshot)
+                for step in steps:
+                    step_entries = store.load_snapshot_tree(step["snapshot"])
+                    changes, modes = mirror_tree_changes(store, parent_entries, step_entries, hidden)
+                    parent_entries = step_entries
+                    if not changes:
+                        continue
+                    name, email = mirror_actor_ident(step["actor"] or actor)
+                    commits_to_write.append(gitmirror.OutboundCommit(parents=[parent_ref], message=mirror_step_message(step), author=(name, email, mirror_timestamp(step["at"])), changes=changes, modes=modes))
+                    step_snapshots.append(step["snapshot"])
+                    parent_ref = f"mark:{len(commits_to_write)}"
+                if merge_snapshot is not None:
+                    assert remote_tip is not None
+                    changes, modes = mirror_tree_changes(store, store.load_snapshot_tree(target_snapshot), store.load_snapshot_tree(merge_snapshot), hidden)
+                    for change in gitmirror.diff_tree(git_dir, synced_commit, remote_tip) if synced_commit_known else []:
+                        if not mirror_is_mirrorable(change.path, hidden):
+                            changes[change.path] = None if change.status == "D" else (change.mode, change.oid)
+                    name, email = mirror_actor_ident(actor)
+                    commits_to_write.append(
+                        gitmirror.OutboundCommit(
+                            parents=[parent_ref, remote_tip],
+                            message=f"Merge Git branch {mirror['branch']} into Tri target {target['name']}\n\nTri-Snapshot: {merge_snapshot}\n",
+                            author=(name, email, int(time.time())),
+                            changes=changes,
+                            modes=modes,
+                        )
+                    )
+                    step_snapshots.append(merge_snapshot)
+            if commits_to_write:
+                shas = gitmirror.fast_import(git_dir, commits_to_write)
+                gitmirror.push(git_dir, mirror["remote"], shas[-1], mirror["branch"])
+                pair_commit = shas[-1]
+            else:
+                # Only non-mirrorable paths changed: Git already matches.
+                shas = []
+                pair_commit = remote_tip or synced_commit
+            pair_snapshot = merge_snapshot or target_snapshot
+            with store.conn:
+                for snapshot_id, sha in zip(step_snapshots, shas):
+                    mirror_record_commit(store, mirror["id"], snapshot_id, sha, "outbound")
+                store.conn.execute(
+                    "UPDATE mirrors SET synced_snapshot_id = ?, synced_git_commit = ?, event_cursor = MAX(event_cursor, ?) WHERE id = ?",
+                    (pair_snapshot, pair_commit, cursor, mirror["id"]),
+                )
+                mirror_record_commit(store, mirror["id"], pair_snapshot, pair_commit, "pair")
+            result["outbound_commits"] = shas
+    except gitmirror.GitMirrorError as exc:
+        raise mirror_error(exc) from exc
+    result["warnings"] = warnings
+    return result
+
+
+def mirror_save_result(store: Store, mirror_id: str, result: dict[str, Any]) -> None:
+    with store.conn:
+        store.conn.execute("UPDATE mirrors SET last_sync_at = ?, last_result_json = ? WHERE id = ?", (utcnow(), dumps(result), mirror_id))
+
+
+def mirror_sync_with_retry(store: Store, mirror_id: str, *, actor: str, retries: int) -> tuple[dict[str, Any], int]:
+    attempt = 0
+    while True:
+        attempt += 1
+        mirror = store.row("SELECT * FROM mirrors WHERE id = ?", (mirror_id,))
+        try:
+            return mirror_sync_once(store, mirror, actor=actor), attempt
+        except TriError as exc:
+            if not exc.diagnostic.get("retryable") or attempt > retries:
+                raise
+            time.sleep(min(0.1 * attempt, 1.0))
+
+
+def cmd_mirror_add(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    require_maintainer(args.actor, action="mirror.create", object_id=args.project, message="Only maintainers can mirror a target to Git.")
+    project = store.get_project(args.project)
+    target = resolve_target_for_project(store, project["id"], args.target)
+    if store.row("SELECT id FROM mirrors WHERE target_id = ? AND status = 'active'", (target["id"],)):
+        raise TriError("invalid_command", "This target already has an active mirror.", object=target["name"])
+    remote = args.remote
+    if "://" not in remote and not remote.startswith("git@") and Path(remote).exists():
+        remote = str(Path(remote).resolve())
+    mirror_id = new_id("mirror")
+    with store.conn:
+        store.conn.execute(
+            "INSERT INTO mirrors (id, project_id, target_id, remote, branch, audience, prefer, status, event_cursor, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?)",
+            (mirror_id, project["id"], target["id"], remote, args.branch or target["name"], args.audience or DEFAULT_MIRROR_AUDIENCE, args.prefer, args.actor, utcnow()),
+        )
+        evt = store.create_event(kind="mirror.created", actor=args.actor, project_id=project["id"], object_refs={"mirror": mirror_id, "target": target["id"], "remote": remote})
+    events = [evt]
+    diagnostics: list[dict[str, Any]] = []
+    if not args.no_sync:
+        try:
+            result, _ = mirror_sync_with_retry(store, mirror_id, actor=args.actor, retries=args.retry)
+            mirror_save_result(store, mirror_id, result)
+        except TriError as exc:
+            mirror_save_result(store, mirror_id, {"error": exc.diagnostic})
+            diagnostics.append(exc.diagnostic)
+    data = mirror_data(store, store.row("SELECT * FROM mirrors WHERE id = ?", (mirror_id,)))
+    return envelope("tri.mirror.inspect", command, actor=args.actor, start=start, ok=not diagnostics, events=events, diagnostics=diagnostics, data=data)
+
+
+def cmd_mirror_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    if args.project:
+        project = store.get_project(args.project)
+        rows = store.rows("SELECT * FROM mirrors WHERE project_id = ? ORDER BY created_at, rowid", (project["id"],))
+    else:
+        rows = store.rows("SELECT * FROM mirrors ORDER BY created_at, rowid")
+    mirrors = [mirror_data(store, row) for row in rows if args.all or row["status"] == "active"]
+    return envelope("tri.mirror.list", command, actor=args.actor, start=start, data={"mirrors": mirrors})
+
+
+def cmd_mirror_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    return envelope("tri.mirror.inspect", command, actor=args.actor, start=start, data=mirror_data(store, resolve_mirror(store, args.mirror)))
+
+
+def cmd_mirror_remove(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    row = resolve_mirror(store, args.mirror)
+    require_maintainer(args.actor, action="mirror.remove", object_id=row["id"], message="Only maintainers can remove a mirror.")
+    with store.conn:
+        store.conn.execute("UPDATE mirrors SET status = 'removed', removed_at = ? WHERE id = ?", (utcnow(), row["id"]))
+        evt = store.create_event(kind="mirror.removed", actor=args.actor, project_id=row["project_id"], object_refs={"mirror": row["id"]})
+    shutil.rmtree(mirror_git_dir(store, row["id"]), ignore_errors=True)
+    return envelope("tri.mirror.inspect", command, actor=args.actor, start=start, events=[evt], data=mirror_data(store, store.row("SELECT * FROM mirrors WHERE id = ?", (row["id"],))))
+
+
+def cmd_mirror_sync(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    row = resolve_mirror(store, args.mirror)
+    require_maintainer(args.actor, action="mirror.sync", object_id=row["id"], message="Only maintainers can sync a mirror.")
+    if row["status"] != "active":
+        raise TriError("invalid_command", "Mirror was removed.", object=row["id"])
+    cycles: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    cycle = 0
+    while True:
+        cycle += 1
+        try:
+            result, attempts = mirror_sync_with_retry(store, row["id"], actor=args.actor, retries=args.retry)
+            result["attempts"] = attempts
+            mirror_save_result(store, row["id"], result)
+            cycles.append(result)
+            diagnostics = []
+        except TriError as exc:
+            mirror_save_result(store, row["id"], {"error": exc.diagnostic})
+            diagnostics = [exc.diagnostic]
+            if not args.watch or not exc.diagnostic.get("retryable"):
+                break
+        if not args.watch or (args.max_cycles and cycle >= args.max_cycles):
+            break
+        time.sleep(max(args.interval, 0.05))
+    data = mirror_data(store, store.row("SELECT * FROM mirrors WHERE id = ?", (row["id"],)))
+    data["sync"] = cycles[-1] if cycles else None
+    data["cycles"] = cycle
+    warnings = cycles[-1].get("warnings", []) if cycles else []
+    return envelope("tri.mirror.sync", command, actor=args.actor, start=start, ok=not diagnostics, diagnostics=diagnostics, warnings=warnings, data=data)
+
+
 def cmd_check_set_create(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     if "role:maintainer" not in actor_selectors(args.actor):
         raise TriError("policy_denied", "Only maintainers can create project check sets.", object=args.project, action="check_set.create", required_grant="role:maintainer")
@@ -15619,6 +16180,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_rule.add_argument("project")
     p_rule.add_argument("name")
     p_rule.set_defaults(func=cmd_merge_rules_remove)
+
+    p = sub.add_parser("mirror")
+    mirror_sub = p.add_subparsers(dest="mirror_cmd", required=True)
+    p_mirror = mirror_sub.add_parser("add")
+    p_mirror.add_argument("project")
+    p_mirror.add_argument("--remote", required=True)
+    p_mirror.add_argument("--target", default="main")
+    p_mirror.add_argument("--branch")
+    p_mirror.add_argument("--audience")
+    p_mirror.add_argument("--prefer", choices=["git", "tri"])
+    p_mirror.add_argument("--retry", type=int, default=3)
+    p_mirror.add_argument("--no-sync", action="store_true")
+    p_mirror.set_defaults(func=cmd_mirror_add)
+    p_mirror = mirror_sub.add_parser("list")
+    p_mirror.add_argument("project", nargs="?")
+    p_mirror.add_argument("--all", action="store_true")
+    p_mirror.set_defaults(func=cmd_mirror_list)
+    p_mirror = mirror_sub.add_parser("inspect")
+    p_mirror.add_argument("mirror")
+    p_mirror.set_defaults(func=cmd_mirror_inspect)
+    p_mirror = mirror_sub.add_parser("sync")
+    p_mirror.add_argument("mirror")
+    p_mirror.add_argument("--retry", type=int, default=5)
+    p_mirror.add_argument("--watch", action="store_true")
+    p_mirror.add_argument("--interval", type=float, default=30.0)
+    p_mirror.add_argument("--max-cycles", type=int)
+    p_mirror.set_defaults(func=cmd_mirror_sync)
+    p_mirror = mirror_sub.add_parser("remove")
+    p_mirror.add_argument("mirror")
+    p_mirror.set_defaults(func=cmd_mirror_remove)
 
     p = sub.add_parser("checks")
     checks_sub = p.add_subparsers(dest="checks_cmd", required=True)
