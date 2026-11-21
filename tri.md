@@ -293,7 +293,7 @@ Tri is the best agent-native source control only when it wins these measurements
 | Time to first edit on a large repository | seconds, independent of history size | needs a large-repo scenario and sparse checkouts |
 | Merges per hour under contention | no global lock; same-file disjoint edits merge without a person | line merges, merge rules, and merge retries shipped; needs a contention benchmark |
 | Conflict rate per 1,000 merges | lower than path-level merging on the same workload | needs the contention benchmark |
-| Leak tests | no hidden path, secret, private changeset, or embargoed advisory escapes through any read, search, diff, history, log, artifact, export, or API route | task fixtures cover hidden paths and secret leases; needs a sweep across every read route |
+| Leak tests | no hidden path, secret, private changeset, or embargoed advisory escapes through any read, search, diff, history, log, artifact, export, or API route | `tests/test_leak_sweep.py`: one fixture with a private package path, a secret-like path, a leased secret, another actor's private workspace, a private changeset in a public workspace, and an embargoed advisory, each carrying canaries in names, contents, titles, and values; an unprivileged agent runs every read-shaped command with each output flag through the CLI, `tri batch`, the HTTP GET routes, `POST /v0/command`, and `POST /v0/batch`, follows each denial into `policy explain`, and no canary or private id may come back; a guard derived from `COMMAND_CONTRACTS` fails when a new read command is neither swept nor exempted |
 | History without checkout | log, blame, and merge base answered by the store | shipped |
 | Agent harness reach | MCP and HTTP with authenticated, pinned actors | shipped |
 

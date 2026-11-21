@@ -1907,9 +1907,16 @@ def object_access_decision(store: Store, object_id: str, *, actor: str, action: 
     return decision, diagnostics
 
 
-def require_object_access(store: Store, object_id: str, *, actor: str, action: str) -> dict[str, Any]:
+def require_object_access(store: Store, object_id: str, *, actor: str, action: str, requested: str | None = None) -> dict[str, Any]:
+    """requested is what the caller asked for when access is decided on a parent
+    (a conflict's workspace, an export's changeset). The denial names only the
+    requested object, so it cannot reveal the parent the actor may not see."""
     decision, diagnostics = object_access_decision(store, object_id, actor=actor, action=action)
     if diagnostics:
+        if requested and requested != object_id:
+            # Recorded as a flag, not the requested value: explain uses it to
+            # keep the decided object (the parent) redacted.
+            decision["decided_for_requested_object"] = True
         ctx = object_policy_context(store, object_id)
         evt = store.record_policy_decision(
             actor=actor,
@@ -1924,7 +1931,7 @@ def require_object_access(store: Store, object_id: str, *, actor: str, action: s
         raise TriError(
             "policy_denied",
             "Actor is not allowed to access this object.",
-            object=object_id,
+            object=requested or object_id,
             action=action,
             visibility=decision["visibility"],
             required_grant=action,
@@ -3978,7 +3985,7 @@ def patch_for_snapshots(store: Store, base_snapshot: str, head_snapshot: str, hi
             raise TriError(
                 "secret_export_blocked",
                 "Refusing to export secret-like path.",
-                object=path,
+                path_hash=redacted_path_ref(path)["path_hash"],
                 retryable=False,
             )
         if not visible:
@@ -4386,6 +4393,27 @@ def package_split_points_for_paths(store: Store, project_id: str, paths: list[st
     return suggestions
 
 
+def split_points_for_reader(store: Store, points: list[Any], hidden_paths: list[str], *, actor: str | None) -> list[Any]:
+    """Split points are stored with the creator's view; trim them to the reader's.
+    A package the reader cannot read, or a path hidden from them, is dropped."""
+    visible: list[Any] = []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        if point.get("kind") == "package":
+            package_id = point.get("package")
+            if actor is not None and isinstance(package_id, str):
+                decision, _ = object_access_decision(store, package_id, actor=actor, action="package.read")
+                if not decision["allowed"]:
+                    continue
+            matched = [path for path in point.get("matched_paths", []) if isinstance(path, str) and path_visibility(path, hidden_paths)[0]]
+            if not matched:
+                continue
+            point = {**point, "matched_paths": matched}
+        visible.append(point)
+    return visible
+
+
 def cmd_packages_declare(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     if "role:maintainer" not in actor_selectors(args.actor):
         raise TriError("policy_denied", "Only maintainers can declare package boundaries.", object=args.project, action="package.declare", required_grant="role:maintainer")
@@ -4427,7 +4455,7 @@ def cmd_packages_list(store: Store, args: argparse.Namespace, command: list[str]
 
 def cmd_packages_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     package = resolve_package_boundary_for_inspect(store, args.project, args.name)
-    access = require_object_access(store, package["id"], actor=args.actor, action="package.read")
+    access = require_object_access(store, package["id"], actor=args.actor, action="package.read", requested=args.name or args.project)
     return envelope("tri.package.inspect", command, actor=args.actor, start=start, data=package_boundary_data(package, access=access))
 
 
@@ -6480,18 +6508,20 @@ def cmd_workspace_leases(store: Store, args: argparse.Namespace, command: list[s
 
 def cmd_workspace_lease_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     lease = store.get_materialization_lease(args.lease)
-    require_object_access(store, lease["workspace_id"], actor=args.actor, action="workspace.read")
+    require_object_access(store, lease["workspace_id"], actor=args.actor, action="workspace.read", requested=args.lease)
     return envelope("tri.workspace.materialization_lease", command, actor=args.actor, start=start, data=materialization_lease_data(lease))
 
 
 def cmd_leases_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     kind, row = resolve_lease_for_inspect(store, args.lease)
     if kind == "materialization":
-        require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read")
+        require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read", requested=args.lease)
         data = lease_inspect_data(kind, materialization_lease_data(row))
     elif kind == "directory":
         if row["workspace_id"]:
-            require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read")
+            require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read", requested=args.lease)
+        if not disk_lease_check_readable(store, row, actor=args.actor):
+            raise TriError("policy_denied", "Actor is not allowed to access this lease.", object=args.lease, action="check.read", required_grant="check.read")
         data = {"id": row["id"], "kind": "directory", "schema": "tri.disk_lease.inspect", "lease": disk_lease_data(row)}
     else:
         secret_lease_inspect_access(store, row, actor=args.actor)
@@ -6600,6 +6630,17 @@ class RunLease:
             self.abandon()
         else:
             self.release()
+
+
+def disk_lease_check_readable(store: Store, row: sqlite3.Row, *, actor: str) -> bool:
+    """A check's run directory lease names the check; a private changeset's
+    check inside a public workspace stays hidden from workspace readers."""
+    if not row["check_id"]:
+        return True
+    check_row = store.row("SELECT id FROM check_runs WHERE id = ?", (row["check_id"],))
+    if check_row is None:
+        return True
+    return bool(check_access_decision(store, check_data(store, row["check_id"]), actor=actor)["allowed"])
 
 
 def disk_lease_data(row: sqlite3.Row) -> dict[str, Any]:
@@ -7211,7 +7252,7 @@ def cmd_leases_list(store: Store, args: argparse.Namespace, command: list[str], 
             leases.append({"kind": "mount", **materialization_lease_data(row)})
     disk_sql = "SELECT * FROM disk_leases" + (" WHERE workspace_id = ?" if args.workspace else "") + " ORDER BY created_at, rowid"
     for row in store.rows(disk_sql, (args.workspace,) if args.workspace else ()):
-        if can_read(row["workspace_id"]):
+        if can_read(row["workspace_id"]) and disk_lease_check_readable(store, row, actor=args.actor):
             leases.append(disk_lease_data(row))
     if args.status:
         leases = [lease for lease in leases if lease["status"] == args.status]
@@ -8105,7 +8146,7 @@ def cmd_conflicts_list(store: Store, args: argparse.Namespace, command: list[str
 
 def cmd_conflicts_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     row = store.get_workspace_conflict(args.conflict)
-    require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read")
+    require_object_access(store, row["workspace_id"], actor=args.actor, action="workspace.read", requested=args.conflict)
     return envelope("tri.conflicts.inspect", command, actor=args.actor, start=start, data=workspace_conflict_data(store, row))
 
 
@@ -9610,6 +9651,19 @@ def artifact_origin_view(store: Store, origin: dict[str, Any], *, actor: str) ->
     return view
 
 
+def export_shows_paths_hidden_from(store: Store, export_id: str, *, actor: str) -> bool:
+    """An export's patch holds every path its exporter could see. A reader who
+    cannot see one of those paths must not read the patch, even though they can
+    read the changeset."""
+    row = store.get_export(export_id)
+    cs = store.get_changeset(row["changeset_id"])
+    stored = loads(cs["hidden_paths_json"], [])
+    reader_hidden = effective_hidden_patterns(store, cs["project_id"], stored, actor=actor)
+    exporter_hidden = effective_hidden_patterns(store, cs["project_id"], stored, actor=row["actor"])
+    changed = changed_paths(store.load_snapshot_tree(cs["base_snapshot_id"]), store.load_snapshot_tree(cs["head_snapshot_id"]))
+    return any(path_visibility(path, exporter_hidden)[0] and not path_visibility(path, reader_hidden)[0] for path in changed)
+
+
 def artifact_access_decision(store: Store, artifact_id: str, *, actor: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     origins = artifact_origins(store, artifact_id)
     selectors = actor_selectors(actor)
@@ -9653,6 +9707,18 @@ def artifact_access_decision(store: Store, artifact_id: str, *, actor: str) -> t
             redacted_origins += 1
     if not origins and "role:maintainer" not in selectors:
         reason = "unowned_artifact"
+    if allowed and "role:maintainer" not in selectors:
+        # Every route to an export's output (the export, its event, a release)
+        # leads to the same bytes, so the hidden-path check is on the artifact.
+        for origin in origins:
+            if origin.get("type") == "export" and export_shows_paths_hidden_from(store, str(origin["id"]), actor=actor):
+                allowed = False
+                reason = "export_holds_hidden_paths"
+                grants = []
+                visible_origins = []
+                matched_origins = []
+                redacted_origins = len(origins)
+                break
     decision = {
         "id": new_id("decision"),
         "allowed": allowed,
@@ -9941,7 +10007,10 @@ def cmd_search(store: Store, args: argparse.Namespace, command: list[str], start
             changeset_decision, _ = object_access_decision(store, row["changeset_id"], actor=args.actor, action="changeset.read")
             can_read_changeset = changeset_decision["allowed"]
             provenance = {"review": row["id"]}
+            review_hidden_patterns: list[str] = []
             if can_read_changeset:
+                review_cs = store.get_changeset(row["changeset_id"])
+                review_hidden_patterns = effective_hidden_patterns(store, review_cs["project_id"], loads(review_cs["hidden_paths_json"], []), actor=args.actor)
                 provenance["changeset"] = row["changeset_id"]
                 check_summary = loads(row["check_summary_json"], {})
             else:
@@ -9973,6 +10042,8 @@ def cmd_search(store: Store, args: argparse.Namespace, command: list[str], start
                 break
             for action in store.rows("SELECT * FROM review_actions WHERE review_id = ? ORDER BY created_at, rowid", (row["id"],)):
                 action_data = review_action_data(action)
+                if can_read_changeset:
+                    action_data = hide_review_action_anchor(action_data, review_hidden_patterns)
                 action_fields = ("kind", "body", "metadata") if can_read_changeset else ("kind", "body")
                 if not can_read_changeset and action_data.get("metadata"):
                     counters["redacted_skipped"] += 1
@@ -11247,7 +11318,9 @@ def changeset_data(store: Store, cs_id: str, *, include_hidden: bool = False, ac
         "advisory": row["advisory_id"],
         "replacement_changeset": row["replacement_changeset_id"],
         "lifecycle": lifecycle,
-        "suggested_split_points": loads(row["suggested_split_points_json"], []),
+        "suggested_split_points": loads(row["suggested_split_points_json"], [])
+        if include_hidden
+        else split_points_for_reader(store, loads(row["suggested_split_points_json"], []), hidden_paths, actor=actor),
         "stack": changeset_stack_data(store, row, actor=actor),
     }
 
@@ -12043,6 +12116,28 @@ def review_action_data(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def hide_review_action_anchor(action: dict[str, Any], hidden_patterns: list[str]) -> dict[str, Any]:
+    """A comment anchored on a path the reader cannot see keeps its body but
+    loses the anchor; the path is named only by hash."""
+    metadata = action.get("metadata") or {}
+    path = metadata.get("path")
+    if not isinstance(path, str):
+        return action
+    visible, reason = path_visibility(path, hidden_patterns)
+    if visible:
+        return action
+    redacted = {key: value for key, value in metadata.items() if key not in ("path", "line")}
+    redacted.update({"anchor_redacted": True, "path_hash": redacted_path_ref(path)["path_hash"], "redaction": reason})
+    return {**action, "metadata": redacted}
+
+
+def review_action_for_reader(store: Store, action: dict[str, Any], cs: sqlite3.Row, *, actor: str, can_read_changeset: bool) -> dict[str, Any]:
+    if not can_read_changeset:
+        return redacted_review_action_data(action)
+    hidden = effective_hidden_patterns(store, cs["project_id"], loads(cs["hidden_paths_json"], []), actor=actor)
+    return hide_review_action_anchor(action, hidden)
+
+
 def redacted_review_action_data(action: dict[str, Any]) -> dict[str, Any]:
     metadata = action.get("metadata", {})
     redacted_metadata: dict[str, Any] = {}
@@ -12085,12 +12180,10 @@ def get_review_action(store: Store, action_id: str) -> sqlite3.Row:
 
 def review_action_view(store: Store, row: sqlite3.Row, *, actor: str) -> dict[str, Any]:
     review = store.get_review(row["review_id"])
-    require_object_access(store, review["id"], actor=actor, action="review.read")
-    action = review_action_data(row)
+    require_object_access(store, review["id"], actor=actor, action="review.read", requested=row["id"])
     decision, _ = object_access_decision(store, review["changeset_id"], actor=actor, action="changeset.read")
-    if not decision["allowed"]:
-        action = redacted_review_action_data(action)
-    return action
+    cs = store.get_changeset(review["changeset_id"])
+    return review_action_for_reader(store, review_action_data(row), cs, actor=actor, can_read_changeset=decision["allowed"])
 
 
 def require_review_open(review: sqlite3.Row) -> None:
@@ -12632,9 +12725,13 @@ def evaluate_export_policy(
     for path in changed:
         visible, reason = path_visibility(path, hidden_patterns)
         if reason == "secret_like_path":
-            diagnostics.append(decision_denial("secret_export_blocked", "Refusing to export secret-like path.", object=path))
+            # Secret-like paths are hidden from every reader, so the decision
+            # (stored on export records and shown to changeset readers) names
+            # them by hash, like policy-hidden paths.
+            ref = redacted_path_ref(path)
+            diagnostics.append(decision_denial("secret_export_blocked", "Refusing to export secret-like path.", **ref))
             denials.append("secret_export_blocked")
-            redactions.append({"path": path, "reason": "secret_like_path"})
+            redactions.append({"path_hash": ref["path_hash"], "reason": "secret_like_path"})
         elif not visible:
             ref = redacted_path_ref(path)
             diagnostics.append(decision_denial("visibility_export_blocked", "Refusing to export a policy-hidden path.", **ref))
@@ -12748,6 +12845,9 @@ def evaluate_export_policy(
 
 def cmd_policy_evaluate_export(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     cs = store.get_changeset(args.changeset)
+    # The decision lists the changeset's checks, reviews, snapshots, workspace,
+    # and advisory, so only a reader of the changeset may see it.
+    require_object_access(store, cs["id"], actor=args.actor, action="changeset.read")
     decision, diagnostics = evaluate_export_policy(store, cs, actor=args.actor, action="export.git", override_reason=args.override_reason)
     evt = store.record_policy_decision(actor=args.actor, action="export.git", object_id=cs["id"], decision=decision, project_id=cs["project_id"])
     return envelope("tri.policy.decision", command, actor=args.actor, start=start, ok=decision["allowed"], events=[evt], diagnostics=diagnostics, data=decision)
@@ -12908,7 +13008,7 @@ def require_policy_decision_explain_access(store: Store, event: dict[str, Any], 
         return
     object_id = event["object_refs"].get("object") or event["policy_result"].get("object")
     if not object_id:
-        raise TriError("policy_denied", "Actor is not allowed to explain this policy decision.", object=event["id"])
+        raise TriError("policy_denied", "Actor is not allowed to explain this policy decision.", object=event["object_refs"].get("decision") or event["id"])
     try:
         if str(object_id).startswith("artifact_"):
             decision, _ = artifact_access_decision(store, str(object_id), actor=actor)
@@ -12927,7 +13027,9 @@ def require_policy_decision_explain_access(store: Store, event: dict[str, Any], 
     except TriError:
         decision = {"allowed": False}
     if not decision["allowed"]:
-        raise TriError("policy_denied", "Actor is not allowed to explain this policy decision.", object=event["id"], decision=event["object_refs"].get("decision"))
+        # Name the decision the actor asked about, not the event that records it.
+        decision_id = event["object_refs"].get("decision")
+        raise TriError("policy_denied", "Actor is not allowed to explain this policy decision.", object=decision_id or event["id"], decision=decision_id)
 
 
 def cmd_policy_explain(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -12935,12 +13037,19 @@ def cmd_policy_explain(store: Store, args: argparse.Namespace, command: list[str
     require_policy_decision_explain_access(store, event, actor=args.actor)
     visible_event = event_view_data(store, event, actor=args.actor)
     object_refs = event["object_refs"]
+    decided_object = object_refs.get("object") or event["policy_result"].get("object")
+    if event["policy_result"].get("decided_for_requested_object"):
+        # Decided on a parent of what the actor asked for (the workspace behind a
+        # conflict): name it only as the redacted view does.
+        visible_refs = visible_event.get("object_refs") or {}
+        visible_result = visible_event.get("policy_result") or {}
+        decided_object = visible_refs.get("object") or visible_result.get("object")
     data = {
         "id": args.decision,
         "decision": visible_event["policy_result"],
         "event": visible_event,
         "action": object_refs.get("action") or event["policy_result"].get("action"),
-        "object": object_refs.get("object") or event["policy_result"].get("object"),
+        "object": decided_object,
         "recorded_at": event["created_at"],
     }
     return envelope("tri.policy.explain", command, actor=args.actor, start=start, data=data)
@@ -13582,12 +13691,15 @@ def cmd_export_list(store: Store, args: argparse.Namespace, command: list[str], 
 
 def cmd_export_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     row = store.get_export(args.export)
-    require_object_access(store, row["changeset_id"], actor=args.actor, action="changeset.read")
+    require_object_access(store, row["changeset_id"], actor=args.actor, action="changeset.read", requested=args.export)
     return envelope("tri.export.inspect", command, actor=args.actor, start=start, data=export_data(store, row, actor=args.actor))
 
 
 def cmd_export_patch(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     cs = store.get_changeset(args.changeset)
+    # An actor who cannot read the changeset gets a plain denial, not an export
+    # record: the record carries the changeset's title, source events, and policy.
+    require_object_access(store, cs["id"], actor=args.actor, action="changeset.read")
     decision, diagnostics = evaluate_export_policy(store, cs, actor=args.actor, action="export.git_patch", override_reason=args.override_reason)
     policy_event = store.record_policy_decision(actor=args.actor, action="export.git_patch", object_id=cs["id"], decision=decision, project_id=cs["project_id"])
     if diagnostics:
@@ -13655,6 +13767,9 @@ def cmd_export_patch(store: Store, args: argparse.Namespace, command: list[str],
 
 def cmd_export_commit(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     cs = store.get_changeset(args.changeset)
+    # An actor who cannot read the changeset gets a plain denial, not an export
+    # record: the record carries the changeset's title, source events, and policy.
+    require_object_access(store, cs["id"], actor=args.actor, action="changeset.read")
     project = store.get_project(cs["project_id"])
     repo = Path(args.repo or project["root_path"]).resolve()
     decision, diagnostics = evaluate_export_policy(store, cs, actor=args.actor, action="export.git_commit", override_reason=args.override_reason)
@@ -13730,6 +13845,9 @@ def github_pr_body(store: Store, cs: sqlite3.Row, body: str | None, *, actor: st
 
 def cmd_export_github_pr(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     cs = store.get_changeset(args.changeset)
+    # An actor who cannot read the changeset gets a plain denial, not an export
+    # record: the record carries the changeset's title, source events, and policy.
+    require_object_access(store, cs["id"], actor=args.actor, action="changeset.read")
     repo = Path(args.repo).resolve()
     decision, diagnostics = evaluate_export_policy(store, cs, actor=args.actor, action="export.github_pr", override_reason=args.override_reason)
     policy_event = store.record_policy_decision(actor=args.actor, action="export.github_pr", object_id=cs["id"], decision=decision, project_id=cs["project_id"])
@@ -13936,7 +14054,7 @@ def resolve_secret_for_inspect(store: Store, secret_ref: str, project_ref: str |
 
 def cmd_secrets_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     secret = resolve_secret_for_inspect(store, args.secret, args.project)
-    require_object_access(store, secret["id"], actor=args.actor, action="secret.read")
+    require_object_access(store, secret["id"], actor=args.actor, action="secret.read", requested=args.secret)
     return envelope("tri.secrets.inspect", command, actor=args.actor, start=start, data=secret_data(secret))
 
 
@@ -14339,7 +14457,7 @@ def review_data(store: Store, review_id: str, *, actor: str = "actor_local") -> 
     cs = store.get_changeset(row["changeset_id"])
     changeset_decision, changeset_diagnostics = object_access_decision(store, cs["id"], actor=actor, action="changeset.read")
     can_read_changeset = changeset_decision["allowed"]
-    actions = all_actions if can_read_changeset else [redacted_review_action_data(action) for action in all_actions]
+    actions = [review_action_for_reader(store, action, cs, actor=actor, can_read_changeset=can_read_changeset) for action in all_actions]
     comment_threads = review_comment_threads(actions)
     attached_policy_findings = [action for action in actions if action["kind"] == "policy_finding_attached"]
     attached_check_summaries = [action for action in actions if action["kind"] == "check_summary_attached"]
