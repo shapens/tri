@@ -523,6 +523,13 @@
       "usage": "tri files write <workspace> <path> (--text <text> | --base64 <data> | --body <file>) [--expect-head <snapshot>]"
     },
     {
+      "data_schema": "schemas/tri.files.write_batch.json",
+      "description": "Atomically write multiple files in one workspace snapshot and transaction.",
+      "name": "files-write-batch",
+      "schema": "tri.files.write_batch",
+      "usage": "tri files write-batch <workspace> --entries-json <json> [--expect-head <snapshot>]"
+    },
+    {
       "data_schema": "schemas/tri.files.delete.json",
       "description": "Delete a file through the Tri file API.",
       "name": "files-delete",

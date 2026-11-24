@@ -155,6 +155,9 @@ def maintain(store: cli.Store) -> None:
 
 
 def serve_worker(store: cli.Store, args: argparse.Namespace, *, command: list[str], start: float) -> dict[str, Any]:
+    os.environ.setdefault("TRI_SQLITE_JOURNAL", "WAL")
+    if store.backend == "sqlite":
+        store.set_journal()
     proto_in, proto_out = claim_stdio()
     try:
         auth_file = cli.configure_serve_runtime(args)

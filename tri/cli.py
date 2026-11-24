@@ -139,6 +139,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "files-read", "usage": "tri files read <workspace-or-snapshot> <path> [--offset <n>] [--limit <n>]", "schema": "tri.files.read", "description": "Read a file through the Tri file API."},
     {"name": "files-fetch", "usage": "tri files fetch <workspace-or-snapshot> --path <path> [--path <path>] [--max-bytes <n>] [--hashes-only]", "schema": "tri.files.fetch", "description": "Read several files in one call as base64 (remote mounts); paths beyond the byte budget come back in deferred."},
     {"name": "files-write", "usage": "tri files write <workspace> <path> (--text <text> | --base64 <data> | --body <file>) [--expect-head <snapshot>]", "schema": "tri.files.write", "description": "Write a file through the Tri file API."},
+    {"name": "files-write-batch", "usage": "tri files write-batch <workspace> --entries-json <json> [--expect-head <snapshot>]", "schema": "tri.files.write_batch", "description": "Atomically write multiple files in one workspace snapshot and transaction."},
     {"name": "files-delete", "usage": "tri files delete <workspace> <path> [--expect-head <snapshot>]", "schema": "tri.files.delete", "description": "Delete a file through the Tri file API."},
     {"name": "files-move", "usage": "tri files move <workspace> <src> <dest> [--expect-head <snapshot>]", "schema": "tri.files.move", "description": "Move a file through the Tri file API."},
     {"name": "files-log", "usage": "tri files log <ref> <path> [--limit <n>]", "schema": "tri.files.log", "description": "Path history along the first-parent snapshot chain, with change provenance and no checkout."},
@@ -376,6 +377,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.files.list": {"required": ["snapshot", "files", "redacted_skipped", "policy_denied_skipped"]},
     "tri.files.read": {"required": ["snapshot", "path", "blob", "encoding", "text"]},
     "tri.files.write": {"required": ["operation", "snapshot", "paths"]},
+    "tri.files.write_batch": {"required": ["operation", "snapshot", "paths"]},
     "tri.files.delete": {"required": ["operation", "snapshot", "paths"]},
     "tri.files.move": {"required": ["operation", "snapshot", "paths"]},
     "tri.files.search": {"required": ["snapshot", "query", "matches", "redacted_skipped", "truncated"]},
@@ -614,6 +616,7 @@ _POSTGRES_READY: set[tuple[str, str]] = set()
 
 
 _SCHEMA_FINGERPRINT: list[str] = []
+_SQLITE_SCHEMA_READY: set[Path] = set()
 
 
 def store_schema_fingerprint() -> str:
@@ -661,26 +664,40 @@ class Store:
         # unpack in progress.
         self.lock_file = FileLock(self.lock_path)
         self.lock_file.acquire(exclusive=False)
-        self.admin_lock = FileLock(self.home / "tri.sqlite3.admin.lock")
-        self.admin_lock.acquire(exclusive=True)
-        try:
-            self._open_db(pack_on_close)
-        finally:
-            self.admin_lock.release()
+        self.admin_lock: Any | None = None
+        if self.db_path.exists() and self.db_path in _SQLITE_SCHEMA_READY:
+            # Shared open lock prevents any concurrent pack/unlink while open;
+            # schema is already verified in-process, so skip exclusive admin_lock.
+            self._open_db_fast(pack_on_close)
+        else:
+            self.admin_lock = FileLock(self.home / "tri.sqlite3.admin.lock")
+            self.admin_lock.acquire(exclusive=True)
+            try:
+                self._open_db(pack_on_close)
+            finally:
+                self.admin_lock.release()
 
-    def _open_db(self, pack_on_close: bool | None) -> None:
+    def _resolve_pack_on_close(self, pack_on_close: bool | None) -> bool:
         self.pack_db_max_bytes: int | None = None
         if pack_on_close is None:
             pack_value = os.environ.get("TRI_SQLITE_PACK", "auto").lower()
             if pack_value == "auto":
-                pack_on_close = True
                 try:
                     self.pack_db_max_bytes = int(os.environ.get("TRI_SQLITE_PACK_MAX_BYTES", "100000"))
                 except ValueError:
                     self.pack_db_max_bytes = 100000
-            else:
-                pack_on_close = pack_value not in {"0", "false", "no", "off"}
-        self.pack_on_close = pack_on_close
+                return True
+            return pack_value not in {"0", "false", "no", "off"}
+        return pack_on_close
+
+    def _open_db_fast(self, pack_on_close: bool | None) -> None:
+        self.pack_on_close = self._resolve_pack_on_close(pack_on_close)
+        self.conn = sqlite3.connect(self.db_path, timeout=30, isolation_level="IMMEDIATE")
+        self.conn.row_factory = sqlite3.Row
+        self.set_journal()
+
+    def _open_db(self, pack_on_close: bool | None) -> None:
+        self.pack_on_close = self._resolve_pack_on_close(pack_on_close)
         if not self.db_path.exists() and self.packed_db_path.exists():
             self.unpack_db()
         new_db = not self.db_path.exists()
@@ -688,7 +705,7 @@ class Store:
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.runs.mkdir(parents=True, exist_ok=True)
         self.secrets.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, timeout=30)
+        self.conn = sqlite3.connect(self.db_path, timeout=30, isolation_level="IMMEDIATE")
         self.conn.row_factory = sqlite3.Row
         if new_db:
             try:
@@ -702,6 +719,7 @@ class Store:
             # Schema creation and migration checks were about half the cost of
             # opening a store per request; skip them when nothing changed.
             self.set_journal()
+            _SQLITE_SCHEMA_READY.add(self.db_path)
             return
         self.init_db()
         with self.conn:
@@ -709,6 +727,7 @@ class Store:
                 "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("schema_fingerprint", store_schema_fingerprint()),
             )
+        _SQLITE_SCHEMA_READY.add(self.db_path)
 
     def _schema_current(self) -> bool:
         try:
@@ -774,11 +793,26 @@ class Store:
         return self._materializer
 
     def set_journal(self) -> None:
-        journal_mode = os.environ.get("TRI_SQLITE_JOURNAL", "DELETE").upper()
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        explicit = os.environ.get("TRI_SQLITE_JOURNAL")
+        journal_mode = (explicit or "DELETE").upper()
         if journal_mode not in {"DELETE", "WAL", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
             journal_mode = "DELETE"
-        self.conn.execute(f"PRAGMA journal_mode={journal_mode}")
-        self.conn.execute("PRAGMA journal_size_limit=0")
+        # Read current mode first so concurrent opens avoid taking a write lock
+        # just to re-assert an already active journal mode (and never downgrade
+        # an active WAL database unless explicitly requested).
+        cur_row = self.conn.execute("PRAGMA journal_mode").fetchone()
+        cur_mode = str(cur_row[0]).upper() if cur_row else ""
+        if explicit is None and cur_mode == "WAL":
+            journal_mode = "WAL"
+        elif cur_mode != journal_mode:
+            self.conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        if journal_mode == "WAL":
+            sync_mode = os.environ.get("TRI_SQLITE_SYNCHRONOUS", "NORMAL").upper()
+            if sync_mode in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+                self.conn.execute(f"PRAGMA synchronous={sync_mode}")
+        else:
+            self.conn.execute("PRAGMA journal_size_limit=0")
 
     def init_db(self) -> None:
         self.set_journal()
@@ -1353,6 +1387,7 @@ class Store:
             self.db_path.unlink()
         except FileNotFoundError:
             pass
+        _SQLITE_SCHEMA_READY.discard(self.db_path)
         for suffix in ("-journal", "-wal", "-shm"):
             sidecar = Path(f"{self.db_path}{suffix}")
             if sidecar.exists():
@@ -1362,13 +1397,16 @@ class Store:
         if self.backend == "postgres":
             pgstore.release(self.conn)
             return
-        try:
-            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.Error:
-            pass
+        if self.pack_on_close:
+            try:
+                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
         self.conn.close()
         if self.pack_on_close and self.lock_file is not None:
             try:
+                if self.admin_lock is None:
+                    self.admin_lock = FileLock(self.home / "tri.sqlite3.admin.lock")
                 self.admin_lock.acquire(exclusive=True)
                 try:
                     # Drop our open lock, then pack only if nobody else has the
@@ -1383,7 +1421,9 @@ class Store:
         if self.lock_file is not None:
             self.lock_file.close()
             self.lock_file = None
-        self.admin_lock.close()
+        if self.admin_lock is not None:
+            self.admin_lock.close()
+            self.admin_lock = None
 
     def row(self, sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
         return self.conn.execute(sql, params).fetchone()
@@ -2550,7 +2590,7 @@ def summary_data(schema: str, data: Any) -> Any:
         }
     if schema == "tri.workspace.create":
         return {key: data.get(key) for key in ("id", "project", "head_snapshot", "task", "task_run", "status")}
-    if schema == "tri.files.write":
+    if schema in ("tri.files.write", "tri.files.write_batch"):
         return {key: data.get(key) for key in ("operation", "snapshot", "paths")}
     if schema == "tri.check.inspect":
         return {
@@ -9889,6 +9929,74 @@ def cmd_files_write(store: Store, args: argparse.Namespace, command: list[str], 
     return envelope("tri.files.write", command, actor=args.actor, start=start, events=events, data=result)
 
 
+def cmd_files_write_batch(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    try:
+        raw_entries = json.loads(args.entries_json)
+    except json.JSONDecodeError as exc:
+        raise TriError("invalid_command", f"--entries-json is not valid JSON: {exc.msg}") from None
+
+    writes: list[tuple[str, bytes, str]] = []
+    if isinstance(raw_entries, dict):
+        for rel_path, spec in sorted(raw_entries.items()):
+            path = normalize_path(str(rel_path))
+            if isinstance(spec, str):
+                writes.append((path, spec.encode("utf-8"), "100644"))
+            elif isinstance(spec, dict):
+                mode = str(spec.get("mode", "100644"))
+                if mode not in ("100644", "100755", "120000"):
+                    raise TriError("invalid_command", f"Unsupported file mode: {mode}", path=path)
+                if "base64" in spec and spec["base64"] is not None:
+                    try:
+                        data = base64.b64decode(str(spec["base64"]), validate=True)
+                    except ValueError:
+                        raise TriError("invalid_command", f"Invalid base64 for {path}.", path=path) from None
+                else:
+                    data = str(spec.get("text", "")).encode("utf-8")
+                writes.append((path, data, mode))
+            else:
+                raise TriError("invalid_command", f"Invalid entry for {path}.", path=path)
+    elif isinstance(raw_entries, list):
+        for item in raw_entries:
+            if not isinstance(item, dict) or "path" not in item:
+                raise TriError("invalid_command", "Each entry in --entries-json list must be an object with 'path'.")
+            path = normalize_path(str(item["path"]))
+            mode = str(item.get("mode", "100644"))
+            if mode not in ("100644", "100755", "120000"):
+                raise TriError("invalid_command", f"Unsupported file mode: {mode}", path=path)
+            if "base64" in item and item["base64"] is not None:
+                try:
+                    data = base64.b64decode(str(item["base64"]), validate=True)
+                except ValueError:
+                    raise TriError("invalid_command", f"Invalid base64 for {path}.", path=path) from None
+            else:
+                data = str(item.get("text", "")).encode("utf-8")
+            writes.append((path, data, mode))
+    else:
+        raise TriError("invalid_command", "--entries-json must be a JSON object or list.")
+
+    if not writes:
+        raise TriError("invalid_command", "--entries-json must contain at least one file.")
+
+    def apply(entries: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        touched: list[str] = []
+        for path, data, mode in writes:
+            blob = store.put_blob(data)
+            entries[path] = {"blob": blob["id"], "hash": blob["hash"], "size": blob["size"], "mode": mode}
+            touched.append(path)
+        return dict(sorted(entries.items())), sorted(set(touched))
+
+    result, events = mutate_workspace(
+        store,
+        args.workspace,
+        actor=args.actor,
+        kind="write_file_batch",
+        apply_change=apply,
+        metadata={"count": len(writes), "paths": sorted({p for p, _, _ in writes})},
+        expect_head=args.expect_head,
+    )
+    return envelope("tri.files.write_batch", command, actor=args.actor, start=start, events=events, data=result)
+
+
 def cmd_files_search(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     snapshot, hidden_patterns = resolve_ref_context(store, args.ref, actor=args.actor, action="workspace.read")
     entries = store.load_snapshot_tree(snapshot)
@@ -16544,6 +16652,7 @@ def api_server_data(host: str, port: int) -> dict[str, Any]:
 
 
 class TriAPIHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     server_version = "tri-api/0.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -17379,6 +17488,9 @@ def cmd_worker(store: Store, args: argparse.Namespace, command: list[str], start
 
 
 def cmd_serve(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    os.environ.setdefault("TRI_SQLITE_JOURNAL", "WAL")
+    if store.backend == "sqlite":
+        store.set_journal()
     auth_file = configure_serve_runtime(args)
     server = TriHTTPServer((args.host, args.port), TriAPIHandler)
     server.authority = TokenAuthority(Path(auth_file).resolve()) if auth_file else None
@@ -17781,6 +17893,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_write.add_argument("--base64")
     p_write.add_argument("--expect-head")
     p_write.set_defaults(func=cmd_files_write)
+    p_write_batch = files_sub.add_parser("write-batch")
+    p_write_batch.add_argument("workspace")
+    p_write_batch.add_argument("--entries-json", required=True)
+    p_write_batch.add_argument("--expect-head")
+    p_write_batch.set_defaults(func=cmd_files_write_batch)
     p_delete = files_sub.add_parser("delete")
     p_delete.add_argument("workspace")
     p_delete.add_argument("path")
@@ -18439,6 +18556,10 @@ def execute_argv(
             require_no_server_paths(args, actor=getattr(args, "actor", effective_actor))
         except TriError as exc:
             return envelope("tri.error", ["tri", *argv], ok=False, actor=getattr(args, "actor", effective_actor), diagnostics=[exc.diagnostic], start=start), 1
+    if getattr(args, "cmd", None) in ("serve", "worker"):
+        os.environ.setdefault("TRI_SQLITE_JOURNAL", "WAL")
+        if pack_on_close is None:
+            pack_on_close = False
     try:
         active_store = store or Store(pack_on_close=pack_on_close)
     except sqlite3.Error as exc:

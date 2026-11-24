@@ -67,6 +67,7 @@
     "schemas/tri.files.search.json",
     "schemas/tri.files.stat.json",
     "schemas/tri.files.write.json",
+    "schemas/tri.files.write_batch.json",
     "schemas/tri.gc.json",
     "schemas/tri.ignore.list.json",
     "schemas/tri.import.json",
