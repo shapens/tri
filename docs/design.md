@@ -121,8 +121,6 @@ Tri's position against Scion:
 
 Update 2026-11: Entire is now a forge. It opened on 26 October 2026, hosts Git repositories, replaces the pull request with Trails (agent scores on each push), and keeps agent session memory. The checkpoint analysis below still describes how its context capture works; the difference is that Entire now also competes for the hosted destination, so a hosted Tri would compete with it directly.
 
-### Entire
-
 Sources: <https://entire.io/>, <https://entire.io/blog/hello-entire-world>, <https://docs.entire.io/overview>, <https://docs.entire.io/cli/checkpoints>, <https://docs.entire.io/agents/overview>, <https://docs.entire.io/web/inspect-session>, <https://docs.entire.io/security>, <https://github.com/entireio/cli>
 
 Entire's strong idea is that agent work loses too much context when only the Git diff survives. It captures prompts, transcripts, tool calls, files touched, token usage, and session metadata, then links that context to Git commits through checkpoints.
@@ -325,7 +323,7 @@ Tri is the best agent-native source control only when it wins these measurements
 | Agent harness reach | MCP and HTTP with authenticated, pinned actors | shipped |
 | API serving under concurrency | reads scale with cores; no single interpreter in the request path | `tri-bench-serving`, 32 authenticated clients, 8 workers: files read 156 to 1,960 requests/s (p99 365 to 67 ms) with `tri-server`; files write 66 to 146 and changeset propose 66 to 85 requests/s on the default DELETE journal, 263 and 199 with WAL; writes are now bound by SQLite, not the server; `benchmark-results/serving/`, `serving-wal/` |
 
-## Response To Theo's Rant
+## Design Principles
 
 ### Partial Open Source
 

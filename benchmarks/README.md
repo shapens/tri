@@ -75,7 +75,7 @@ The GitButler and Entire adapters intentionally use their documented automation 
 
 ## Contention Benchmark
 
-`tri-bench-contention` (`benchmarks/contention.py`) measures the two contention rows of the Agent-Scale Scorecard in `tri.md`: merges per hour under contention, and conflicts per 1,000 merges.
+`tri-bench-contention` (`benchmarks/contention.py`) measures the two contention rows of the Agent-Scale Scorecard in [docs/design.md](../docs/design.md): merges per hour under contention, and conflicts per 1,000 merges.
 
 The fixture is a generated repository of shared text files (`--files 20` x `--lines 200` by default). `--agents` agents (default 50) run `--parallel` at a time (default 8). Each agent starts from the current main, reads `--edits-per-agent` shared files (default 2), rewrites `--edit-lines` consecutive lines in each (default 3), runs a trivial check, and merges to main. Regions are assigned from a seeded shuffle so edits from different agents never touch and keep two unchanged lines between them; an `--overlap` fraction of agents (default 0.1) instead rewrites exactly the same lines as another agent that starts at about the same time, which is a real conflict for every target when the two race (when one merges before the other starts, the second reads the first's lines and rewrites them knowingly, which is not a conflict).
 
@@ -92,7 +92,7 @@ Targets:
 
 Per target it records merges attempted, succeeded, conflicted, and retry-exhausted; retries; wall time of the agent phase; merges per hour (successful merges over that wall time); conflicts per 1,000 merges (conflicted over attempted); p50 and p95 merge latency (the merge call or push loop alone); line merges performed; conflicts by agents outside the deliberate overlap; and a correctness check of final main: every merged agent's edit is present unless a later merged agent read it and rewrote it, conflicted agents' edits are absent, every other line is the base line, and no file gained or lost lines. A target whose correctness check fails reports `failed`.
 
-Measured on macOS (Apple silicon), 50 agents, 8 at a time, 20 files x 200 lines, overlap 0.1, retry budget 5 (`benchmark-results/contention-50`):
+Measured on macOS (Apple silicon), 50 agents, 8 at a time, 20 files x 200 lines, overlap 0.1, retry budget 5:
 
 | Target | Attempted | Merged | Conflicted | Retry-exhausted | Retries | Wall s | Merges/hour | Conflicts per 1,000 | p50 merge s | p95 merge s | Correct |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -172,15 +172,15 @@ Use `--keep-workdir` with either runner when debugging generated repositories or
 
 ## Virtual Checkout Benchmark
 
-`tri-bench-virtual` (`benchmarks/virtual.py`) measures time to first read and bytes fetched for a full checkout, a `--paths` partial checkout of one package, and a `--virtual` FUSE view (Linux only), through the local store and through a loopback `tri serve` with an empty per-machine cache. Defaults: `--files 50000` x `--file-size 1024` in `--packages 200`; `--modes full,paths,virtual`, `--transports local,remote`. For the view it also times a walk of one whole package and reports how many bytes that fetched. Results go to `benchmark-results/virtual-<timestamp>/` (`--output-dir` to choose); the recorded 50,000-file run is `benchmark-results/virtual-50k/`.
+`tri-bench-virtual` (`benchmarks/virtual.py`) measures time to first read and bytes fetched for a full checkout, a `--paths` partial checkout of one package, and a `--virtual` FUSE view (Linux only), through the local store and through a loopback `tri serve` with an empty per-machine cache. Defaults: `--files 50000` x `--file-size 1024` in `--packages 200`; `--modes full,paths,virtual`, `--transports local,remote`. For the view it also times a walk of one whole package and reports how many bytes that fetched. Results are written to `benchmark-results/virtual-<timestamp>/` (gitignored; pass `--output-dir` to choose).
 
 ## Serving Benchmark
 
 `tri-bench-serving` measures requests per second and p50/p99 latency through the HTTP API for files read, files write, workspace create, and changeset propose at 1, 8, and 32 concurrent authenticated clients, comparing `tri serve` with `tri-server` (the Go front server over persistent Python workers). Build the server first (`cd native/tri-server && go build -o tri-server .`).
 
 ```sh
-tri-bench-serving --output benchmark-results/serving                  # default SQLite journal (DELETE)
-tri-bench-serving --journal WAL --no-profile --output benchmark-results/serving-wal
+tri-bench-serving --output benchmark-results/serving                  # default SQLite journal (WAL for serve/worker)
+tri-bench-serving --journal DELETE --no-profile --output benchmark-results/serving-delete
 tri-bench-serving --concurrency 1,8 --requests files-read=200,files-write=80   # quick run
 ```
 

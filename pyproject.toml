@@ -5,8 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tri-vcs"
 version = "0.1.0"
-description = "Agent-native source control prototype"
+description = "Agent-native source control and copy-on-write workspaces"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
+
+[project.urls]
+Homepage = "https://github.com/shapens/tri"
+Repository = "https://github.com/shapens/tri"
+Issues = "https://github.com/shapens/tri/issues"
 
 [project.scripts]
 tri = "tri.cli:main"

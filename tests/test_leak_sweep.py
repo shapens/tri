@@ -23,7 +23,7 @@ never carry over, and searches query a fragment of a canary, never the canary.
 Denials are followed too: each policy_denied decision is explained as the same
 actor, and the explanation must not name what the denial withheld.
 
-Decisions recorded here (tri.md, "Policy Applies To Reads And Exports" and
+Decisions recorded here (docs/design.md, "Policy Applies To Reads And Exports" and
 "Hidden In-Flight Work"):
 
 - A hidden path is hidden by name too. Reads may say that something was

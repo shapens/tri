@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 *.egg-info/
+.pytest_cache/
 .tri/
-.superpowers/
+benchmark-results/
+native/tri-server/tri-server
+native/tri-server/tri-server.exe

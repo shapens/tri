@@ -1,7 +1,7 @@
 """Versioned contract files generated from the registries in `tri/cli.py`.
 
 The JSON contracts are the compatibility boundary for rewriting the server
-(tri.md, "Production runtime"): any implementation that produces these
+(docs/design.md, "Production runtime"): any implementation that produces these
 envelopes for these commands and routes can replace the Python one. This module
 turns `COMMAND_CONTRACTS`, `SCHEMA_CATALOG`, `API_BLOCKED_COMMANDS`, and the HTTP
 endpoint catalog into JSON Schema (draft 2020-12) files under `contracts/v0/`.

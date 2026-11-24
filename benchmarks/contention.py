@@ -1,7 +1,7 @@
 """Contention benchmark: N agents edit shared files and merge to main at once —
 Tri line merges versus Tri path-level merges versus Git pull-rebase-push.
 
-It measures the two contention rows of the Agent-Scale Scorecard in ``tri.md``:
+It measures the two contention rows of the Agent-Scale Scorecard in ``docs/design.md``:
 merges per hour under contention, and conflicts per 1,000 merges.
 
 Each agent starts from the current main, reads a few shared files, rewrites a
