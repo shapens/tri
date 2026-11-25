@@ -231,6 +231,21 @@ def _prepare_mountpoint(root: Path, error: Any) -> Path:
     return root
 
 
+def visible_root_manifest(store: Any, ws: Any, actor: str) -> tuple[str, dict[str, dict[str, Any]], dict[str, list[str]], list[str], int]:
+    """Lazy root-only manifest built from ``list_directory_visible`` without flattening the repo."""
+    from tri.cli import list_directory_visible, resolve_ref_context
+
+    snapshot, hidden = resolve_ref_context(store, ws["id"], actor=actor, action="workspace.read")
+    listing = list_directory_visible(store, snapshot, "", hidden)
+    entries = {
+        item["path"]: {key: item[key] for key in ("blob", "hash", "size", "mode", "symlink_target") if item.get(key) is not None}
+        for item in listing["files"]
+    }
+    root_names = sorted([sub["name"] for sub in listing["directories"]] + [item["name"] for item in listing["files"]])
+    known_dirs = ["", *[sub["path"] for sub in listing["directories"]]]
+    return snapshot, entries, {"": root_names}, known_dirs, int(listing["redacted_skipped"])
+
+
 def visible_manifest_entries(store: Any, ws: Any, actor: str) -> tuple[str, dict[str, dict[str, Any]], int]:
     """The view's lower layer: exactly what ``files list`` shows this actor."""
     from tri.cli import path_visibility, resolve_ref_context
@@ -270,7 +285,7 @@ def mount_local(store: Any, args: Any, command: list[str], start: float) -> dict
     root = _resolve_mountpoint(args.path, TriError)
     cli.claim_mount_path(store, root, actor=args.actor)  # may reap (and remove) a dead view first
     _prepare_mountpoint(root, TriError)
-    snapshot, entries, redacted = visible_manifest_entries(store, ws, args.actor)
+    snapshot, entries, dirs, known_dirs, redacted = visible_root_manifest(store, ws, args.actor)
     if snapshot != ws["head_snapshot_id"]:
         raise TriError("stale_materialization", "Workspace head moved while mounting; retry.", object=ws["id"], retryable=True)
     ttl_seconds = None if args.no_ttl else (args.ttl_seconds or cli.DEFAULT_MOUNT_TTL_SECONDS)
@@ -288,7 +303,10 @@ def mount_local(store: Any, args: Any, command: list[str], start: float) -> dict
             "mountpoint": str(root),
             "read_only": read_only,
             "mounted_at": time.time(),
+            "lazy_trees": True,
             "entries": entries,
+            "dirs": dirs,
+            "known_dirs": known_dirs,
         },
     )
     ignored_paths = cli.normalize_hidden_patterns(args.ignore_path)
@@ -536,22 +554,46 @@ def remote_mount(client: Any, argv: list[str], workspace: str, dest: Path, *, fo
     root = dest.resolve()
     if any(root.iterdir()):
         return error_envelope(argv, "mount_path_in_use", "A virtual checkout needs an empty or new directory.", object=str(root))
-    listing = client.command(["files", "list", workspace])
+    listing = client.command(["files", "ls", workspace])
     if not listing.get("ok"):
         return listing
     snapshot = listing["data"]["snapshot"]
     entries = {}
+    root_names: list[str] = []
+    known_dirs: list[str] = [""]
+    for sub in listing["data"]["directories"]:
+        sub_path = sub["path"]
+        if ".." in sub_path.split("/") or sub_path.startswith("/"):
+            return error_envelope(argv, "path_escaped_mount", "Server listed a path outside the mount.", object=sub_path)
+        known_dirs.append(sub_path)
+        root_names.append(sub["name"])
     for item in listing["data"]["files"]:
         path = item["path"]
         if ".." in path.split("/") or path.startswith("/"):
             return error_envelope(argv, "path_escaped_mount", "Server listed a path outside the mount.", object=path)
         entries[path] = {key: item[key] for key in ("blob", "hash", "size", "mode", "symlink_target") if item.get(key) is not None}
+        root_names.append(item["name"])
     state_dir = _remote_state_dir(root)
     if state_dir.exists():
         if vfs.daemon_alive(state_dir):
             return error_envelope(argv, "mount_path_in_use", "A virtual checkout already serves this directory.", object=str(root))
         shutil.rmtree(state_dir, ignore_errors=True)
-    vfs.write_manifest(state_dir, {"source": "remote", "remote": client.url, "workspace": workspace, "snapshot": snapshot, "mountpoint": str(root), "read_only": False, "mounted_at": time.time(), "entries": entries})
+    vfs.write_manifest(
+        state_dir,
+        {
+            "source": "remote",
+            "remote": client.url,
+            "workspace": workspace,
+            "snapshot": snapshot,
+            "mountpoint": str(root),
+            "read_only": False,
+            "mounted_at": time.time(),
+            "lazy_trees": True,
+            "entries": entries,
+            "dirs": {"": sorted(set(root_names))},
+            "known_dirs": sorted(set(known_dirs)),
+        },
+    )
     state = {"remote": client.url, "workspace": workspace, "snapshot": snapshot, "path": str(root), "paths": [], "virtual": str(state_dir), "entries": {}}
     state_file = mount_state_path(root)
     state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -575,11 +617,15 @@ def remote_mount(client: Any, argv: list[str], workspace: str, dest: Path, *, fo
     return envelope("tri.remote.mount", ["tri", *argv], start=started, data=data)
 
 
-def _synced_hash(state_dir: Path, manifest: dict[str, Any], synced: dict[str, Any], path: str) -> str | None:
+def _synced_hash(state_dir: Path, manifest: dict[str, Any], synced: dict[str, Any], path: str, *, lower_hashes: dict[str, str] | None = None) -> str | None:
     if path in synced:
         return synced[path]
     entry = manifest["entries"].get(path)
-    return entry.get("hash") if entry else None
+    if entry:
+        return entry.get("hash")
+    if lower_hashes and path in lower_hashes:
+        return lower_hashes[path]
+    return None
 
 
 def _remote_pending(state_dir: Path) -> tuple[dict[str, tuple[bytes, str]], list[str], list[str], dict[str, Any], dict[str, Any]]:
@@ -587,6 +633,7 @@ def _remote_pending(state_dir: Path) -> tuple[dict[str, tuple[bytes, str]], list
 
     manifest = vfs.load_manifest(state_dir)
     synced = _read_json(state_dir / "synced.json")
+    lower_hashes = vfs.load_layer_state(state_dir).get("lower_hashes", {})
     changed, deleted = vfs.upper_changes(state_dir)
     upper = state_dir / "upper"
     writes: dict[str, tuple[bytes, str]] = {}
@@ -598,9 +645,9 @@ def _remote_pending(state_dir: Path) -> tuple[dict[str, tuple[bytes, str]], list
         full = upper / path
         data = os.readlink(full).encode() if full.is_symlink() else full.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
-        if _synced_hash(state_dir, manifest, synced, path) != digest:
+        if _synced_hash(state_dir, manifest, synced, path, lower_hashes=lower_hashes) != digest:
             writes[path] = (data, digest)
-    deletes = [path for path in deleted if _synced_hash(state_dir, manifest, synced, path) is not None and not is_secret_like_path(path)]
+    deletes = [path for path in deleted if _synced_hash(state_dir, manifest, synced, path, lower_hashes=lower_hashes) is not None and not is_secret_like_path(path)]
     return writes, deletes, skipped, manifest, synced
 
 

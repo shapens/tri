@@ -136,7 +136,7 @@ CI runs across Ubuntu, macOS, and Windows, including Linux gVisor (`runsc`), ove
 
 ## Current Limitations
 
-Single-writer serialization applies per store (both SQLite and PostgreSQL advisory-lock modes); finer-grained per-target/per-workspace locking is not yet implemented. Virtual FUSE checkouts are Linux-only (`--paths` partial checkouts are used on macOS and Windows). Firecracker microVMs are configured through Kata (`TRI_RUN_OCI_RUNTIME=kata-fc`) and are not exercised in GitHub Actions CI because runners lack KVM. Most command logic, policy evaluation, and storage remain in the Python worker pool behind the Go front server.
+SQLite stores serialize writes behind one writer per store; PostgreSQL stores use per-workspace/per-target scoped advisory locks for concurrent workspace and merge writes while serializing store-wide operations (GC, migrations). Virtual FUSE checkouts are Linux-only (`--paths` partial checkouts are used on macOS and Windows). Firecracker microVMs are configured through Kata (`TRI_RUN_OCI_RUNTIME=kata-fc`) and are not exercised in GitHub Actions CI because runners lack KVM. Most command logic, policy evaluation, and storage remain in the Python worker pool behind the Go front server.
 
 ## License
 

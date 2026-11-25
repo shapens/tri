@@ -165,6 +165,73 @@ class VirtualViewTests(unittest.TestCase):
                 call()
             self.assertEqual(caught.exception.errno, errno.EROFS)
 
+    def test_lazy_trees_fault_only_accessed_directories_and_track_deleted_lower_hashes(self) -> None:
+        class FakeLazySource(FakeSource):
+            def __init__(self, blobs: dict[str, bytes], tree_map: dict[str, tuple[list[dict], list[dict]]]) -> None:
+                super().__init__(blobs)
+                self.tree_map = tree_map
+                self.listed_dirs: list[str] = []
+
+            def list_dir(self, directory: str) -> tuple[list[dict], list[dict]]:
+                self.listed_dirs.append(directory)
+                return self.tree_map.get(directory, ([], []))
+
+        blobs = {
+            "h-readme": b"hello\n",
+            "h-app": b"print(1)\n",
+            "h-util": b"x = 1\n",
+            "h-doc": b"unused\n",
+        }
+        tree_map = {
+            "src": (
+                [{"name": "lib", "path": "src/lib", "tree": "tree_lib"}],
+                [{"name": "app.py", "path": "src/app.py", "blob": "b-app", "hash": "h-app", "size": 9, "mode": "100644"}],
+            ),
+            "src/lib": (
+                [],
+                [{"name": "util.py", "path": "src/lib/util.py", "blob": "b-util", "hash": "h-util", "size": 6, "mode": "100644"}],
+            ),
+            "docs": (
+                [],
+                [{"name": "guide.md", "path": "docs/guide.md", "blob": "b-doc", "hash": "h-doc", "size": 7, "mode": "100644"}],
+            ),
+        }
+        lazy_manifest = {
+            "lazy_trees": True,
+            "mounted_at": 1_700_000_000,
+            "entries": {"README.md": {"blob": "b-readme", "hash": "h-readme", "size": 6, "mode": "100644"}},
+            "dirs": {"": ["README.md", "docs", "src"]},
+            "known_dirs": ["", "docs", "src"],
+        }
+        lazy_state = Path(self.tmp.name) / "lazy"
+        source = FakeLazySource(blobs, tree_map)
+        vfs.write_manifest(lazy_state, lazy_manifest)
+        view = vfs.VirtualView(lazy_state, lazy_manifest, source)
+
+        # Listing root needs zero extra directory fetches; untouched `docs/` is never faulted.
+        self.assertEqual(view.listdir(""), ["README.md", "docs", "src"])
+        self.assertEqual(source.listed_dirs, [])
+        self.assertEqual(view.stats.values["dirs_faulted"], 0)
+
+        # Reading a deeply nested file faults only the directories on its path.
+        handle = view.open("src/lib/util.py", os.O_RDONLY)
+        try:
+            content = handle.read(0, 1024)
+        finally:
+            handle.release()
+        self.assertEqual(content, b"x = 1\n")
+        self.assertEqual(source.listed_dirs, ["src", "src/lib"])
+        self.assertEqual(view.stats.values["dirs_faulted"], 2)
+        self.assertNotIn("docs", source.listed_dirs)
+
+        # Deleting a lazily-faulted lower file records its lower hash so remote sync knows to delete it.
+        view.unlink("src/lib/util.py")
+        self.assertEqual(view.listdir("src/lib"), [])
+        layer = vfs.load_layer_state(lazy_state)
+        self.assertEqual(layer["lower_hashes"].get("src/lib/util.py"), "h-util")
+        _, deletes, _, _, _ = virtual._remote_pending(lazy_state)
+        self.assertEqual(deletes, ["src/lib/util.py"])
+
 
 class VirtualCheckoutCliTests(unittest.TestCase):
     def setUp(self) -> None:

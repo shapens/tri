@@ -1,0 +1,24 @@
+{
+  "$id": "schemas/tri.changeset.describe.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "id",
+    "project",
+    "workspace",
+    "redacted_workspace",
+    "title",
+    "description",
+    "previous_title",
+    "previous_description",
+    "changed_fields",
+    "updated",
+    "history_rewritten",
+    "status",
+    "base_snapshot",
+    "head_snapshot",
+    "lifecycle"
+  ],
+  "title": "tri.changeset.describe",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

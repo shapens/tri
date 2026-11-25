@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import copy
 import difflib
 import fnmatch
@@ -25,7 +26,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from socketserver import ThreadingMixIn
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from tri import gitmirror
@@ -101,6 +102,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "trees-inspect", "usage": "tri trees inspect <tree>", "schema": "tri.tree.inspect", "description": "Inspect a policy-visible content tree and its readable file entries."},
     {"name": "blobs-inspect", "usage": "tri blobs inspect <blob>", "schema": "tri.blob.inspect", "description": "Inspect a policy-visible content blob without reading raw bytes by id."},
     {"name": "task-create", "usage": "tri task create <project> --title <title> [--body <text>] [--body-file <path>] [--acceptance <text>] [--required-check <cmd>] [--check-set <name>]", "schema": "tri.task.inspect", "description": "Create an executable work task."},
+    {"name": "task-list", "usage": "tri task list [project] [--status <status>] [--limit <n>]", "schema": "tri.task.list", "description": "List policy-readable tasks for a project or store."},
     {"name": "task-inspect", "usage": "tri task inspect <task>", "schema": "tri.task.inspect", "description": "Inspect an executable task spec."},
     {"name": "task-run-inspect", "usage": "tri task run-inspect <run>", "schema": "tri.task_run.inspect", "description": "Inspect one task-run attempt."},
     {"name": "task-complete-run", "usage": "tri task complete-run <run> --recommendation <text> [--status completed|failed|cancelled]", "schema": "tri.task_run.inspect", "description": "Complete a task run with a final recommendation."},
@@ -135,6 +137,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "conflicts-inspect", "usage": "tri conflicts inspect <conflict>", "schema": "tri.conflicts.inspect", "description": "Inspect a persisted workspace conflict."},
     {"name": "conflicts-resolve", "usage": "tri conflicts resolve <conflict> --strategy ours|theirs|base", "schema": "tri.conflicts.resolve", "description": "Resolve a workspace conflict with an explicit strategy."},
     {"name": "files-list", "usage": "tri files list <workspace-or-snapshot>", "schema": "tri.files.list", "description": "List files in a workspace or snapshot."},
+    {"name": "files-ls", "usage": "tri files ls <workspace-or-snapshot> [dir]", "schema": "tri.files.ls", "description": "Lazily list one directory in a workspace or snapshot tree without flattening the whole repository."},
     {"name": "files-stat", "usage": "tri files stat <workspace-or-snapshot> <path>", "schema": "tri.files.stat", "description": "Inspect path metadata without reading file contents."},
     {"name": "files-read", "usage": "tri files read <workspace-or-snapshot> <path> [--offset <n>] [--limit <n>]", "schema": "tri.files.read", "description": "Read a file through the Tri file API."},
     {"name": "files-fetch", "usage": "tri files fetch <workspace-or-snapshot> --path <path> [--path <path>] [--max-bytes <n>] [--hashes-only]", "schema": "tri.files.fetch", "description": "Read several files in one call as base64 (remote mounts); paths beyond the byte budget come back in deferred."},
@@ -184,9 +187,12 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "checks-stream", "usage": "tri checks stream <check> [--log stdout|stderr] [--offset <n>] [--limit <n>]", "schema": "tri.check.stream", "description": "Read a check log as an offset-addressed chunk."},
     {"name": "checks-rerun", "usage": "tri checks rerun <check>", "schema": "tri.check.inspect", "description": "Rerun a check command as a new check run."},
     {"name": "checks-compare", "usage": "tri checks compare <check...>", "schema": "tri.check.compare", "description": "Compare check-run outcomes."},
-    {"name": "changeset-create", "usage": "tri changeset create <workspace> [--title <title>] [--visibility <selector>] [--hide-path <glob>] [--hide-package <pkg>]", "schema": "tri.changeset.inspect", "description": "Create a reviewable changeset from workspace operations."},
+    {"name": "changeset-create", "usage": "tri changeset create <workspace> [--title <title>] [--description <text> | --description-file <path>] [--visibility <selector>] [--hide-path <glob>] [--hide-package <pkg>]", "schema": "tri.changeset.inspect", "description": "Create a reviewable changeset from workspace operations."},
+    {"name": "changeset-list", "usage": "tri changeset list [project] [--workspace <workspace>] [--status <status>] [--limit <n>]", "schema": "tri.changeset.list", "description": "List policy-readable changesets for a project or store."},
     {"name": "changeset-inspect", "usage": "tri changeset inspect <changeset>", "schema": "tri.changeset.inspect", "description": "Inspect a reviewable changeset and its provenance."},
-    {"name": "changeset-split", "usage": "tri changeset split <changeset> (--paths <glob-list> | --operations <range-list>) [--apply] [--title <title>]", "schema": "tri.changeset.split", "description": "Preview or create a changeset split by path globs or operation ranges."},
+    {"name": "changeset-describe", "usage": "tri changeset describe <changeset> [--title <title>] [--description <text> | --description-file <path>] [--reason <text>]", "schema": "tri.changeset.describe", "description": "Retroactively update a changeset's title or description without rewriting snapshots or history; records an append-only provenance event."},
+    {"name": "changeset-refresh", "usage": "tri changeset refresh <changeset> [--reason <text>]", "schema": "tri.changeset.refresh", "description": "Advance an open changeset's head snapshot, operations, and checks from its active workspace without replacing its id or review threads."},
+    {"name": "changeset-split", "usage": "tri changeset split <changeset> (--paths <glob-list> | --operations <range-list>) [--apply] [--title <title>] [--description <text> | --description-file <path>]", "schema": "tri.changeset.split", "description": "Preview or create a changeset split by path globs or operation ranges."},
     {"name": "changeset-stack", "usage": "tri changeset stack <changeset> --after <parent-changeset>", "schema": "tri.changeset.stack", "description": "Record a changeset dependency without creating branches."},
     {"name": "changeset-revalidate", "usage": "tri changeset revalidate <changeset> [--check <check>] [--required]", "schema": "tri.changeset.revalidate", "description": "Rerun checks against a changeset head snapshot without creating a branch."},
     {"name": "changeset-ready", "usage": "tri changeset ready <changeset> [--reason <text>]", "schema": "tri.changeset.lifecycle", "description": "Move a draft or changes-requested changeset back to ready for review."},
@@ -195,6 +201,7 @@ COMMAND_CONTRACTS: list[dict[str, Any]] = [
     {"name": "changeset-merge", "usage": "tri changeset merge <changeset> --target <target> [--retry <n>]", "schema": "tri.changeset.merge", "description": "Policy-gated merge of an approved changeset into a Tri target."},
     {"name": "changeset-compare", "usage": "tri changeset compare <changeset...>", "schema": "tri.changeset.compare", "description": "Compare multiple agent attempts as changesets."},
     {"name": "review-create", "usage": "tri review create <changeset> [--reviewers <principal>]", "schema": "tri.review.create", "description": "Create a review object for a changeset."},
+    {"name": "review-list", "usage": "tri review list [project] [--changeset <changeset>] [--status <status>] [--limit <n>]", "schema": "tri.review.list", "description": "List policy-readable reviews for a project or store."},
     {"name": "review-inspect", "usage": "tri review inspect <review>", "schema": "tri.review.inspect", "description": "Inspect review decision surface."},
     {"name": "review-action-inspect", "usage": "tri review action-inspect <review-action>", "schema": "tri.review_action.inspect", "description": "Inspect one durable review action."},
     {"name": "review-comment", "usage": "tri review comment <review> --body <text> [--path <path>] [--line <n>] [--reply-to <comment>]", "schema": "tri.review.action", "description": "Attach a structured review comment or reply."},
@@ -367,6 +374,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.workspace.materialization_leases": {"required": ["workspace", "leases"]},
     "tri.lease.inspect": {"required": ["id", "kind", "schema", "lease"]},
     "tri.task.inspect": {"required": ["id", "project", "title", "body", "requester", "status", "acceptance_criteria", "required_checks", "lifecycle", "workspaces", "runs", "changesets", "redacted", "created_at"]},
+    "tri.task.list": {"required": ["project", "tasks", "redacted"]},
     "tri.task_run.inspect": {"required": ["id", "task", "actor", "workspace", "redacted_workspace", "status", "final_recommendation", "assumptions", "commands", "checks", "artifacts", "changesets", "cost", "redacted", "created_at"]},
     "tri.task.lifecycle": {"required": ["id", "status", "previous_status", "transition", "lifecycle"]},
     "tri.workspace.lifecycle": {"required": ["id", "status", "previous_status", "transition"]},
@@ -375,6 +383,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.conflicts.resolve": {"required": ["conflict", "workspace", "operation", "strategy", "snapshot"]},
     "tri.files.stat": {"required": ["snapshot", "path", "exists", "type", "visible"]},
     "tri.files.list": {"required": ["snapshot", "files", "redacted_skipped", "policy_denied_skipped"]},
+    "tri.files.ls": {"required": ["snapshot", "directory", "tree", "directories", "files", "redacted_skipped", "policy_denied_skipped"]},
     "tri.files.read": {"required": ["snapshot", "path", "blob", "encoding", "text"]},
     "tri.files.write": {"required": ["operation", "snapshot", "paths"]},
     "tri.files.write_batch": {"required": ["operation", "snapshot", "paths"]},
@@ -385,7 +394,10 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.operation.list": {"required": ["ref", "operations", "redacted"]},
     "tri.search": {"required": ["project", "query", "scopes", "matches", "policy_denied_skipped", "redacted_skipped", "truncated"]},
     "tri.diff": {"required": ["base_snapshot", "head_snapshot", "mode", "path_filters", "summary", "files", "patch"]},
-    "tri.changeset.inspect": {"required": ["id", "project", "workspace", "redacted_workspace", "title", "status", "base_snapshot", "head_snapshot", "operations", "operation_details", "task_run", "visibility", "hidden_paths", "touched_paths", "redacted_touched_paths", "checks", "reviews", "policy_decisions", "export_status", "advisory", "replacement_changeset", "lifecycle", "suggested_split_points", "stack"]},
+    "tri.changeset.inspect": {"required": ["id", "project", "workspace", "redacted_workspace", "title", "description", "status", "base_snapshot", "head_snapshot", "operations", "operation_details", "task_run", "visibility", "hidden_paths", "touched_paths", "redacted_touched_paths", "checks", "reviews", "policy_decisions", "export_status", "advisory", "replacement_changeset", "lifecycle", "suggested_split_points", "stack"]},
+    "tri.changeset.list": {"required": ["project", "changesets", "redacted"]},
+    "tri.changeset.describe": {"required": ["id", "project", "workspace", "redacted_workspace", "title", "description", "previous_title", "previous_description", "changed_fields", "updated", "history_rewritten", "status", "base_snapshot", "head_snapshot", "lifecycle"]},
+    "tri.changeset.refresh": {"required": ["id", "project", "workspace", "redacted_workspace", "title", "description", "status", "previous_status", "base_snapshot", "head_snapshot", "previous_head_snapshot", "updated", "reopened_reviews", "lifecycle"]},
     "tri.changeset.split": {"required": ["changeset", "mode", "selector", "operations", "paths", "redacted_paths"]},
     "tri.changeset.stack": {"required": ["changeset", "stack"]},
     "tri.changeset.revalidate": {"required": ["changeset", "head_snapshot", "checks", "stack"]},
@@ -429,6 +441,7 @@ SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
     "tri.verification.run": {"required": ["project", "processed", "pending", "cycles"]},
     "tri.mirror.sync": {"required": ["id", "project", "target", "remote", "branch", "synced_snapshot", "synced_git_commit", "in_sync", "sync", "cycles"]},
     "tri.review.create": {"required": ["id", "changeset", "status", "reviewers", "check_summary", "export_preview"]},
+    "tri.review.list": {"required": ["project", "reviews", "redacted"]},
     "tri.review.inspect": {"required": ["id", "changeset", "redacted_changeset", "workspace", "redacted_workspace", "status", "reviewers", "approvals", "approved_reviewers", "pending_reviewers", "maintainer_override", "check_summary", "risk_summary", "export_preview", "changeset_summary", "task", "task_run", "actor_identity", "commands", "checks", "artifacts", "policy_findings", "attached_policy_findings", "attached_check_summaries", "visibility_impact", "comment_threads", "unresolved_risks", "actions", "created_at"]},
     "tri.review_action.inspect": {"required": ["id", "review", "actor", "kind", "body", "metadata", "created_at"]},
     "tri.review.action": {"required": ["review", "action", "status"]},
@@ -969,6 +982,7 @@ class Store:
               project_id TEXT NOT NULL,
               workspace_id TEXT,
               title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
               base_snapshot_id TEXT NOT NULL,
               head_snapshot_id TEXT NOT NULL,
               status TEXT NOT NULL,
@@ -1283,6 +1297,8 @@ class Store:
         if "advisory_id" not in workspace_columns:
             self.conn.execute("ALTER TABLE workspaces ADD COLUMN advisory_id TEXT")
         changeset_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(changesets)").fetchall()}
+        if "description" not in changeset_columns:
+            self.conn.execute("ALTER TABLE changesets ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         if "hidden_paths_json" not in changeset_columns:
             self.conn.execute("ALTER TABLE changesets ADD COLUMN hidden_paths_json TEXT NOT NULL DEFAULT '[]'")
         if "stack_parent_id" not in changeset_columns:
@@ -1590,9 +1606,17 @@ class Store:
         self._tree_cache[tree_id] = resolved
         return resolved
 
-    def load_tree(self, tree_id: str) -> dict[str, dict[str, Any]]:
-        resolved, _ = self._resolve_tree(tree_id)
-        entries = {path: dict(entry) for path, entry in resolved.items()}
+    @contextlib.contextmanager
+    def write_scope(self, *scopes: str) -> Iterator[None]:
+        """Acquire per-resource write locks on PostgreSQL so independent workspaces
+        and targets can commit concurrently while store-wide ops stay serialized."""
+        if self.backend == "postgres":
+            with self.conn.scoped_lock(*scopes):
+                yield
+        else:
+            yield
+
+    def hydrate_entry_hashes(self, entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         missing = sorted({entry["blob"] for entry in entries.values() if "hash" not in entry and isinstance(entry.get("blob"), str)})
         if missing:
             hashes: dict[str, str] = {}
@@ -1605,6 +1629,80 @@ class Store:
                 if "hash" not in entry and isinstance(blob, str) and blob in hashes:
                     entry["hash"] = hashes[blob]
         return entries
+
+    def load_tree(self, tree_id: str) -> dict[str, dict[str, Any]]:
+        resolved, _ = self._resolve_tree(tree_id)
+        entries = {path: dict(entry) for path, entry in resolved.items()}
+        return self.hydrate_entry_hashes(entries)
+
+    def load_directory_node(self, tree_id: str, directory: str) -> tuple[str | None, dict[str, str | None], dict[str, dict[str, Any]]]:
+        """Walk only the path segments of ``directory`` in a hierarchical tree.
+
+        Returns ``(dir_tree_id, subdirs, files)`` where ``subdirs`` maps immediate
+        child directory names to their tree node ids (or ``None`` for legacy flat
+        trees) and ``files`` maps immediate child file names to their entry dicts."""
+        text = self._tree_row_text(tree_id)
+        if is_hierarchical(text):
+            current_id = tree_id
+            node = decode_node(text)
+            if directory:
+                for segment in directory.split("/"):
+                    if segment in node.get("f", {}):
+                        raise TriError("invalid_path", "Path is a file, not a directory.", object=directory)
+                    child_id = node.get("d", {}).get(segment)
+                    if child_id is None:
+                        raise TriError("path_not_found", "Directory not found.", object=directory)
+                    current_id = child_id
+                    node = decode_node(self._tree_row_text(current_id))
+            subdirs: dict[str, str | None] = {name: child for name, child in sorted(node.get("d", {}).items())}
+            files = {name: dict(entry) for name, entry in sorted(node.get("f", {}).items())}
+            return current_id, subdirs, files
+        # Legacy flat tree fallback.
+        all_entries = self.load_tree(tree_id)
+        prefix = f"{directory}/" if directory else ""
+        if directory and directory in all_entries:
+            raise TriError("invalid_path", "Path is a file, not a directory.", object=directory)
+        subdirs = {}
+        files = {}
+        matched_any = not directory
+        for path, entry in all_entries.items():
+            if not path.startswith(prefix):
+                continue
+            matched_any = True
+            rel = path[len(prefix) :]
+            if "/" in rel:
+                child_dir = rel.split("/", 1)[0]
+                subdirs.setdefault(child_dir, None)
+            else:
+                files[rel] = dict(entry)
+        if not matched_any:
+            raise TriError("path_not_found", "Directory not found.", object=directory)
+        return (tree_id if not directory else None), dict(sorted(subdirs.items())), dict(sorted(files.items()))
+
+    def subtree_has_visible_file(self, tree_id: str, prefix: str, hidden_patterns: list[str]) -> tuple[bool, bool]:
+        """Return ``(has_visible, saw_hidden_path)`` stopping at the first visible file."""
+        stack: list[tuple[str, str]] = [(tree_id, prefix)]
+        saw_hidden_path = False
+        while stack:
+            current_id, current_prefix = stack.pop()
+            node = decode_node(self._tree_row_text(current_id))
+            for name in sorted(node.get("f", {})):
+                full_path = f"{current_prefix}/{name}" if current_prefix else name
+                visible, reason = path_visibility(full_path, hidden_patterns)
+                if visible:
+                    return True, saw_hidden_path
+                if reason == "hidden_path":
+                    saw_hidden_path = True
+            for name, child_id in sorted(node.get("d", {}).items(), reverse=True):
+                child_prefix = f"{current_prefix}/{name}" if current_prefix else name
+                dir_vis, dir_reason = path_visibility(child_prefix, hidden_patterns)
+                probe_vis, probe_reason = path_visibility(f"{child_prefix}/_", hidden_patterns)
+                if not dir_vis or not probe_vis:
+                    if dir_reason == "hidden_path" or probe_reason == "hidden_path":
+                        saw_hidden_path = True
+                    continue
+                stack.append((child_id, child_prefix))
+        return False, saw_hidden_path
 
     def collect_references(self, roots: list[str]) -> tuple[set[str], set[str]]:
         """Tree nodes and blobs reachable from ``roots``, visiting each node once.
@@ -2762,6 +2860,9 @@ SERVER_PATH_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "cmd_task_create": ("body_file",),
     "cmd_advisory_create": ("body_file",),
     "cmd_policy_create_embargo": ("body_file",),
+    "cmd_changeset_create": ("description_file",),
+    "cmd_changeset_describe": ("description_file",),
+    "cmd_changeset_split": ("description_file",),
     "cmd_batch": ("plan",),
     "cmd_mirror_add": ("remote",),
 }
@@ -4479,8 +4580,8 @@ def mutate_workspace(
             retryable=True,
         )
     entries = store.load_snapshot_tree(input_snapshot)
-    new_entries, paths = apply_change(dict(entries))
-    with store.conn:
+    with store.write_scope(f"workspace:{workspace_id}"), store.conn:
+        new_entries, paths = apply_change(dict(entries))
         snapshot = store.create_snapshot(
             workspace["project_id"],
             new_entries,
@@ -6010,6 +6111,33 @@ def set_workspace_task_run_phase(
     )
 
 
+def cmd_task_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    project_id: str | None = None
+    if args.project:
+        project = store.get_project(args.project)
+        project_id = project["id"]
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if args.status:
+        clauses.append("status = ?")
+        params.append(args.status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = store.rows(f"SELECT id FROM tasks {where} ORDER BY created_at DESC, rowid DESC", tuple(params))
+    limit = max(1, args.limit) if getattr(args, "limit", None) is not None else None
+    tasks: list[dict[str, Any]] = []
+    redacted = 0
+    for row in rows:
+        decision, _ = object_access_decision(store, row["id"], actor=args.actor, action="task.read")
+        if decision["allowed"]:
+            if limit is None or len(tasks) < limit:
+                tasks.append(task_data(store, row["id"], actor=args.actor))
+        else:
+            redacted += 1
+    return envelope("tri.task.list", command, actor=args.actor, start=start, data={"project": project_id, "tasks": tasks, "redacted": redacted})
+
+
 def cmd_task_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     require_object_access(store, args.task, actor=args.actor, action="task.read")
     return envelope("tri.task.inspect", command, actor=args.actor, start=start, data=task_data(store, args.task, actor=args.actor))
@@ -6753,7 +6881,7 @@ def cmd_workspace_snapshot(store: Store, args: argparse.Namespace, command: list
     if getattr(args, "expect_head", None) and args.expect_head != before:
         raise_stale_workspace_head(store, ws["id"], args.expect_head, "Workspace head changed before checkpoint could start.")
     entries = store.load_snapshot_tree(before)
-    with store.conn:
+    with store.write_scope(f"workspace:{ws['id']}"), store.conn:
         snapshot = store.create_snapshot(
             ws["project_id"],
             entries,
@@ -8729,7 +8857,7 @@ def cmd_workspace_update(store: Store, args: argparse.Namespace, command: list[s
             diagnostics=[diagnostic],
             data={"workspace": ws["id"], "conflict": conflict_id, "base_snapshot": ws["base_snapshot_id"], "head_snapshot": ws["head_snapshot_id"], "target_snapshot": target_snapshot, "conflicts": conflict_view},
         )
-    with store.conn:
+    with store.write_scope(f"workspace:{ws['id']}"), store.conn:
         snapshot = store.create_snapshot(
             ws["project_id"],
             merged_entries,
@@ -9001,6 +9129,96 @@ def cmd_files_list(store: Store, args: argparse.Namespace, command: list[str], s
         start=start,
         data={"snapshot": snapshot, "files": files, "redacted_skipped": redacted_skipped, "policy_denied_skipped": policy_denied_skipped},
     )
+
+
+def list_directory_visible(
+    store: Store,
+    snapshot: str,
+    directory: str,
+    hidden_patterns: list[str],
+) -> dict[str, Any]:
+    """Lazily list one directory in ``snapshot`` with Tri's visibility rules."""
+    if directory:
+        dir_visible, dir_reason = path_visibility(directory, hidden_patterns)
+        probe_visible, probe_reason = path_visibility(f"{directory}/_", hidden_patterns)
+        if not dir_visible or not probe_visible:
+            raise TriError("policy_denied", "Path is hidden by policy.", object=directory, reason=dir_reason or probe_reason)
+    snap_row = store.row("SELECT root_tree_id FROM snapshots WHERE id = ?", (snapshot,))
+    if snap_row is None:
+        raise TriError("path_not_found", "Snapshot not found.", object=snapshot)
+    dir_tree_id, raw_subdirs, raw_files = store.load_directory_node(snap_row["root_tree_id"], directory)
+    visible_file_map: dict[str, dict[str, Any]] = {}
+    redacted_skipped = 0
+    policy_denied_skipped = 0
+    for name, entry in raw_files.items():
+        full_path = f"{directory}/{name}" if directory else name
+        visible, reason = path_visibility(full_path, hidden_patterns)
+        if not visible:
+            redacted_skipped += 1
+            if reason == "hidden_path":
+                policy_denied_skipped += 1
+            continue
+        visible_file_map[name] = entry
+    store.hydrate_entry_hashes(visible_file_map)
+    files = [
+        {"name": name, "path": f"{directory}/{name}" if directory else name, **entry}
+        for name, entry in sorted(visible_file_map.items())
+    ]
+    directories: list[dict[str, Any]] = []
+    flat_entries: dict[str, dict[str, Any]] | None = None
+    for name, child_tree_id in sorted(raw_subdirs.items()):
+        child_path = f"{directory}/{name}" if directory else name
+        dir_vis, dir_reason = path_visibility(child_path, hidden_patterns)
+        probe_vis, probe_reason = path_visibility(f"{child_path}/_", hidden_patterns)
+        if not dir_vis or not probe_vis:
+            redacted_skipped += 1
+            if dir_reason == "hidden_path" or probe_reason == "hidden_path":
+                policy_denied_skipped += 1
+            continue
+        if child_tree_id is not None:
+            has_visible, saw_hidden = store.subtree_has_visible_file(child_tree_id, child_path, hidden_patterns)
+        else:
+            if flat_entries is None:
+                flat_entries = store.load_tree(snap_row["root_tree_id"])
+            child_prefix = f"{child_path}/"
+            has_visible = False
+            saw_hidden = False
+            for path in flat_entries:
+                if not path.startswith(child_prefix):
+                    continue
+                vis, reason = path_visibility(path, hidden_patterns)
+                if vis:
+                    has_visible = True
+                    break
+                if reason == "hidden_path":
+                    saw_hidden = True
+        if not has_visible:
+            redacted_skipped += 1
+            if saw_hidden:
+                policy_denied_skipped += 1
+            continue
+        directories.append({"name": name, "path": child_path, "tree": child_tree_id})
+    if directory and not files and not directories and redacted_skipped:
+        # A directory that exists only because of hidden/secret files is invisible.
+        raise TriError("path_not_found", "Directory not found.", object=directory)
+    return {
+        "snapshot": snapshot,
+        "directory": directory,
+        "tree": dir_tree_id,
+        "directories": directories,
+        "files": files,
+        "redacted_skipped": redacted_skipped,
+        "policy_denied_skipped": policy_denied_skipped,
+    }
+
+
+def cmd_files_ls(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    snapshot, hidden_patterns = resolve_ref_context(store, args.ref, actor=args.actor, action="workspace.read")
+    raw_dir = getattr(args, "dir", None) or ""
+    stripped = raw_dir.strip("/")
+    directory = "" if stripped in ("", ".") else normalize_path(stripped)
+    data = list_directory_visible(store, snapshot, directory, hidden_patterns)
+    return envelope("tri.files.ls", command, actor=args.actor, start=start, data=data)
 
 
 def resolve_snapshot_ref(store: Store, ref: str) -> str:
@@ -9369,7 +9587,7 @@ def snapshot_readable(store: Store, snapshot: str, *, actor: str) -> bool:
     return True
 
 
-def history_provenance(store: Store, snapshot: str) -> dict[str, Any]:
+def history_provenance(store: Store, snapshot: str, *, actor: str | None = None) -> dict[str, Any]:
     row = snapshot_row(store, snapshot)
     metadata = loads(row["metadata_json"], {})
     data = {
@@ -9379,9 +9597,26 @@ def history_provenance(store: Store, snapshot: str) -> dict[str, Any]:
         "created_by": row["created_by"],
         "created_at": row["created_at"],
     }
-    for key in ("changeset", "workspace", "operation", "target", "git_commit"):
+    for key in ("workspace", "operation", "target", "git_commit"):
         if metadata.get(key):
             data[key] = metadata[key]
+    cs_row: sqlite3.Row | None = None
+    if metadata.get("changeset"):
+        cs_row = store.row("SELECT id, title, description FROM changesets WHERE id = ?", (metadata["changeset"],))
+    else:
+        cs_row = store.row(
+            "SELECT id, title, description FROM changesets WHERE head_snapshot_id = ? AND status IN ('merged', 'exported') ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (snapshot,),
+        )
+    if cs_row is not None:
+        can_read_cs = True
+        if actor is not None:
+            decision, _ = object_access_decision(store, cs_row["id"], actor=actor, action="changeset.read")
+            can_read_cs = bool(decision["allowed"])
+        if can_read_cs:
+            data["changeset"] = cs_row["id"]
+            data["changeset_title"] = cs_row["title"]
+            data["changeset_description"] = cs_row["description"]
     return data
 
 
@@ -9429,7 +9664,7 @@ def cmd_files_log(store: Store, args: argparse.Namespace, command: list[str], st
         if entry == parent_entry:
             continue
         change = "added" if parent_entry is None else "deleted" if entry is None else "modified"
-        entries.append({**history_provenance(store, current), "change": change, "blob": entry["blob"] if entry else None, "size": entry["size"] if entry else None})
+        entries.append({**history_provenance(store, current, actor=args.actor), "change": change, "blob": entry["blob"] if entry else None, "size": entry["size"] if entry else None})
         if len(entries) >= limit:
             break
     return envelope(
@@ -9502,11 +9737,11 @@ def cmd_files_blame(store: Store, args: argparse.Namespace, command: list[str], 
             continue
         ranges.append({"start": line, "end": line, "snapshot": snap})
         if snap is not None and snap not in provenance:
-            provenance[snap] = history_provenance(store, snap)
+            provenance[snap] = history_provenance(store, snap, actor=args.actor)
     for item in ranges:
         if item["snapshot"] is not None:
             details = provenance[item["snapshot"]]
-            item.update({key: details[key] for key in ("created_by", "created_at", "source", "changeset", "git_commit") if key in details})
+            item.update({key: details[key] for key in ("created_by", "created_at", "source", "changeset", "changeset_title", "changeset_description", "git_commit") if key in details})
         else:
             item["redacted"] = True
     return envelope(
@@ -9545,7 +9780,7 @@ def cmd_snapshots_merge_base(store: Store, args: argparse.Namespace, command: li
         redacted = True
     data: dict[str, Any] = {"left": left, "right": right, "merge_base": base, "redacted": redacted}
     if base is not None:
-        data.update({"left_distance": left_distances[base], "right_distance": right_distances[base], "provenance": history_provenance(store, base)})
+        data.update({"left_distance": left_distances[base], "right_distance": right_distances[base], "provenance": history_provenance(store, base, actor=args.actor)})
     return envelope("tri.snapshot.merge_base", command, actor=args.actor, start=start, data=data)
 
 
@@ -10966,7 +11201,7 @@ def cmd_search(store: Store, args: argparse.Namespace, command: list[str], start
                 provenance["workspace"] = cs_data["workspace"]
             elif cs_data.get("redacted_workspace"):
                 provenance["workspace_redacted"] = True
-            for field in ("title", "status", "touched_paths"):
+            for field in ("title", "description", "status", "touched_paths"):
                 if append_json_field_matches(
                     matches,
                     query=args.query,
@@ -12365,26 +12600,34 @@ def mirror_tri_steps(store: Store, mirror: sqlite3.Row, target_id: str, target_s
         if steps and steps[-1]["snapshot"] == refs["snapshot"]:
             continue
         title = None
+        description = ""
         if refs.get("changeset"):
-            cs = store.row("SELECT title FROM changesets WHERE id = ?", (refs["changeset"],))
-            title = cs["title"] if cs else None
+            cs = store.row("SELECT title, description FROM changesets WHERE id = ?", (refs["changeset"],))
+            if cs:
+                title = cs["title"]
+                description = cs["description"] or ""
         if row["kind"] == "changeset.reverted" and title:
             title = f"Revert \"{title}\" (post-merge checks failed)"
-        steps.append({"snapshot": refs["snapshot"], "actor": row["actor"], "at": row["created_at"], "changeset": refs.get("changeset"), "title": title, "kind": row["kind"]})
+        steps.append({"snapshot": refs["snapshot"], "actor": row["actor"], "at": row["created_at"], "changeset": refs.get("changeset"), "title": title, "description": description, "kind": row["kind"]})
         cursor = int(row["rowid"])
         if refs["snapshot"] == target_snapshot:
             break
     if not steps or steps[-1]["snapshot"] != target_snapshot:
-        steps.append({"snapshot": target_snapshot, "actor": None, "at": None, "changeset": None, "title": None, "kind": "target"})
+        steps.append({"snapshot": target_snapshot, "actor": None, "at": None, "changeset": None, "title": None, "description": "", "kind": "target"})
     return steps, cursor
 
 
 def mirror_step_message(step: dict[str, Any]) -> str:
     title = step.get("title") or ("Refresh Tri target" if step.get("kind") == "target.refreshed" else "Sync Tri target")
+    description = (step.get("description") or "").strip()
     trailers = [f"Tri-Snapshot: {step['snapshot']}"]
     if step.get("changeset"):
         trailers.insert(0, f"Tri-Changeset: {step['changeset']}")
-    return f"{title}\n\n" + "\n".join(trailers) + "\n"
+    parts = [title]
+    if description and step.get("kind") != "changeset.reverted":
+        parts.append(description)
+    parts.append("\n".join(trailers))
+    return "\n\n".join(parts) + "\n"
 
 
 def mirror_record_commit(store: Store, mirror_id: str, snapshot_id: str, commit: str, direction: str) -> None:
@@ -12778,11 +13021,29 @@ def default_changeset_title(store: Store, ws: sqlite3.Row) -> str:
     return f"Changes from {ws['id']}"
 
 
+def resolve_optional_text_arg(
+    text: str | None,
+    file_path: str | None,
+    *,
+    text_flag: str = "--description",
+    file_flag: str = "--description-file",
+) -> str | None:
+    if text is not None and file_path is not None:
+        raise TriError("invalid_command", f"Pass either {text_flag} or {file_flag}, not both.")
+    if file_path is not None:
+        try:
+            return Path(file_path).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise TriError("path_not_found", f"Cannot read {file_flag} path: {exc}", object=file_path) from None
+    return text
+
+
 def cmd_changeset_create(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     ws = store.get_workspace(args.workspace)
     if ws["status"] != "active":
         raise TriError("policy_denied", "Only active workspaces can create changesets.", object=ws["id"], status=ws["status"])
     require_object_access(store, ws["id"], actor=args.actor, action="workspace.write")
+    description = resolve_optional_text_arg(getattr(args, "description", None), getattr(args, "description_file", None)) or ""
     ops = store.rows("SELECT id, path_set_json FROM operations WHERE workspace_id = ? ORDER BY created_at, rowid", (ws["id"],))
     op_ids = [row["id"] for row in ops]
     touched = sorted({path for row in ops for path in loads(row["path_set_json"], [])})
@@ -12797,22 +13058,23 @@ def cmd_changeset_create(store: Store, args: argparse.Namespace, command: list[s
     task_run = latest_workspace_task_run(store, ws["id"])
     title = args.title or default_changeset_title(store, ws)
     cs_id = new_id("cs")
-    with store.conn:
+    with store.write_scope(f"workspace:{ws['id']}"), store.conn:
         store.conn.execute(
             """
             INSERT INTO changesets (
-              id, project_id, workspace_id, title, base_snapshot_id, head_snapshot_id, status,
+              id, project_id, workspace_id, title, description, base_snapshot_id, head_snapshot_id, status,
               operations_json, task_run_id, visibility_json, hidden_paths_json, touched_paths_json,
               checks_json, reviews_json, policy_decisions_json, export_status,
               stack_parent_id, advisory_id, replacement_changeset_id, lifecycle_json,
               suggested_split_points_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 cs_id,
                 ws["project_id"],
                 ws["id"],
                 title,
+                description,
                 ws["base_snapshot_id"],
                 ws["head_snapshot_id"],
                 "ready",
@@ -13140,6 +13402,7 @@ def changeset_data(store: Store, cs_id: str, *, include_hidden: bool = False, ac
         "workspace": workspace_id,
         "redacted_workspace": redacted_workspace,
         "title": row["title"],
+        "description": row["description"],
         "status": row["status"],
         "base_snapshot": row["base_snapshot_id"],
         "head_snapshot": row["head_snapshot_id"],
@@ -13165,9 +13428,271 @@ def changeset_data(store: Store, cs_id: str, *, include_hidden: bool = False, ac
     }
 
 
+def cmd_changeset_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    project_id: str | None = None
+    if args.project:
+        project = store.get_project(args.project)
+        project_id = project["id"]
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if args.workspace:
+        clauses.append("workspace_id = ?")
+        params.append(args.workspace)
+    if args.status:
+        clauses.append("status = ?")
+        params.append(args.status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = store.rows(f"SELECT id FROM changesets {where} ORDER BY created_at DESC, rowid DESC", tuple(params))
+    limit = max(1, args.limit) if getattr(args, "limit", None) is not None else None
+    changesets: list[dict[str, Any]] = []
+    redacted = 0
+    for row in rows:
+        decision, _ = object_access_decision(store, row["id"], actor=args.actor, action="changeset.read")
+        if decision["allowed"]:
+            if limit is None or len(changesets) < limit:
+                changesets.append(changeset_data(store, row["id"], actor=args.actor))
+        else:
+            redacted += 1
+    return envelope("tri.changeset.list", command, actor=args.actor, start=start, data={"project": project_id, "changesets": changesets, "redacted": redacted})
+
+
 def cmd_changeset_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     require_object_access(store, args.changeset, actor=args.actor, action="changeset.read")
     return envelope("tri.changeset.inspect", command, actor=args.actor, start=start, data=changeset_data(store, args.changeset, actor=args.actor))
+
+
+def cmd_changeset_describe(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    cs = store.get_changeset(args.changeset)
+    require_object_access(store, cs["id"], actor=args.actor, action="changeset.write")
+    next_description = resolve_optional_text_arg(getattr(args, "description", None), getattr(args, "description_file", None))
+    next_title = getattr(args, "title", None)
+    if next_title is None and next_description is None:
+        raise TriError("invalid_command", "changeset describe requires --title, --description, or --description-file.", object=cs["id"])
+    if next_title is not None and not next_title.strip():
+        raise TriError("invalid_command", "Changeset title cannot be empty.", object=cs["id"])
+    previous_title = cs["title"]
+    previous_description = cs["description"] or ""
+    final_title = previous_title if next_title is None else next_title
+    final_description = previous_description if next_description is None else next_description
+    changed_fields: list[str] = []
+    if final_title != previous_title:
+        changed_fields.append("title")
+    if final_description != previous_description:
+        changed_fields.append("description")
+    events: list[str] = []
+    if changed_fields:
+        now = utcnow()
+        evt_id = new_id("evt")
+        existing_lifecycle = loads(cs["lifecycle_json"], {})
+        lifecycle = {
+            **existing_lifecycle,
+            "described_by": args.actor,
+            "described_at": now,
+            "description_revisions": int(existing_lifecycle.get("description_revisions") or 0) + 1,
+            "last_describe_event": evt_id,
+        }
+        if args.reason is not None:
+            lifecycle["last_describe_reason"] = args.reason
+        with store.write_scope(f"changeset:{cs['id']}"), store.conn:
+            store.conn.execute(
+                "UPDATE changesets SET title = ?, description = ?, lifecycle_json = ? WHERE id = ?",
+                (final_title, final_description, dumps(lifecycle), cs["id"]),
+            )
+            # Omit workspace_id so private changesets in a public workspace keep
+            # their description-edit audit events gated strictly on changeset.read.
+            evt = store.create_event(
+                kind="changeset.described",
+                actor=args.actor,
+                event_id=evt_id,
+                project_id=cs["project_id"],
+                object_refs={
+                    "changeset": cs["id"],
+                    "changed_fields": changed_fields,
+                    "previous_title": previous_title,
+                    "title": final_title,
+                    "previous_description": previous_description,
+                    "description": final_description,
+                    "reason": args.reason,
+                    "status": cs["status"],
+                },
+            )
+        events.append(evt)
+    data = {
+        **changeset_data(store, cs["id"], actor=args.actor),
+        "previous_title": previous_title,
+        "previous_description": previous_description,
+        "changed_fields": changed_fields,
+        "updated": bool(changed_fields),
+        "reason": args.reason,
+        "history_rewritten": False,
+    }
+    return envelope("tri.changeset.describe", command, actor=args.actor, start=start, events=events, data=data)
+
+
+REFRESHABLE_CHANGESET_STATUSES = {"draft", "ready", "reviewing", "changes_requested", "approved"}
+
+
+def cmd_changeset_refresh(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    cs = store.get_changeset(args.changeset)
+    require_object_access(store, cs["id"], actor=args.actor, action="changeset.write")
+    previous_status = cs["status"]
+    if previous_status not in REFRESHABLE_CHANGESET_STATUSES:
+        raise TriError(
+            "changeset_lifecycle_blocked",
+            "Only open changesets can be refreshed from their workspace.",
+            object=cs["id"],
+            status=previous_status,
+            allowed_statuses=sorted(REFRESHABLE_CHANGESET_STATUSES),
+        )
+    if not cs["workspace_id"]:
+        raise TriError("changeset_lifecycle_blocked", "Changeset has no backing workspace to refresh from.", object=cs["id"])
+    ws = store.get_workspace(cs["workspace_id"])
+    if ws["status"] != "active":
+        raise TriError("policy_denied", "Only active workspaces can refresh changesets.", object=ws["id"], status=ws["status"])
+    require_object_access(store, ws["id"], actor=args.actor, action="workspace.read")
+
+    previous_base = cs["base_snapshot_id"]
+    previous_head = cs["head_snapshot_id"]
+    new_base = ws["base_snapshot_id"]
+    new_head = ws["head_snapshot_id"]
+    ops = store.rows("SELECT id, path_set_json FROM operations WHERE workspace_id = ? ORDER BY created_at, rowid", (ws["id"],))
+    op_ids = [row["id"] for row in ops]
+    touched = sorted({path for row in ops for path in loads(row["path_set_json"], [])})
+    ws_checks = [row["id"] for row in store.rows("SELECT id FROM check_runs WHERE workspace_id = ? ORDER BY created_at", (ws["id"],))]
+    existing_checks = loads(cs["checks_json"], [])
+    checks = list(dict.fromkeys([*ws_checks, *existing_checks]))
+
+    old_ops = loads(cs["operations_json"], [])
+    old_touched = loads(cs["touched_paths_json"], [])
+    changed = (
+        new_base != previous_base
+        or new_head != previous_head
+        or op_ids != old_ops
+        or touched != old_touched
+        or checks != existing_checks
+    )
+    reopened_reviews: list[str] = []
+    events: list[str] = []
+    if changed:
+        code_changed = new_head != previous_head or new_base != previous_base
+        hidden_paths = loads(cs["hidden_paths_json"], [])
+        effective_hidden = effective_hidden_patterns(store, ws["project_id"], hidden_paths, actor=args.actor)
+        visible_touched = [path for path in touched if path_visibility(path, effective_hidden)[0]]
+        suggested = (
+            [{"kind": "path", "paths": ["test/**"], "reason": "test-only changes can review separately"}]
+            if any(path.startswith("test/") for path in visible_touched)
+            else []
+        )
+        suggested.extend(package_split_points_for_paths(store, ws["project_id"], visible_touched))
+        new_status = "ready" if (code_changed and previous_status in ("approved", "changes_requested")) else previous_status
+        now = utcnow()
+        evt_id = new_id("evt")
+        existing_lifecycle = loads(cs["lifecycle_json"], {})
+        lifecycle = {
+            **existing_lifecycle,
+            "refreshed_by": args.actor,
+            "refreshed_at": now,
+            "refresh_count": int(existing_lifecycle.get("refresh_count") or 0) + 1,
+            "previous_head_snapshot": previous_head,
+            "last_refresh_event": evt_id,
+        }
+        if args.reason is not None:
+            lifecycle["last_refresh_reason"] = args.reason
+        if new_status != previous_status:
+            lifecycle.update(
+                {
+                    "previous_status": previous_status,
+                    "status": new_status,
+                    "transition": f"{previous_status}->{new_status}",
+                    "actor": args.actor,
+                    "updated_at": now,
+                }
+            )
+        review_ids = loads(cs["reviews_json"], [])
+        with store.write_scope(f"changeset:{cs['id']}", f"workspace:{ws['id']}"), store.conn:
+            store.conn.execute(
+                """
+                UPDATE changesets
+                SET base_snapshot_id = ?, head_snapshot_id = ?, status = ?,
+                    operations_json = ?, touched_paths_json = ?, checks_json = ?,
+                    suggested_split_points_json = ?, lifecycle_json = ?
+                WHERE id = ?
+                """,
+                (
+                    new_base,
+                    new_head,
+                    new_status,
+                    dumps(op_ids),
+                    dumps(touched),
+                    dumps(checks),
+                    dumps(suggested),
+                    dumps(lifecycle),
+                    cs["id"],
+                ),
+            )
+            if review_ids:
+                refreshed_cs = store.get_changeset(cs["id"])
+                fresh_check_summary = changeset_check_summary(store, refreshed_cs)
+                fresh_diff = diff_data(store, new_base, new_head, effective_hidden)
+                open_status = review_status_for_check_summary(fresh_check_summary)
+                for review_id in review_ids:
+                    review = store.row("SELECT * FROM reviews WHERE id = ?", (review_id,))
+                    if review is None or review["status"] == "closed":
+                        continue
+                    next_review_status = review["status"]
+                    if code_changed and review["status"] in ("approved", "changes_requested"):
+                        next_review_status = open_status
+                        reopened_reviews.append(review_id)
+                        store.conn.execute(
+                            "INSERT INTO review_actions (id, review_id, actor, kind, body, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                new_id("ract"),
+                                review_id,
+                                args.actor,
+                                "changeset_refreshed",
+                                args.reason or "Changeset refreshed with new workspace snapshot.",
+                                dumps({"previous_head_snapshot": previous_head, "head_snapshot": new_head}),
+                                now,
+                            ),
+                        )
+                    elif review["status"] in ("open", "waiting_for_checks"):
+                        next_review_status = open_status
+                    store.conn.execute(
+                        "UPDATE reviews SET status = ?, check_summary_json = ?, export_preview_json = ? WHERE id = ?",
+                        (next_review_status, dumps(fresh_check_summary), dumps(fresh_diff["summary"]), review_id),
+                    )
+            # Omit workspace_id so private changesets inside public workspaces stay gated on changeset.read.
+            evt = store.create_event(
+                kind="changeset.refreshed",
+                actor=args.actor,
+                event_id=evt_id,
+                project_id=cs["project_id"],
+                object_refs={
+                    "changeset": cs["id"],
+                    "previous_status": previous_status,
+                    "status": new_status,
+                    "previous_base_snapshot": previous_base,
+                    "base_snapshot": new_base,
+                    "previous_head_snapshot": previous_head,
+                    "head_snapshot": new_head,
+                    "reopened_reviews": reopened_reviews,
+                    "reason": args.reason,
+                },
+                input_fingerprints={"head_snapshot": previous_head},
+                output_fingerprints={"head_snapshot": new_head},
+            )
+        events.append(evt)
+    data = {
+        **changeset_data(store, cs["id"], actor=args.actor),
+        "previous_status": previous_status,
+        "previous_head_snapshot": previous_head,
+        "updated": changed,
+        "reopened_reviews": reopened_reviews,
+        "reason": args.reason,
+    }
+    return envelope("tri.changeset.refresh", command, actor=args.actor, start=start, events=events, data=data)
 
 
 CHANGESET_TRANSITIONS: dict[str, set[str]] = {
@@ -13389,6 +13914,7 @@ def apply_changeset_split(
     selected_ops: list[dict[str, Any]],
     hidden_patterns: list[str],
     title: str | None,
+    description: str = "",
 ) -> tuple[dict[str, Any], str]:
     if not selected_ops:
         raise TriError("invalid_command", "Applied changeset split requires at least one selected operation.", object=source["id"])
@@ -13419,18 +13945,19 @@ def apply_changeset_split(
         store.conn.execute(
             """
             INSERT INTO changesets (
-              id, project_id, workspace_id, title, base_snapshot_id, head_snapshot_id, status,
+              id, project_id, workspace_id, title, description, base_snapshot_id, head_snapshot_id, status,
               operations_json, task_run_id, visibility_json, hidden_paths_json, touched_paths_json,
               checks_json, reviews_json, policy_decisions_json, export_status,
               stack_parent_id, advisory_id, replacement_changeset_id, lifecycle_json,
               suggested_split_points_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 split_id,
                 source["project_id"],
                 source["workspace_id"],
                 title or f"Split from {source['title']}",
+                description,
                 source["base_snapshot_id"],
                 snapshot["id"],
                 "ready",
@@ -13484,6 +14011,7 @@ def cmd_changeset_split(store: Store, args: argparse.Namespace, command: list[st
         data = split_preview_payload(changeset=args.changeset, selector="operations", selected_ops=selected_ops, hidden_patterns=hidden_patterns)
         data["operation_selector"] = args.operations
     if args.apply:
+        split_description = resolve_optional_text_arg(getattr(args, "description", None), getattr(args, "description_file", None)) or ""
         split_changeset, evt = apply_changeset_split(
             store,
             row,
@@ -13492,6 +14020,7 @@ def cmd_changeset_split(store: Store, args: argparse.Namespace, command: list[st
             selected_ops=selected_ops,
             hidden_patterns=hidden_patterns,
             title=args.title,
+            description=split_description,
         )
         data = {
             **data,
@@ -13754,6 +14283,21 @@ def cmd_changeset_merge(store: Store, args: argparse.Namespace, command: list[st
 def changeset_merge_once(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
     cs = store.get_changeset(args.changeset)
     target = resolve_target_row(store, cs["project_id"], args.target)
+    scopes = [f"target:{target['id']}", f"changeset:{cs['id']}"]
+    if cs["workspace_id"]:
+        scopes.append(f"workspace:{cs['workspace_id']}")
+    with store.write_scope(*scopes):
+        return _changeset_merge_once_scoped(store, cs, target, args, command, start)
+
+
+def _changeset_merge_once_scoped(
+    store: Store,
+    cs: sqlite3.Row,
+    target: sqlite3.Row,
+    args: argparse.Namespace,
+    command: list[str],
+    start: float,
+) -> dict[str, Any]:
     decision, diagnostics = evaluate_export_policy(store, cs, actor=args.actor, action="changeset.merge")
     policy_event = store.record_policy_decision(actor=args.actor, action="changeset.merge", object_id=cs["id"], decision=decision, project_id=cs["project_id"])
     if diagnostics:
@@ -13999,7 +14543,13 @@ def redacted_review_action_data(action: dict[str, Any]) -> dict[str, Any]:
 
 def review_assignment_state(review: sqlite3.Row, actions: list[dict[str, Any]], *, extra_approval_actor: str | None = None) -> dict[str, Any]:
     reviewers = loads(review["reviewers_json"], [])
-    approvals = [action["actor"] for action in actions if action["kind"] == "approved"]
+    # Approvals granted before the latest changeset refresh do not carry over to new code.
+    last_refresh = -1
+    for index, action in enumerate(actions):
+        if action["kind"] == "changeset_refreshed":
+            last_refresh = index
+    current_actions = actions[last_refresh + 1 :] if last_refresh >= 0 else actions
+    approvals = [action["actor"] for action in current_actions if action["kind"] == "approved"]
     if extra_approval_actor:
         approvals.append(extra_approval_actor)
     unique_approvals = sorted(set(approvals))
@@ -15649,7 +16199,8 @@ def cmd_export_commit(store: Store, args: argparse.Namespace, command: list[str]
             run_git(repo, ["apply", "--check", str(patch_path)], text=True)
             run_git(repo, ["apply", str(patch_path)], text=True)
             run_git(repo, ["add", "-A"], text=True)
-            run_git(repo, ["commit", "-m", args.message or cs["title"]], text=True)
+            commit_message = changeset_commit_message(cs, args.message)
+            run_git(repo, ["commit", "-m", commit_message], text=True)
             commit_id = run_git(repo, ["rev-parse", "HEAD"], text=True).strip()
             data["commit"] = commit_id
             data["artifact"] = artifact_id
@@ -15679,6 +16230,16 @@ def cmd_export_commit(store: Store, args: argparse.Namespace, command: list[str]
     return envelope("tri.export.git_commit", command, actor=args.actor, start=start, events=[event for event in [policy_event, evt, lifecycle_event] if event], data=data)
 
 
+def changeset_commit_message(cs: sqlite3.Row, override: str | None = None, *, title: str | None = None) -> str:
+    if override is not None:
+        return override
+    subject = title or cs["title"]
+    description = (cs["description"] or "").strip()
+    if description:
+        return f"{subject}\n\n{description}"
+    return subject
+
+
 def github_pr_body(store: Store, cs: sqlite3.Row, body: str | None, *, actor: str) -> str:
     if body:
         return body
@@ -15687,12 +16248,19 @@ def github_pr_body(store: Store, cs: sqlite3.Row, body: str | None, *, actor: st
         f"Tri changeset: {cs['id']}",
         "",
         f"Title: {cs['title']}",
-        f"Workspace: {data['workspace']}",
-        f"Base snapshot: {data['base_snapshot']}",
-        f"Head snapshot: {data['head_snapshot']}",
-        "",
-        "Touched paths:",
     ]
+    description = (cs["description"] or "").strip()
+    if description:
+        lines.extend(["", description, ""])
+    lines.extend(
+        [
+            f"Workspace: {data['workspace']}",
+            f"Base snapshot: {data['base_snapshot']}",
+            f"Head snapshot: {data['head_snapshot']}",
+            "",
+            "Touched paths:",
+        ]
+    )
     lines.extend(f"- {path}" for path in data["touched_paths"])
     return "\n".join(lines) + "\n"
 
@@ -15740,7 +16308,7 @@ def cmd_export_github_pr(store: Store, args: argparse.Namespace, command: list[s
                 run_git(repo, ["apply", "--check", str(patch_path)], text=True)
                 run_git(repo, ["apply", str(patch_path)], text=True)
                 run_git(repo, ["add", "-A"], text=True)
-                run_git(repo, ["commit", "-m", title], text=True)
+                run_git(repo, ["commit", "-m", changeset_commit_message(cs, title=title)], text=True)
                 commit_id = run_git(repo, ["rev-parse", "HEAD"], text=True).strip()
                 request_payload = {
                     "kind": "github_pr_request",
@@ -16357,6 +16925,7 @@ def review_data(store: Store, review_id: str, *, actor: str = "actor_local") -> 
         changeset_summary = {
             "id": cs_data["id"],
             "title": cs_data["title"],
+            "description": cs_data["description"],
             "status": cs_data["status"],
             "base_snapshot": cs_data["base_snapshot"],
             "head_snapshot": cs_data["head_snapshot"],
@@ -16417,6 +16986,7 @@ def review_data(store: Store, review_id: str, *, actor: str = "actor_local") -> 
         changeset_summary = {
             "id": None,
             "title": None,
+            "description": None,
             "status": "redacted",
             "base_snapshot": None,
             "head_snapshot": None,
@@ -16460,6 +17030,39 @@ def review_data(store: Store, review_id: str, *, actor: str = "actor_local") -> 
         "actions": actions,
         "created_at": row["created_at"],
     }
+
+
+def cmd_review_list(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    project_id: str | None = None
+    if args.project:
+        project = store.get_project(args.project)
+        project_id = project["id"]
+        clauses.append("changesets.project_id = ?")
+        params.append(project_id)
+    if args.changeset:
+        clauses.append("reviews.changeset_id = ?")
+        params.append(args.changeset)
+    if args.status:
+        clauses.append("reviews.status = ?")
+        params.append(args.status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = store.rows(
+        f"SELECT reviews.id FROM reviews JOIN changesets ON reviews.changeset_id = changesets.id {where} ORDER BY reviews.created_at DESC, reviews.rowid DESC",
+        tuple(params),
+    )
+    limit = max(1, args.limit) if getattr(args, "limit", None) is not None else None
+    reviews: list[dict[str, Any]] = []
+    redacted = 0
+    for row in rows:
+        decision, _ = object_access_decision(store, row["id"], actor=args.actor, action="review.read")
+        if decision["allowed"]:
+            if limit is None or len(reviews) < limit:
+                reviews.append(review_data(store, row["id"], actor=args.actor))
+        else:
+            redacted += 1
+    return envelope("tri.review.list", command, actor=args.actor, start=start, data={"project": project_id, "reviews": reviews, "redacted": redacted})
 
 
 def cmd_review_inspect(store: Store, args: argparse.Namespace, command: list[str], start: float) -> dict[str, Any]:
@@ -16530,6 +17133,7 @@ def cmd_changeset_compare(store: Store, args: argparse.Namespace, command: list[
             {
                 "changeset": cs_id,
                 "title": cs["title"],
+                "description": cs["description"],
                 "status": cs["status"],
                 "touched_paths": cs["touched_paths"],
                 "diff_summary": diff["summary"],
@@ -16581,6 +17185,9 @@ def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
         "target": f"{base}/v0/targets/<target>",
         "project_snapshots": f"{base}/v0/projects/<project>/snapshots",
         "project_workspaces": f"{base}/v0/projects/<project>/workspaces",
+        "project_tasks": f"{base}/v0/projects/<project>/tasks?status=open&limit=50",
+        "project_changesets": f"{base}/v0/projects/<project>/changesets?status=ready&limit=50",
+        "project_reviews": f"{base}/v0/projects/<project>/reviews?status=open&limit=50",
         "project_search": f"{base}/v0/projects/<project>/search?q=<query>&scope=workspaces&include_history=true",
         "project_check_sets": f"{base}/v0/projects/<project>/check-sets",
         "check_set": f"{base}/v0/check-sets/<check-set>",
@@ -16593,17 +17200,20 @@ def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
         "project_secrets": f"{base}/v0/projects/<project>/secrets",
         "secret": f"{base}/v0/secrets/<secret>",
         "project_events": f"{base}/v0/projects/<project>/events?kind=workspace.created&limit=50",
+        "tasks": f"{base}/v0/tasks?project=<project>&status=open&limit=50",
         "task": f"{base}/v0/tasks/<task>",
         "task_run": f"{base}/v0/task-runs/<run>",
         "task_attempts": f"{base}/v0/tasks/<task>/attempts",
         "snapshot": f"{base}/v0/snapshots/<snapshot>",
         "snapshot_files": f"{base}/v0/snapshots/<snapshot>/files",
+        "snapshot_tree": f"{base}/v0/snapshots/<snapshot>/tree?dir=src",
         "snapshot_file": f"{base}/v0/snapshots/<snapshot>/files/<path>",
         "tree": f"{base}/v0/trees/<tree>",
         "blob": f"{base}/v0/blobs/<blob>",
         "operation": f"{base}/v0/operations/<operation>",
         "workspace": f"{base}/v0/workspaces/<workspace>",
         "workspace_files": f"{base}/v0/workspaces/<workspace>/files",
+        "workspace_tree": f"{base}/v0/workspaces/<workspace>/tree?dir=src",
         "workspace_file": f"{base}/v0/workspaces/<workspace>/files/<path>",
         "workspace_search": f"{base}/v0/workspaces/<workspace>/search?q=<query>&glob=src/**",
         "workspace_diff": f"{base}/v0/workspaces/<workspace>/diff?mode=summary&path=src/**",
@@ -16612,10 +17222,12 @@ def api_endpoint_catalog(host: str, port: int) -> dict[str, str]:
         "workspace_conflicts": f"{base}/v0/workspaces/<workspace>/conflicts?status=open",
         "workspace_leases": f"{base}/v0/workspaces/<workspace>/leases",
         "lease": f"{base}/v0/leases/<lease>",
+        "changesets": f"{base}/v0/changesets?project=<project>&workspace=<workspace>&status=ready&limit=50",
         "changeset": f"{base}/v0/changesets/<changeset>",
         "changeset_operations": f"{base}/v0/changesets/<changeset>/operations",
         "changeset_checks": f"{base}/v0/changesets/<changeset>/checks",
         "changeset_diff": f"{base}/v0/changesets/<changeset>/diff?mode=patch&path=src/app.ts",
+        "reviews": f"{base}/v0/reviews?project=<project>&changeset=<changeset>&status=open&limit=50",
         "review": f"{base}/v0/reviews/<review>",
         "review_action": f"{base}/v0/review-actions/<review-action>",
         "check": f"{base}/v0/checks/<check>",
@@ -16886,6 +17498,58 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             argv.extend(["--status", status])
         return argv
 
+    def task_list_get_argv(self, parsed: Any, *, project: str | None = None) -> list[str]:
+        argv = ["task", "list"]
+        project = project or self.query_value(parsed, "project")
+        if project:
+            argv.append(project)
+        status = self.query_value(parsed, "status")
+        if status:
+            argv.extend(["--status", status])
+        limit = self.query_value(parsed, "limit")
+        if limit:
+            argv.extend(["--limit", limit])
+        return argv
+
+    def changeset_list_get_argv(self, parsed: Any, *, project: str | None = None) -> list[str]:
+        argv = ["changeset", "list"]
+        project = project or self.query_value(parsed, "project")
+        if project:
+            argv.append(project)
+        workspace = self.query_value(parsed, "workspace")
+        if workspace:
+            argv.extend(["--workspace", workspace])
+        status = self.query_value(parsed, "status")
+        if status:
+            argv.extend(["--status", status])
+        limit = self.query_value(parsed, "limit")
+        if limit:
+            argv.extend(["--limit", limit])
+        return argv
+
+    def review_list_get_argv(self, parsed: Any, *, project: str | None = None) -> list[str]:
+        argv = ["review", "list"]
+        project = project or self.query_value(parsed, "project")
+        if project:
+            argv.append(project)
+        changeset = self.query_value(parsed, "changeset")
+        if changeset:
+            argv.extend(["--changeset", changeset])
+        status = self.query_value(parsed, "status")
+        if status:
+            argv.extend(["--status", status])
+        limit = self.query_value(parsed, "limit")
+        if limit:
+            argv.extend(["--limit", limit])
+        return argv
+
+    def files_ls_get_argv(self, object_id: str, parsed: Any) -> list[str]:
+        argv = ["files", "ls", object_id]
+        directory = self.query_value(parsed, "dir", "path")
+        if directory:
+            argv.append(directory)
+        return argv
+
     def route_object_get(self, start: float, parsed: Any) -> bool:
         if not parsed.path.startswith("/v0/"):
             return False
@@ -16894,6 +17558,12 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
             collection = segments[0]
             if collection == "projects":
                 return self.run_get_command(start, ["projects", "list"])
+            if collection == "tasks":
+                return self.run_get_command(start, self.task_list_get_argv(parsed))
+            if collection == "changesets":
+                return self.run_get_command(start, self.changeset_list_get_argv(parsed))
+            if collection == "reviews":
+                return self.run_get_command(start, self.review_list_get_argv(parsed))
             if collection == "artifacts":
                 return self.run_get_command(start, self.artifacts_list_get_argv(parsed))
             if collection == "events":
@@ -16955,6 +17625,12 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                     return self.run_get_command(start, argv)
                 if subresource == "search":
                     return self.run_get_command(start, self.project_search_get_argv(object_id, parsed))
+                if subresource == "tasks":
+                    return self.run_get_command(start, self.task_list_get_argv(parsed, project=object_id))
+                if subresource == "changesets":
+                    return self.run_get_command(start, self.changeset_list_get_argv(parsed, project=object_id))
+                if subresource == "reviews":
+                    return self.run_get_command(start, self.review_list_get_argv(parsed, project=object_id))
                 if subresource == "events":
                     return self.run_get_command(start, self.events_list_get_argv(parsed, project=object_id))
                 if subresource == "exports":
@@ -16969,8 +17645,12 @@ class TriAPIHandler(http.server.BaseHTTPRequestHandler):
                 return self.run_get_command(start, ["checks", "list", object_id])
             if collection == "snapshots" and subresource == "files":
                 return self.run_get_command(start, ["files", "list", object_id])
+            if collection == "snapshots" and subresource == "tree":
+                return self.run_get_command(start, self.files_ls_get_argv(object_id, parsed))
             if collection == "workspaces" and subresource == "files":
                 return self.run_get_command(start, ["files", "list", object_id])
+            if collection == "workspaces" and subresource == "tree":
+                return self.run_get_command(start, self.files_ls_get_argv(object_id, parsed))
             if collection == "workspaces" and subresource == "search":
                 return self.run_get_command(start, self.files_search_get_argv(object_id, parsed))
             if collection == "workspaces" and subresource == "conflicts":
@@ -17715,6 +18395,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("--required-check", action="append")
     p_create.add_argument("--check-set", action="append")
     p_create.set_defaults(func=cmd_task_create)
+    p_list = task_sub.add_parser("list")
+    p_list.add_argument("project", nargs="?")
+    p_list.add_argument("--status")
+    p_list.add_argument("--limit", type=int)
+    p_list.set_defaults(func=cmd_task_list)
     p_inspect = task_sub.add_parser("inspect")
     p_inspect.add_argument("task")
     p_inspect.set_defaults(func=cmd_task_inspect)
@@ -17869,6 +18554,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = files_sub.add_parser("list")
     p_list.add_argument("ref")
     p_list.set_defaults(func=cmd_files_list)
+    p_ls = files_sub.add_parser("ls")
+    p_ls.add_argument("ref")
+    p_ls.add_argument("dir", nargs="?")
+    p_ls.set_defaults(func=cmd_files_ls)
     p_stat = files_sub.add_parser("stat")
     p_stat.add_argument("ref")
     p_stat.add_argument("path")
@@ -18155,13 +18844,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_create = cs_sub.add_parser("create")
     p_create.add_argument("workspace")
     p_create.add_argument("--title")
+    p_create.add_argument("--description")
+    p_create.add_argument("--description-file")
     p_create.add_argument("--hide-path", action="append")
     p_create.add_argument("--hide-package", action="append")
     p_create.add_argument("--visibility", action="append")
     p_create.set_defaults(func=cmd_changeset_create)
+    p_list = cs_sub.add_parser("list")
+    p_list.add_argument("project", nargs="?")
+    p_list.add_argument("--workspace")
+    p_list.add_argument("--status")
+    p_list.add_argument("--limit", type=int)
+    p_list.set_defaults(func=cmd_changeset_list)
     p_inspect = cs_sub.add_parser("inspect")
     p_inspect.add_argument("changeset")
     p_inspect.set_defaults(func=cmd_changeset_inspect)
+    p_describe = cs_sub.add_parser("describe")
+    p_describe.add_argument("changeset")
+    p_describe.add_argument("--title")
+    p_describe.add_argument("--description")
+    p_describe.add_argument("--description-file")
+    p_describe.add_argument("--reason")
+    p_describe.set_defaults(func=cmd_changeset_describe)
+    p_refresh = cs_sub.add_parser("refresh")
+    p_refresh.add_argument("changeset")
+    p_refresh.add_argument("--reason")
+    p_refresh.set_defaults(func=cmd_changeset_refresh)
     p_split = cs_sub.add_parser("split")
     p_split.add_argument("changeset")
     split_selector = p_split.add_mutually_exclusive_group(required=True)
@@ -18169,6 +18877,8 @@ def build_parser() -> argparse.ArgumentParser:
     split_selector.add_argument("--operations")
     p_split.add_argument("--apply", action="store_true")
     p_split.add_argument("--title")
+    p_split.add_argument("--description")
+    p_split.add_argument("--description-file")
     p_split.set_defaults(func=cmd_changeset_split)
     p_stack = cs_sub.add_parser("stack")
     p_stack.add_argument("changeset")
@@ -18207,6 +18917,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("changeset")
     p_create.add_argument("--reviewers", action="append")
     p_create.set_defaults(func=cmd_review_create)
+    p_list = review_sub.add_parser("list")
+    p_list.add_argument("project", nargs="?")
+    p_list.add_argument("--changeset")
+    p_list.add_argument("--status")
+    p_list.add_argument("--limit", type=int)
+    p_list.set_defaults(func=cmd_review_list)
     p_inspect = review_sub.add_parser("inspect")
     p_inspect.add_argument("review")
     p_inspect.set_defaults(func=cmd_review_inspect)

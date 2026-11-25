@@ -70,7 +70,7 @@ def _mode_bits(entry: dict[str, Any], read_only: bool) -> int:
 class Stats:
     """Counters a view reports in JSON (files faulted, bytes fetched, ...)."""
 
-    FIELDS = ("files_faulted", "bytes_fetched", "cache_hits", "files_prefetched", "copy_ups", "lookups", "dirs_listed", "reads", "writes")
+    FIELDS = ("files_faulted", "dirs_faulted", "bytes_fetched", "cache_hits", "files_prefetched", "copy_ups", "lookups", "dirs_listed", "reads", "writes")
 
     def __init__(self, path: Path | None, base: dict[str, Any] | None = None) -> None:
         self.path = path
@@ -138,13 +138,17 @@ def read_stats(state_dir: Path) -> dict[str, Any]:
 
 
 class LocalSource:
-    """Blobs from the local Store (opened lazily, never packed by this process)."""
+    """Blobs and lazy directory listings from the local Store (opened lazily, never packed)."""
 
     kind = "local"
 
-    def __init__(self, home: str) -> None:
+    def __init__(self, home: str, *, workspace: str | None = None, snapshot: str | None = None, actor: str | None = None) -> None:
         self.home = home
+        self.workspace = workspace
+        self.snapshot = snapshot
+        self.actor = actor or "actor_local"
         self._store: Any = None
+        self._hidden: list[str] | None = None
 
     def read(self, path: str, entry: dict[str, Any], stats: Stats) -> bytes:
         self.prepare()
@@ -152,6 +156,27 @@ class LocalSource:
         self._store._blob_cache.pop(entry["blob"], None)  # the view keeps its own bounded cache
         stats.add("bytes_fetched", len(data))
         return data
+
+    def list_dir(self, directory: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        self.prepare()
+        from tri import cli
+
+        if self._hidden is None:
+            ref = self.workspace or self.snapshot
+            assert ref is not None
+            _, self._hidden = cli.resolve_ref_context(self._store, ref, actor=self.actor, action="workspace.read")
+        assert self.snapshot is not None
+        try:
+            listing = cli.list_directory_visible(self._store, self.snapshot, directory, self._hidden)
+        except cli.TriError as exc:
+            if exc.diagnostic.get("code") in ("path_not_found", "policy_denied"):
+                return [], []
+            raise OSError(errno.EIO, exc.diagnostic.get("message") or "directory listing failed") from exc
+        files = [
+            {key: item[key] for key in ("name", "path", "blob", "hash", "size", "mode", "symlink_target") if item.get(key) is not None}
+            for item in listing["files"]
+        ]
+        return listing["directories"], files
 
     def prepare(self) -> None:
         if self._store is None:
@@ -229,6 +254,21 @@ class RemoteSource:
             raise OSError(errno.EIO, "server deferred or omitted the file")
         return result
 
+    def list_dir(self, directory: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        argv = ["files", "ls", self.snapshot, *([directory] if directory else [])]
+        resp = self.client.command(argv)
+        if not resp.get("ok"):
+            code = (resp.get("diagnostics") or [{}])[0].get("code")
+            if code in ("path_not_found", "policy_denied"):
+                return [], []
+            raise OSError(errno.EIO, f"list_dir failed: {code}")
+        data = resp["data"]
+        files = [
+            {key: item[key] for key in ("name", "path", "blob", "hash", "size", "mode", "symlink_target") if item.get(key) is not None}
+            for item in data["files"]
+        ]
+        return data["directories"], files
+
     def close(self) -> None:
         pass
 
@@ -236,7 +276,12 @@ class RemoteSource:
 def make_source(manifest: dict[str, Any]) -> Any:
     if manifest.get("source") == "remote":
         return RemoteSource(manifest["remote"], manifest["snapshot"])
-    return LocalSource(manifest["home"])
+    return LocalSource(
+        manifest["home"],
+        workspace=manifest.get("workspace"),
+        snapshot=manifest.get("snapshot"),
+        actor=manifest.get("actor"),
+    )
 
 
 # -- handles --------------------------------------------------------------------
@@ -306,31 +351,78 @@ class VirtualView:
         self.state_dir = Path(state_dir)
         self.upper = self.state_dir / "upper"
         self.upper.mkdir(parents=True, exist_ok=True)
-        self.lower: dict[str, dict[str, Any]] = manifest["entries"]
+        self.lower: dict[str, dict[str, Any]] = dict(manifest.get("entries", {}))
         self.read_only = bool(manifest.get("read_only"))
         self.mtime_ns = int(manifest.get("mounted_at", time.time()) * 1_000_000_000)
         self.source = source
         self.stats = stats or Stats(self.state_dir / "stats.json")
-        self.lower_dirs: dict[str, list[str]] = {"": []}
-        children: dict[str, set[str]] = {"": set()}
-        for path in self.lower:
-            parts = path.split("/")
-            for depth in range(len(parts)):
-                parent = "/".join(parts[:depth])
-                name = parts[depth]
-                children.setdefault(parent, set()).add(name)
-        self.lower_dirs = {path: sorted(names) for path, names in children.items()}
+        self.lazy_trees = bool(manifest.get("lazy_trees"))
+        if self.lazy_trees:
+            raw_dirs = manifest.get("dirs") or {"": []}
+            self.lower_dirs: dict[str, list[str]] = {path: sorted(names) for path, names in raw_dirs.items()}
+            self._loaded_dirs: set[str] | None = set(self.lower_dirs.keys())
+            self._known_dirs: set[str] | None = set(manifest.get("known_dirs") or [""]) | set(self.lower_dirs.keys())
+        else:
+            children: dict[str, set[str]] = {"": set()}
+            for path in self.lower:
+                parts = path.split("/")
+                for depth in range(len(parts)):
+                    parent = "/".join(parts[:depth])
+                    name = parts[depth]
+                    children.setdefault(parent, set()).add(name)
+            self.lower_dirs = {path: sorted(names) for path, names in children.items()}
+            self._loaded_dirs = None
+            self._known_dirs = None
         state = load_layer_state(self.state_dir)
         self.whiteouts: set[str] = set(state["whiteouts"])
         self.whiteout_dirs: set[str] = set(state["whiteout_dirs"])
+        self._lower_hashes: dict[str, str] = dict(state.get("lower_hashes", {}))
         self._cache: dict[str, bytes] = {}
         self._cache_bytes = 0
         self._faulted: set[str] = set()
 
+    # -- lazy directory faulting ------------------------------------------------
+
+    def _is_lower_dir(self, path: str) -> bool:
+        if path in self.lower_dirs:
+            return True
+        return self._known_dirs is not None and path in self._known_dirs
+
+    def _ensure_dir_loaded(self, directory: str) -> None:
+        if self._loaded_dirs is None or directory in self._loaded_dirs:
+            return
+        if self._known_dirs is not None and directory not in self._known_dirs:
+            return
+        subdirs, files = self.source.list_dir(directory)
+        names: list[str] = []
+        for sub in subdirs:
+            sub_path = sub["path"]
+            if ".." in sub_path.split("/") or sub_path.startswith("/"):
+                continue
+            if self._known_dirs is not None:
+                self._known_dirs.add(sub_path)
+            names.append(sub["name"])
+        for item in files:
+            item_path = item["path"]
+            if ".." in item_path.split("/") or item_path.startswith("/"):
+                continue
+            self.lower[item_path] = {key: item[key] for key in ("blob", "hash", "size", "mode", "symlink_target") if item.get(key) is not None}
+            names.append(item["name"])
+        self.lower_dirs[directory] = sorted(set(names))
+        self._loaded_dirs.add(directory)
+        self.stats.add("dirs_faulted")
+
     # -- layer state ------------------------------------------------------------
 
     def save(self) -> None:
-        _atomic_write(self.state_dir / "layer.json", {"version": STATE_VERSION, "whiteouts": sorted(self.whiteouts), "whiteout_dirs": sorted(self.whiteout_dirs)})
+        payload: dict[str, Any] = {
+            "version": STATE_VERSION,
+            "whiteouts": sorted(self.whiteouts),
+            "whiteout_dirs": sorted(self.whiteout_dirs),
+        }
+        if self._lower_hashes:
+            payload["lower_hashes"] = dict(sorted(self._lower_hashes.items()))
+        _atomic_write(self.state_dir / "layer.json", payload)
 
     def writable(self) -> None:
         if self.read_only:
@@ -363,10 +455,11 @@ class VirtualView:
             parent_kind, _ = self.resolve(parent)
             if parent_kind != "dir":
                 raise OSError(errno.ENOTDIR, path)
+        self._ensure_dir_loaded(parent)
         entry = self.lower.get(path)
         if entry is not None:
             return "lower", entry
-        if path in self.lower_dirs:
+        if self._is_lower_dir(path):
             return "dir", None
         raise OSError(errno.ENOENT, path)
 
@@ -387,6 +480,7 @@ class VirtualView:
         kind, _ = self.resolve(path)
         if kind != "dir":
             raise OSError(errno.ENOTDIR, path)
+        self._ensure_dir_loaded(path)
         self.stats.add("dirs_listed")
         names: set[str] = set()
         upper_dir = self.upper / path if path else self.upper
@@ -486,6 +580,9 @@ class VirtualView:
             os.chmod(tmp, 0o755 if entry.get("mode") == "100755" else 0o644)
             os.replace(tmp, target)
         self.stats.add("copy_ups")
+        if self.lazy_trees and entry.get("hash"):
+            self._lower_hashes[path] = entry["hash"]
+            self.save()
 
     def _parent_dir(self, path: str) -> None:
         kind, _ = self.resolve(_parent(path))
@@ -540,11 +637,13 @@ class VirtualView:
 
     def unlink(self, path: str) -> None:
         self.writable()
-        kind, _ = self.resolve(path)
+        kind, detail = self.resolve(path)
         if kind == "dir":
             raise OSError(errno.EISDIR, path)
         if kind == "upper":
             os.unlink(self.upper / path)
+        elif self.lazy_trees and detail.get("hash"):
+            self._lower_hashes[path] = detail["hash"]
         self.whiteouts.add(path)  # also covers files a previous sync recorded
         self.save()
 
@@ -559,7 +658,7 @@ class VirtualView:
             raise OSError(errno.ENOTEMPTY, path)
         if detail is not None:
             os.rmdir(self.upper / path)
-        if path in self.lower_dirs:
+        if self._is_lower_dir(path):
             self.whiteout_dirs.add(path)
             self.save()
 
@@ -612,9 +711,11 @@ class VirtualView:
         self._ensure_upper_dir(_parent(new))
         os.rename(self.upper / old, self.upper / new)
         for path in moved_files:
+            if self.lazy_trees and path in self.lower and self.lower[path].get("hash"):
+                self._lower_hashes[path] = self.lower[path]["hash"]
             self.whiteouts.add(path)
         for path in moved_dirs:
-            if path in self.lower_dirs:
+            if self._is_lower_dir(path):
                 self.whiteout_dirs.add(path)
         for path in moved_files:
             self.whiteouts.discard(new + path[len(old) :])
@@ -654,12 +755,16 @@ class VirtualView:
 # -- state on disk ----------------------------------------------------------------
 
 
-def load_layer_state(state_dir: Path) -> dict[str, list[str]]:
+def load_layer_state(state_dir: Path) -> dict[str, Any]:
     try:
         data = json.loads((Path(state_dir) / "layer.json").read_text())
     except (OSError, ValueError):
         data = {}
-    return {"whiteouts": list(data.get("whiteouts", [])), "whiteout_dirs": list(data.get("whiteout_dirs", []))}
+    return {
+        "whiteouts": list(data.get("whiteouts", [])),
+        "whiteout_dirs": list(data.get("whiteout_dirs", [])),
+        "lower_hashes": dict(data.get("lower_hashes", {})),
+    }
 
 
 def load_manifest(state_dir: Path) -> dict[str, Any]:

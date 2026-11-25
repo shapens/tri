@@ -500,6 +500,12 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
         ["merge-rules", "inspect", "app", "docs"],
         ["workspace", "list"],
         ["workspace", "list", "app"],
+        ["task", "list"],
+        ["task", "list", "app"],
+        ["changeset", "list"],
+        ["changeset", "list", "app"],
+        ["review", "list"],
+        ["review", "list", "app"],
         ["leases", "list"],
         ["leases", "list", "--status", "active"],
         ["conflicts", "list"],
@@ -540,6 +546,10 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
         argvs.append(["files", "search", "main", word, "--glob", "vault/**"])
     for ref in refs:
         argvs.append(["files", "list", ref])
+        argvs.append(["files", "ls", ref])
+        argvs.append(["files", "ls", ref, "src"])
+        argvs.append(["files", "ls", ref, "vault"])
+        argvs.append(["files", "ls", ref, ".env"])
         for path in PROBE_PATHS:
             argvs.append(["files", "stat", ref, path])
             argvs.append(["files", "read", ref, path])
@@ -567,6 +577,7 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
         argvs += [
             ["workspace", "inspect", workspace],
             ["workspace", "list", "app"],
+            ["changeset", "list", "app", "--workspace", workspace],
             ["workspace", "leases", workspace],
             ["leases", "list", "--workspace", workspace],
             ["salvage", "list", workspace],
@@ -589,6 +600,7 @@ def sweep_argvs(fx: LeakSweepFixture) -> list[list[str]]:
     for changeset in ids["changesets"]:
         argvs += [
             ["changeset", "inspect", changeset],
+            ["review", "list", "app", "--changeset", changeset],
             ["changeset", "split", changeset, "--paths", "vault/**"],
             ["changeset", "split", changeset, "--paths", "src/**"],
             ["policy", "evaluate", "export", changeset],
@@ -823,8 +835,8 @@ class LeakSweepTests(unittest.TestCase):
     def get_routes(self) -> list[str]:
         ids = self.fx.ids
         q = lambda value: quote(value, safe="")  # noqa: E731
-        routes = ["/v0", "/v0/commands", "/v0/schema", "/v0/projects", "/v0/projects/app", "/v0/artifacts?limit=500", "/v0/events?limit=500", "/v0/conflicts", "/v0/runners/metrics", "/v0/runners/metrics?format=prometheus"]
-        for sub in ("targets", "packages", "snapshots", "workspaces", "check-sets", "advisories", "releases", "secrets", "exports?limit=500", "events?limit=500"):
+        routes = ["/v0", "/v0/commands", "/v0/schema", "/v0/projects", "/v0/projects/app", "/v0/tasks", "/v0/changesets", "/v0/reviews", "/v0/artifacts?limit=500", "/v0/events?limit=500", "/v0/conflicts", "/v0/runners/metrics", "/v0/runners/metrics?format=prometheus"]
+        for sub in ("targets", "packages", "snapshots", "workspaces", "tasks", "changesets", "reviews", "check-sets", "advisories", "releases", "secrets", "exports?limit=500", "events?limit=500"):
             routes.append(f"/v0/projects/app/{sub}")
         routes += ["/v0/projects/app/targets/main", "/v0/projects/app/packages/vault"]
         for word in SEARCH_WORDS:
@@ -873,6 +885,8 @@ class LeakSweepTests(unittest.TestCase):
         for workspace in ids["workspaces"]:
             routes += [
                 f"/v0/workspaces/{workspace}/files",
+                f"/v0/workspaces/{workspace}/tree",
+                f"/v0/workspaces/{workspace}/tree?dir=vault",
                 f"/v0/workspaces/{workspace}/conflicts",
                 f"/v0/workspaces/{workspace}/leases",
                 f"/v0/workspaces/{workspace}/events?limit=500",
@@ -881,6 +895,8 @@ class LeakSweepTests(unittest.TestCase):
                 routes.append(f"/v0/workspaces/{workspace}/files/{quote(path, safe='/')}")
         for snapshot in ids["snapshots"]:
             routes.append(f"/v0/snapshots/{snapshot}/files")
+            routes.append(f"/v0/snapshots/{snapshot}/tree")
+            routes.append(f"/v0/snapshots/{snapshot}/tree?dir=vault")
             for path in PROBE_PATHS:
                 routes.append(f"/v0/snapshots/{snapshot}/files/{quote(path, safe='/')}")
         for check in ids["checks"]:

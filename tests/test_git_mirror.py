@@ -128,6 +128,26 @@ class GitMirrorTests(unittest.TestCase):
         self.assertIn("agent:b|Edit docs/new.md|", log)
         self.assertTrue(result["in_sync"])
 
+    def test_retroactive_describe_before_sync_updates_mirrored_git_commit(self) -> None:
+        self.add_mirror()
+        cs = self.tri_merge("src.txt", "described\n")
+        self.tri(
+            "--actor",
+            "agent:a",
+            "changeset",
+            "describe",
+            cs,
+            "--title",
+            "Refined src update",
+            "--description",
+            "Explains why src.txt changed.",
+        )
+        result = self.sync()["data"]
+        self.assertEqual(result["sync"]["mode"], "outbound")
+        message = subprocess.run(["git", f"--git-dir={self.remote}", "log", "-1", "--format=%B", "main"], stdout=subprocess.PIPE, text=True, check=True).stdout
+        self.assertTrue(message.startswith("Refined src update\n\nExplains why src.txt changed.\n\n"))
+        self.assertIn(f"Tri-Changeset: {cs}", message)
+
     def test_git_pushes_land_as_attributed_tri_snapshots(self) -> None:
         self.add_mirror()
         commit = self.git_push("src.txt", "from git\n")

@@ -65,6 +65,82 @@ class TranslationTests(unittest.TestCase):
         self.assertIsInstance(pgstore.translate_error(PgError({"C": "23505", "M": "duplicate"})), sqlite3.IntegrityError)
         self.assertIsInstance(pgstore.translate_error(PgError({"C": "42P01", "M": "missing"})), sqlite3.OperationalError)
 
+    def test_scoped_lock_uses_shared_store_lock_and_sorted_resource_locks(self) -> None:
+        from tri.pgwire import Result
+
+        class FakeWire:
+            def __init__(self) -> None:
+                self.transaction_status = "I"
+                self.pipelines: list[list[tuple[str, tuple]]] = []
+                self.simples: list[str] = []
+
+            def pipeline(self, statements: list[tuple[str, tuple]]) -> list[Result]:
+                self.pipelines.append(list(statements))
+                if statements and statements[0][0] == "BEGIN":
+                    self.transaction_status = "T"
+                return [Result(columns=[], rows=[], tag="OK") for _ in statements]
+
+            def simple(self, sql: str) -> list[Result]:
+                self.simples.append(sql)
+                if sql in ("COMMIT", "ROLLBACK"):
+                    self.transaction_status = "I"
+                return [Result(columns=[], rows=[], tag=sql)]
+
+            def close(self) -> None:
+                pass
+
+        conn = pgstore.PgConnection.__new__(pgstore.PgConnection)
+        conn.url = "postgres://example/db"
+        conn.schema = "tri_s"
+        conn.row_factory = None
+        conn._write_key = pgstore.lock_key("tri_s")
+        conn._write_scopes = []
+        conn._translations = pgstore.OrderedDict()
+        conn._wire = FakeWire()
+        conn.in_transaction = False
+        conn.closed = False
+
+        # Unscoped write takes the exclusive store-wide lock (GC, migrations, global ops).
+        with conn:
+            conn.execute("INSERT INTO blobs (id) VALUES (?)", ("b1",))
+        unscoped_begin = conn._wire.pipelines[0]
+        self.assertEqual(
+            unscoped_begin,
+            [
+                ("BEGIN", ()),
+                ("SELECT pg_advisory_xact_lock($1::int, $2::int)", (pgstore.LOCK_NAMESPACE, conn._write_key)),
+            ],
+        )
+
+        # Scoped write takes a shared store-wide lock plus sorted per-resource exclusive locks.
+        conn._wire.pipelines.clear()
+        with conn.scoped_lock("target:t1", "workspace:w1", "target:t1"):
+            with conn:
+                conn.execute("UPDATE workspaces SET status = ? WHERE id = ?", ("active", "w1"))
+        scoped_begin = conn._wire.pipelines[0]
+        expected_keys = sorted({pgstore.scope_lock_key("tri_s", "target:t1"), pgstore.scope_lock_key("tri_s", "workspace:w1")})
+        self.assertEqual(
+            scoped_begin,
+            [
+                ("BEGIN", ()),
+                ("SELECT pg_advisory_xact_lock_shared($1::int, $2::int)", (pgstore.LOCK_NAMESPACE, conn._write_key)),
+                ("SELECT pg_advisory_xact_lock($1::int, $2::int)", (pgstore.SCOPE_LOCK_NAMESPACE, expected_keys[0])),
+                ("SELECT pg_advisory_xact_lock($1::int, $2::int)", (pgstore.SCOPE_LOCK_NAMESPACE, expected_keys[1])),
+            ],
+        )
+
+        # Nested scopes union their locks; leaving scoped_lock restores unscoped locking.
+        self.assertEqual(conn._write_scopes, [])
+        conn._wire.pipelines.clear()
+        with conn.scoped_lock("workspace:w1"):
+            with conn.scoped_lock("changeset:c1"):
+                with conn:
+                    conn.execute("UPDATE changesets SET status = ? WHERE id = ?", ("merged", "c1"))
+        nested_begin = conn._wire.pipelines[0]
+        expected_nested = sorted({pgstore.scope_lock_key("tri_s", "workspace:w1"), pgstore.scope_lock_key("tri_s", "changeset:c1")})
+        self.assertEqual([args[1] for _, args in nested_begin[2:]], expected_nested)
+        self.assertEqual(conn._write_scopes, [])
+
 
 def free_port() -> int:
     with socket.socket() as sock:
@@ -213,6 +289,26 @@ class MultiNodeTests(unittest.TestCase):
         proc_a.communicate(timeout=10)
         self.tri(client, "files", "write", ws, "src/after.txt", "--text", "written after failover\n")
         self.assertEqual(self.tri(client, "files", "read", ws, "src/after.txt")["data"]["text"], "written after failover\n")
+
+    def test_scoped_writes_run_concurrently_across_independent_workspaces(self) -> None:
+        self.tri("a", "import", str(self.repo), "--name", "app", "--target", "main")
+        ws1 = self.tri("a", "workspace", "create", "app", "--from", "main")["data"]["id"]
+        ws2 = self.tri("a", "workspace", "create", "app", "--from", "main")["data"]["id"]
+
+        conn1 = pgstore.PgConnection(DATABASE_URL, self.schema)
+        conn2 = pgstore.PgConnection(DATABASE_URL, self.schema)
+        self.addCleanup(conn1.close)
+        self.addCleanup(conn2.close)
+
+        # Two independent workspace scopes must both enter transactions concurrently without blocking.
+        with conn1.scoped_lock(f"workspace:{ws1}"):
+            conn1.execute("BEGIN")
+            with conn2.scoped_lock(f"workspace:{ws2}"):
+                conn2.execute("BEGIN")
+                self.assertTrue(conn1.in_transaction)
+                self.assertTrue(conn2.in_transaction)
+                conn2.commit()
+            conn1.commit()
 
     def test_each_node_reaps_only_its_own_directories(self) -> None:
         self.tri("a", "import", str(self.repo), "--name", "app", "--target", "main")

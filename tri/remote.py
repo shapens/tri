@@ -586,4 +586,13 @@ def dispatch(argv: list[str], url: str) -> dict[str, Any]:
         except OSError as exc:
             return error_envelope(argv, "path_not_found", f"Cannot read {local}: {exc}", object=str(local))
         argv = _without_flag(argv, "--body") + ["--base64", base64.b64encode(content).decode()]
+    if words[:2] in (["changeset", "create"], ["changeset", "describe"], ["changeset", "split"]) and _flag_values(argv, "--description-file"):
+        if _flag_values(argv, "--description"):
+            return error_envelope(argv, "invalid_command", "Pass either --description or --description-file, not both.")
+        local = Path(_flag_values(argv, "--description-file")[0]).expanduser()
+        try:
+            content_text = local.read_text(encoding="utf-8")
+        except OSError as exc:
+            return error_envelope(argv, "path_not_found", f"Cannot read {local}: {exc}", object=str(local))
+        argv = _without_flag(argv, "--description-file") + ["--description", content_text]
     return client.command(argv)

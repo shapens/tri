@@ -257,6 +257,13 @@
       "usage": "tri task create <project> --title <title> [--body <text>] [--body-file <path>] [--acceptance <text>] [--required-check <cmd>] [--check-set <name>]"
     },
     {
+      "data_schema": "schemas/tri.task.list.json",
+      "description": "List policy-readable tasks for a project or store.",
+      "name": "task-list",
+      "schema": "tri.task.list",
+      "usage": "tri task list [project] [--status <status>] [--limit <n>]"
+    },
+    {
       "data_schema": "schemas/tri.task.inspect.json",
       "description": "Inspect an executable task spec.",
       "name": "task-inspect",
@@ -493,6 +500,13 @@
       "name": "files-list",
       "schema": "tri.files.list",
       "usage": "tri files list <workspace-or-snapshot>"
+    },
+    {
+      "data_schema": "schemas/tri.files.ls.json",
+      "description": "Lazily list one directory in a workspace or snapshot tree without flattening the whole repository.",
+      "name": "files-ls",
+      "schema": "tri.files.ls",
+      "usage": "tri files ls <workspace-or-snapshot> [dir]"
     },
     {
       "data_schema": "schemas/tri.files.stat.json",
@@ -842,7 +856,14 @@
       "description": "Create a reviewable changeset from workspace operations.",
       "name": "changeset-create",
       "schema": "tri.changeset.inspect",
-      "usage": "tri changeset create <workspace> [--title <title>] [--visibility <selector>] [--hide-path <glob>] [--hide-package <pkg>]"
+      "usage": "tri changeset create <workspace> [--title <title>] [--description <text> | --description-file <path>] [--visibility <selector>] [--hide-path <glob>] [--hide-package <pkg>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.list.json",
+      "description": "List policy-readable changesets for a project or store.",
+      "name": "changeset-list",
+      "schema": "tri.changeset.list",
+      "usage": "tri changeset list [project] [--workspace <workspace>] [--status <status>] [--limit <n>]"
     },
     {
       "data_schema": "schemas/tri.changeset.inspect.json",
@@ -852,11 +873,25 @@
       "usage": "tri changeset inspect <changeset>"
     },
     {
+      "data_schema": "schemas/tri.changeset.describe.json",
+      "description": "Retroactively update a changeset's title or description without rewriting snapshots or history; records an append-only provenance event.",
+      "name": "changeset-describe",
+      "schema": "tri.changeset.describe",
+      "usage": "tri changeset describe <changeset> [--title <title>] [--description <text> | --description-file <path>] [--reason <text>]"
+    },
+    {
+      "data_schema": "schemas/tri.changeset.refresh.json",
+      "description": "Advance an open changeset's head snapshot, operations, and checks from its active workspace without replacing its id or review threads.",
+      "name": "changeset-refresh",
+      "schema": "tri.changeset.refresh",
+      "usage": "tri changeset refresh <changeset> [--reason <text>]"
+    },
+    {
       "data_schema": "schemas/tri.changeset.split.json",
       "description": "Preview or create a changeset split by path globs or operation ranges.",
       "name": "changeset-split",
       "schema": "tri.changeset.split",
-      "usage": "tri changeset split <changeset> (--paths <glob-list> | --operations <range-list>) [--apply] [--title <title>]"
+      "usage": "tri changeset split <changeset> (--paths <glob-list> | --operations <range-list>) [--apply] [--title <title>] [--description <text> | --description-file <path>]"
     },
     {
       "data_schema": "schemas/tri.changeset.stack.json",
@@ -913,6 +948,13 @@
       "name": "review-create",
       "schema": "tri.review.create",
       "usage": "tri review create <changeset> [--reviewers <principal>]"
+    },
+    {
+      "data_schema": "schemas/tri.review.list.json",
+      "description": "List policy-readable reviews for a project or store.",
+      "name": "review-list",
+      "schema": "tri.review.list",
+      "usage": "tri review list [project] [--changeset <changeset>] [--status <status>] [--limit <n>]"
     },
     {
       "data_schema": "schemas/tri.review.inspect.json",

@@ -195,6 +195,32 @@ class RemoteModeTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(fetched["files"][0]["content"]), bytes(range(256)))
         self.assertEqual(fetched["missing"], ["missing.txt"])
 
+    def test_remote_changeset_describe_uploads_description_file_and_raw_api_refuses_server_path(self) -> None:
+        ws = self.tri("workspace", "create", "app", "--from", "main")["data"]["id"]
+        self.tri("files", "write", ws, "src/app.py", "--text", "print('v2')\n")
+        cs = self.tri("changeset", "create", ws, "--title", "Initial remote title")["data"]["id"]
+        local_desc = self.root / "remote-desc.md"
+        local_desc.write_text("Uploaded from client disk.\n", encoding="utf-8")
+        described = self.tri("changeset", "describe", cs, "--title", "Refined remote title", "--description-file", str(local_desc))["data"]
+        self.assertEqual(described["title"], "Refined remote title")
+        self.assertEqual(described["description"], "Uploaded from client disk.\n")
+
+        req = request.Request(
+            f"{self.url}/v0/command",
+            data=json.dumps({"argv": ["changeset", "describe", cs, "--description-file", str(self.root / "tokens.json")]}).encode(),
+            method="POST",
+        )
+        req.add_header("Authorization", f"Bearer {self.token}")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with request.urlopen(req, timeout=10) as response:
+                body = json.loads(response.read())
+        except HTTPError as exc:
+            body = json.loads(exc.read())
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["diagnostics"][0]["code"], "policy_denied")
+        self.assertEqual(body["diagnostics"][0]["reason"], "server_path")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,12 @@
+{
+  "$id": "schemas/tri.changeset.list.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "required": [
+    "project",
+    "changesets",
+    "redacted"
+  ],
+  "title": "tri.changeset.list",
+  "type": "object",
+  "x-tri-schema-version": "0.1.0"
+}

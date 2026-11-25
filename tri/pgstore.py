@@ -22,6 +22,7 @@ Each store lives in its own schema. Connections are pooled per process.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -35,7 +36,8 @@ from tri.pgwire import PgConnectionError, PgError, Result, redact_dsn
 
 DATABASE_URL_ENV = "TRI_DATABASE_URL"
 DATABASE_SCHEMA_ENV = "TRI_DATABASE_SCHEMA"
-LOCK_NAMESPACE = 0x7472  # "tr"
+LOCK_NAMESPACE = 0x7472  # "tr" — store-wide lock (shared by scoped writers, exclusive for global ops)
+SCOPE_LOCK_NAMESPACE = 0x7473  # "ts" — per-resource lock (workspace, target, changeset, ...)
 WRITE_LOCK_TIMEOUT = os.environ.get("TRI_DATABASE_LOCK_TIMEOUT", "120s")
 
 
@@ -254,6 +256,10 @@ def lock_key(schema: str) -> int:
     return int.from_bytes(hashlib.sha256(schema.encode()).digest()[:4], "big", signed=True)
 
 
+def scope_lock_key(schema: str, scope: str) -> int:
+    return int.from_bytes(hashlib.sha256(f"{schema}\0{scope}".encode()).digest()[:4], "big", signed=True)
+
+
 class PgConnection:
     """A ``sqlite3.Connection`` stand-in bound to one schema."""
 
@@ -262,10 +268,41 @@ class PgConnection:
         self.schema = schema
         self.row_factory = None  # accepted for compatibility; rows are always Row
         self._write_key = lock_key(schema)
+        self._write_scopes: list[tuple[str, ...]] = []
         self._translations: OrderedDict[str, tuple[str, bool]] = OrderedDict()
         self._wire = self._open()
         self.in_transaction = False
         self.closed = False
+
+    @contextlib.contextmanager
+    def scoped_lock(self, *scopes: str) -> Iterator[None]:
+        """Serialize writes only against matching scopes (plus global store ops).
+
+        Transactions started inside ``scoped_lock`` acquire a *shared* store-wide
+        advisory lock and an *exclusive* advisory lock per scope (sorted by key
+        to prevent deadlocks). Unscoped transactions (GC, schema migrations,
+        backups, global operations) acquire the *exclusive* store-wide lock and
+        therefore wait for active scoped writers without blocking unrelated
+        workspaces or targets from writing concurrently."""
+        cleaned = tuple(sorted({scope for scope in scopes if scope}))
+        self._write_scopes.append(cleaned)
+        try:
+            yield
+        finally:
+            self._write_scopes.pop()
+
+    def _begin_statements(self) -> list[tuple[str, tuple[Any, ...]]]:
+        active_scopes = {scope for group in self._write_scopes for scope in group}
+        if active_scopes:
+            keys = sorted({scope_lock_key(self.schema, scope) for scope in active_scopes})
+            statements: list[tuple[str, tuple[Any, ...]]] = [
+                ("BEGIN", ()),
+                ("SELECT pg_advisory_xact_lock_shared($1::int, $2::int)", (LOCK_NAMESPACE, self._write_key)),
+            ]
+            for key in keys:
+                statements.append(("SELECT pg_advisory_xact_lock($1::int, $2::int)", (SCOPE_LOCK_NAMESPACE, key)))
+            return statements
+        return [("BEGIN", ()), ("SELECT pg_advisory_xact_lock($1::int, $2::int)", (LOCK_NAMESPACE, self._write_key))]
 
     def _open(self) -> WireConnection:
         try:
@@ -286,7 +323,7 @@ class PgConnection:
         self._wire = self._open()
 
     def _begin(self) -> None:
-        statements = [("BEGIN", ()), ("SELECT pg_advisory_xact_lock($1::int, $2::int)", (LOCK_NAMESPACE, self._write_key))]
+        statements = self._begin_statements()
         try:
             try:
                 self._wire.pipeline(statements)
@@ -459,6 +496,7 @@ def release(conn: PgConnection) -> None:
     """Return a connection to the pool (or close it if it is mid-transaction)."""
     if conn.closed:
         return
+    conn._write_scopes.clear()
     if not conn.healthy():
         conn.close()
         return

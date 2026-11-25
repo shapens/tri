@@ -222,6 +222,24 @@
     {
       "authenticated": true,
       "method": "GET",
+      "name": "project_tasks",
+      "path": "/v0/projects/<project>/tasks?status=open&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_changesets",
+      "path": "/v0/projects/<project>/changesets?status=ready&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "project_reviews",
+      "path": "/v0/projects/<project>/reviews?status=open&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
       "name": "project_search",
       "path": "/v0/projects/<project>/search?q=<query>&scope=workspaces&include_history=true"
     },
@@ -294,6 +312,12 @@
     {
       "authenticated": true,
       "method": "GET",
+      "name": "tasks",
+      "path": "/v0/tasks?project=<project>&status=open&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
       "name": "task",
       "path": "/v0/tasks/<task>"
     },
@@ -320,6 +344,12 @@
       "method": "GET",
       "name": "snapshot_files",
       "path": "/v0/snapshots/<snapshot>/files"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "snapshot_tree",
+      "path": "/v0/snapshots/<snapshot>/tree?dir=src"
     },
     {
       "authenticated": true,
@@ -356,6 +386,12 @@
       "method": "GET",
       "name": "workspace_files",
       "path": "/v0/workspaces/<workspace>/files"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "workspace_tree",
+      "path": "/v0/workspaces/<workspace>/tree?dir=src"
     },
     {
       "authenticated": true,
@@ -408,6 +444,12 @@
     {
       "authenticated": true,
       "method": "GET",
+      "name": "changesets",
+      "path": "/v0/changesets?project=<project>&workspace=<workspace>&status=ready&limit=50"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
       "name": "changeset",
       "path": "/v0/changesets/<changeset>"
     },
@@ -428,6 +470,12 @@
       "method": "GET",
       "name": "changeset_diff",
       "path": "/v0/changesets/<changeset>/diff?mode=patch&path=src/app.ts"
+    },
+    {
+      "authenticated": true,
+      "method": "GET",
+      "name": "reviews",
+      "path": "/v0/reviews?project=<project>&changeset=<changeset>&status=open&limit=50"
     },
     {
       "authenticated": true,
